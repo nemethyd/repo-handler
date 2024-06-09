@@ -1,15 +1,12 @@
 #!/bin/bash
 
 DEBUG_MODE=$1
-package_name=$2
-package_version=$3
-package_repo=$4
-repo_path=$5
-LOCAL_REPO_PATH=$6
+shift
+packages=("$@")
 
 # If debug mode is 2, start bashdb
 if [ "$DEBUG_MODE" -eq 2 ]; then
-    exec bashdb "$0" "$DEBUG_MODE" "$package_name" "$package_version" "$package_repo" "$repo_path" "$LOCAL_REPO_PATH"
+    exec bashdb "$0" "$DEBUG_MODE" "${packages[@]}"
 fi
 
 # If debug mode is 3, enable tracing
@@ -23,22 +20,14 @@ get_package_status() {
     local package_version=$2
     local repo_path=$3
 
-    # Extract the epoch if present
     if [[ $package_version =~ ([0-9]+):(.+) ]]; then
         local version=${BASH_REMATCH[2]}
     else
         local version=$package_version
     fi
 
-    # Construct the full package filename pattern
     local package_pattern="${repo_path}/getPackage/${package_name}-${version}*.rpm"
 
-    # Debug output for package pattern
-    if [ "$DEBUG_MODE" -ge 1 ]; then
-        echo "Package: $package_name, Version: $package_version, Epoch: ${BASH_REMATCH[1]}, Pattern: $package_pattern" >&2
-    fi
-
-    # Determine package status
     if compgen -G "$package_pattern" > /dev/null; then
         echo "EXISTS"
     elif compgen -G "$repo_path/getPackage/${package_name}"*.rpm > /dev/null; then
@@ -48,68 +37,57 @@ get_package_status() {
     fi
 }
 
-# Function to download a package
-download_package() {
-    local package_name=$1
-    local package_version=$2
-    local repo_path=$3
+# Function to download packages
+download_packages() {
+    local packages=("$@")
+    local repo_path
+    local package_name
+    local package_version
 
-    # Ensure the getPackage subdirectory exists
-    mkdir -p "$repo_path/getPackage"
+    declare -A repo_packages
 
-    # Debug output for package downloading
-    if [ "$DEBUG_MODE" -ge 1 ]; then
-        echo "Downloading $package_name-$package_version to $repo_path/getPackage"
-    fi
+    for pkg in "${packages[@]}"; do
+        IFS="@" read -r pkg_info repo_path <<< "$pkg"
+        IFS="-" read -r package_name package_version <<< "$pkg_info"
 
-    # Suppress metadata expiration message by filtering it out
-    dnf download --arch=x86_64,noarch --destdir="$repo_path/getPackage" --resolve "$package_name-$package_version" | grep -v "metadata expiration check"
+        repo_packages["$repo_path"]+="$package_name-$package_version "
+    done
 
-    if [[ $? -eq 0 ]]; then
-        # Debug output for package downloading
+    for repo_path in "${!repo_packages[@]}"; do
+        # Ensure the getPackage subdirectory exists
+        mkdir -p "$repo_path/getPackage"
+
+        # Download packages
         if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Download successful for $package_name-$package_version"
+            echo "Downloading packages to $repo_path/getPackage: ${repo_packages[$repo_path]}"
         fi
-        for file in "$repo_path/getPackage/${package_name}-${package_version}"*.rpm; do
-            echo "$file"
-        done
-    else
-        echo "Download failed for $package_name-$package_version"
-    fi
+        dnf download --arch=x86_64,noarch --destdir="$repo_path/getPackage" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"
+    done
 }
 
-# Function to remove existing package files
-remove_existing_packages() {
-    local package_name=$1
-    local repo_path=$2
+# Handle the packages based on their status
+for pkg in "${packages[@]}"; do
+    IFS="@" read -r pkg_info repo_path <<< "$pkg"
+    IFS="-" read -r package_name package_version <<< "$pkg_info"
 
-    echo "Removing existing packages for $package_name from $repo_path/getPackage"
-    rm -f "$repo_path/getPackage/${package_name}"*.rpm
-}
+    package_status=$(get_package_status "$package_name" "$package_version" "$repo_path")
 
-# Main processing logic
-repo_path=$(dirname "$repo_path")  # Ensure repo_path points to the correct directory
+    case $package_status in
+        "EXISTS")
+            echo -e "\e[32m$repo_path: $package_name-$package_version is already there.\e[0m"
+            ;;
+        "NEW")
+            echo -e "\e[33mDownloading new package: $package_name-$package_version...\e[0m"
+            ;;
+        "UPDATE")
+            echo -e "\e[34mUpdating package: $package_name-$package_version...\e[0m"
+            remove_existing_packages "$package_name" "$repo_path"
+            ;;
+        *)
+            echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.\e[0m"
+            ;;
+    esac
+done
 
-# Determine the package status
-package_status=$(get_package_status "$package_name" "$package_version" "$repo_path")
-
-# Handle the package based on its status
-case $package_status in
-    "EXISTS")
-        echo "$repo_path: $package_name-$package_version is already there."
-        ;;
-    "NEW")
-        echo -n -e "\e[33m"
-        download_package "$package_name" "$package_version" "$repo_path"
-        echo -n -e "\e[0m"
-        ;;
-    "UPDATE")
-        echo -n -e "\e[34m"
-        remove_existing_packages "$package_name" "$repo_path"
-        download_package "$package_name" "$package_version" "$repo_path"
-        echo -n -e "\e[0m"
-        ;;
-    *)
-        echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.\e[0m"
-        ;;
-esac
+# Download all packages in batch
+download_packages "${packages[@]}"
