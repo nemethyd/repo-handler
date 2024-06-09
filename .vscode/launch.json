@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "bashdb",
+        "request": "launch",
+        "name": "Bash-Debug (simplest configuration)",
+        "program": "/home/nemethy/local-repo/repo-handler/myrepo.sh",
+        "cwd": "/home/nemethy/local-repo/repo-handler",
+        "pathBash": "/usr/bin/bash",
+        "pathBashdb": "/usr/share/bashdb/bashdb",
+        "pathBashdbLib": "/usr/share/bashdb",
+        "pathCat": "/bin/cat",
+        "pathMkfifo": "/usr/bin/mkfifo",
+        "pathPkill": "/usr/bin/pkill",
+        "showDebugOutput": false,
+        "trace": false,
+        "args": [],
+        "env": {
+          "DEBUG_MODE": "0"  
+        }
+      }
+    ]
+  }
+  
