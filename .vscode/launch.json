@@ -17,7 +17,8 @@
         "trace": false,
         "args": [],
         "env": {
-          "DEBUG_MODE": "0"  
+          "DEBUG_MODE": "1",
+          "MAX_PACKAGES": "3" 
         }
       }
     ]

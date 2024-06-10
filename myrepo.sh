@@ -55,33 +55,38 @@ for line in "${package_lines[@]}"; do
         [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping line: $line"
         continue
     fi
-    
-    if [[ "$line" =~ ^([^[:space:]]+)\.([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+@([^[:space:]]+)$ ]]; then
+        
+    if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+) ]]; then
         package_name=${BASH_REMATCH[1]}
         package_arch=${BASH_REMATCH[2]}
         package_version=${BASH_REMATCH[3]}
         package_repo=${BASH_REMATCH[4]}
-
-        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $package_version, Repo: $package_repo"
-
+        
+        # Extract epoch if present
+        if [[ $package_version =~ ([0-9]+):(.+) ]]; then
+            epoch=${BASH_REMATCH[1]}
+            version=${BASH_REMATCH[2]}
+        else
+            epoch=""
+            version=$package_version
+        fi
+        
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $version, Epoch: $epoch, Repo: $package_repo"
+        
         repo_path=$(get_repo_path "$package_repo")
         if [[ -n "$repo_path" ]]; then
             used_directories["$repo_path"]=1
-            batch_packages+=("$package_name||$package_version|$package_arch|$repo_path")
+            batch_packages+=("$package_name|$epoch|$version|$package_arch|$repo_path")
         fi
-
-        [ "$DEBUG_MODE" -ge 1 ] && echo "Before incrementing batch_counter: $batch_counter"
+        
         ((batch_counter++))
-        [ "$DEBUG_MODE" -ge 1 ] && echo "After incrementing batch_counter: $batch_counter"
-
-        if (( MAX_PACKAGES > 0 )); then
-            ((package_counter++))
-            if (( package_counter >= MAX_PACKAGES )); then
-                echo "Processed $MAX_PACKAGES packages. Stopping."
-                break
-            fi
+        ((package_counter++))
+        
+        if (( MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES )); then
+            echo "Processed $MAX_PACKAGES packages. Stopping."
+            break
         fi
-
+        
         if (( batch_counter >= BATCH_SIZE )); then
             break
         fi
@@ -110,7 +115,7 @@ if (( MAX_PACKAGES == 0 )); then
         echo "Updating repository at $parent_dir..."
         createrepo --update "$parent_dir"
     done
-
+    
     echo "Syncing $SHARED_REPO_PATH with $LOCAL_REPO_PATH..."
     rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
     if [ $? -eq 0 ]; then
