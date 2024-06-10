@@ -12,7 +12,7 @@ fi
 MAX_PACKAGES=${MAX_PACKAGES:-0}
 
 # Set the maximum number of parallel jobs
-MAX_PARALLEL_JOBS=16
+MAX_PARALLEL_JOBS=4
 
 # Set the batch size for processing packages
 BATCH_SIZE=10
@@ -26,18 +26,23 @@ echo -e "\e[0m"
 # Determine the directory of the current script
 SCRIPT_DIR=$(dirname "$BASH_SOURCE")
 
-# Local repository path
+# Local and shared repository paths
 LOCAL_REPO_PATH="/repo"
+SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 
 # Temporary file to store the list of installed packages
 INSTALLED_PACKAGES_FILE=$(mktemp)
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
 dnf list --installed > "$INSTALLED_PACKAGES_FILE"
+if [ $? -ne 0 ]; then
+    echo "Failed to fetch the list of installed packages." >&2
+    exit 1
+fi
 
 # Define the mapping of virtual repositories to actual repositories
 declare -A virtual_repo_map
-virtual_repo_map=( ["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" )
+virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL")
 
 get_repo_path() {
     local package_repo=$1
@@ -53,8 +58,16 @@ declare -A identified_packages
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
 initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
+if [ $? -ne 0 ]; then
+    echo "Failed to collect the initial list of RPM files." >&2
+    exit 1
+fi
 
 mapfile -t package_lines < "$INSTALLED_PACKAGES_FILE"
+if [ $? -ne 0 ]; then
+    echo "Failed to read the installed packages file." >&2
+    exit 1
+fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
 
@@ -94,20 +107,30 @@ for line in "${package_lines[@]}"; do
 
         batch_packages+=("$package_name-$package_version@$repo_path")
 
-        ((batch_counter++))
+        let batch_counter++
+        if [ "$DEBUG_MODE" -ge 1 ]; then
+            echo "Batch counter: $batch_counter" >&2
+        fi
 
-        if ((batch_counter >= BATCH_SIZE)); then
+        if (( batch_counter >= BATCH_SIZE )); then
             wait_for_jobs
 
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for batch..."
-            "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
+            if [ "$DEBUG_MODE" -ge 1 ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for batch: ${batch_packages[@]}" >&2
+            fi
+
+            "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &> "process-package-${batch_counter}.log" &
+            if [ $? -ne 0 ]; then
+                echo "Failed to start process-package.sh for batch." >&2
+                exit 1
+            fi
 
             batch_packages=()
             batch_counter=0
         fi
 
         if (( MAX_PACKAGES > 0 )); then
-            package_counter=$((package_counter + 1))
+            let package_counter++
             if (( package_counter >= MAX_PACKAGES )); then
                 echo "Processed $MAX_PACKAGES packages. Stopping." >&2
                 break
@@ -121,11 +144,18 @@ for line in "${package_lines[@]}"; do
 done
 
 # Process any remaining packages in the batch
-if ((batch_counter > 0)); then
+if (( batch_counter > 0 )); then
     wait_for_jobs
 
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for remaining batch..."
-    "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
+    if [ "$DEBUG_MODE" -ge 1 ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for remaining batch: ${batch_packages[@]}" >&2
+    fi
+
+    "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &> "process-package-final.log" &
+    if [ $? -ne 0 ]; then
+        echo "Failed to start process-package.sh for remaining batch." >&2
+        exit 1
+    fi
 fi
 
 # Wait for all background jobs to finish
@@ -149,5 +179,14 @@ for dir in "${!used_directories[@]}"; do
 done
 
 rm "$INSTALLED_PACKAGES_FILE"
+
+echo "Syncing $SHARED_REPO_PATH with $LOCAL_REPO_PATH..."
+rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
+if [ $? -eq 0 ]; then
+    echo "Sync completed successfully."
+else
+    echo "Error occurred during sync." >&2
+    exit 1
+fi
 
 echo "All packages have been processed and repositories have been updated."
