@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Script version
+VERSION=5
+
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
@@ -31,7 +34,7 @@ get_repo_path() {
     if [[ -n "$repo_key" ]]; then
         echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
     else
-        echo ""
+        echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
     fi
 }
 
@@ -45,7 +48,6 @@ mapfile -t package_lines < "$INSTALLED_PACKAGES_FILE"
 # Processing installed packages
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
 package_counter=0
-batch_counter=0
 batch_packages=()
 
 for line in "${package_lines[@]}"; do
@@ -55,7 +57,7 @@ for line in "${package_lines[@]}"; do
         [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping line: $line"
         continue
     fi
-        
+    
     if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+) ]]; then
         package_name=${BASH_REMATCH[1]}
         package_arch=${BASH_REMATCH[2]}
@@ -79,19 +81,27 @@ for line in "${package_lines[@]}"; do
             batch_packages+=("$package_name|$epoch|$version|$package_arch|$repo_path")
         fi
         
-        ((batch_counter++))
         ((package_counter++))
         
         if (( MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES )); then
             echo "Processed $MAX_PACKAGES packages. Stopping."
             break
         fi
-        
-        if (( batch_counter >= BATCH_SIZE )); then
-            break
+
+        # Check if we have reached the batch size
+        if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
+             [ "$DEBUG_MODE" -ge 1 ] && echo ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}"
+            ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}" &
+            batch_packages=()
+            wait_for_jobs
         fi
     fi
 done
+
+# Process any remaining packages in the last batch
+if (( ${#batch_packages[@]} > 0 )); then
+    ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}"
+fi
 
 # Wait for any background jobs to finish
 wait_for_jobs() {
@@ -100,14 +110,6 @@ wait_for_jobs() {
     done
 }
 
-if (( batch_counter > 0 )); then
-    for batch in "${batch_packages[@]}"; do
-        ./process-package.sh "$DEBUG_MODE" "$batch" &
-        wait_for_jobs
-    done
-fi
-
-# If MAX_PACKAGES is set and greater than zero, skip repository updates and syncing
 if (( MAX_PACKAGES == 0 )); then
     echo "Updating repositories in used directories..."
     for dir in "${!used_directories[@]}"; do
@@ -132,3 +134,5 @@ fi
 rm "$INSTALLED_PACKAGES_FILE"
 
 echo "All packages have been processed."
+
+echo "myrepo.sh Version $VERSION completed."

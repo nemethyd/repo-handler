@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Script version
+VERSION=5
+
 DEBUG_MODE=$1
 [ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
 
@@ -22,15 +25,11 @@ get_package_status() {
 
     [ "$DEBUG_MODE" -ge 1 ] && echo "name=$package_name epoch=$epoch version=$package_version arch=$package_arch path=$repo_path" >&2
 
-    if [[ -n "$epoch" ]]; then
-        local package_pattern="${repo_path}/${package_name}-${epoch}:${package_version}.${package_arch}.rpm"
-    else
-        local package_pattern="${repo_path}/${package_name}-${package_version}.${package_arch}.rpm"
-    fi
+    local package_pattern="${repo_path}/${package_name}-${package_version}.${package_arch}.rpm"
 
     if compgen -G "$package_pattern" > /dev/null; then
         echo "EXISTS"
-    elif compgen -G "${repo_path}/${package_name}-${epoch}:${package_version}*.rpm" > /dev/null; then
+    elif compgen -G "${repo_path}/${package_name}-${epoch}:${package_version}.${package_arch}.rpm" > /dev/null; then
         echo "EXISTS"
     elif compgen -G "${repo_path}/${package_name}-*.rpm" > /dev/null; then
         echo "UPDATE"
@@ -60,12 +59,9 @@ download_packages() {
     declare -A repo_packages
 
     for pkg in "${packages[@]}"; do
-        IFS="|" read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
-        if [[ -n "$epoch" ]]; then
-            repo_packages["$repo_path"]+="$package_name-$epoch:$package_version.$package_arch "
-        else
-            repo_packages["$repo_path"]+="$package_name-$package_version.$package_arch "
-        fi
+        IFS='|' read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
+        [ -n "$epoch" ] && package_version="${epoch}:${package_version}"
+        repo_packages["$repo_path"]+="$package_name-$package_version.$package_arch "
     done
 
     for repo_path in "${!repo_packages[@]}"; do
@@ -81,37 +77,33 @@ download_packages() {
 
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
-    IFS="|" read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
+    IFS='|' read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
 
     package_status=$(get_package_status "$package_name" "$epoch" "$package_version" "$package_arch" "$repo_path")
-    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$epoch:$package_version.$package_arch" >&2; exit 1; }
+    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
 
     case $package_status in
         "EXISTS")
-            echo -e "\e[32m$repo_path: $package_name-$epoch:$package_version.$package_arch exists.\e[0m"
+            [ "$DEBUG_MODE" -ge 1 ] && echo -e "\e[32m$repo_path: $package_name-$package_version.$package_arch exists.\e[0m"
             ;;
         "NEW")
-            echo -e "\e[33mDownloading new package: $package_name-$epoch:$package_version.$package_arch...\e[0m"
+            [ "$DEBUG_MODE" -ge 1 ] && echo -e "\e[33mDownloading new package: $package_name-$package_version.$package_arch...\e[0m"
             if ! download_packages "$pkg"; then
-                echo "Failed to download new package: $package_name-$epoch:$package_version.$package_arch" >&2
+                echo "Failed to download new package: $package_name-$package_version.$package_arch" >&2
                 exit 1
             fi
             ;;
         "UPDATE")
-            echo -e "\e[34mUpdating package: $package_name-$epoch:$package_version.$package_arch...\e[0m"
+            [ "$DEBUG_MODE" -ge 1 ] && echo -e "\e[34mUpdating package: $package_name-$package_version.$package_arch...\e[0m"
             if ! remove_existing_packages "$package_name" "$repo_path" || ! download_packages "$pkg"; then
-                echo "Failed to update package: $package_name-$epoch:$package_version.$package_arch" >&2
+                echo "Failed to update package: $package_name-$package_version.$package_arch" >&2
                 exit 1
             fi
             ;;
         *)
-            echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$epoch:$package_version.$package_arch.\e[0m"
+            echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.$package_arch.\e[0m"
             ;;
     esac
 done
 
-# Download all packages in batch
-if ! download_packages "${packages[@]}"; then
-    echo "Failed to download packages in batch." >&2
-    exit 1
-fi
+[ "$DEBUG_MODE" -ge 1 ] && echo "process-package.sh Version $VERSION completed."
