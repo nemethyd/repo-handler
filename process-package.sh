@@ -60,8 +60,7 @@ download_packages() {
     declare -A repo_packages
 
     for pkg in "${packages[@]}"; do
-        IFS="@" read -r pkg_info repo_path <<< "$pkg"
-        IFS="|" read -r package_name epoch package_version package_arch <<< "$pkg_info"
+        IFS="|" read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
         if [[ -n "$epoch" ]]; then
             repo_packages["$repo_path"]+="$package_name-$epoch:$package_version.$package_arch "
         else
@@ -82,8 +81,7 @@ download_packages() {
 
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
-    IFS="@" read -r pkg_info repo_path <<< "$pkg"
-    IFS="|" read -r package_name epoch package_version package_arch <<< "$pkg_info"
+    IFS="|" read -r package_name epoch package_version package_arch repo_path <<< "$pkg"
 
     package_status=$(get_package_status "$package_name" "$epoch" "$package_version" "$package_arch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$epoch:$package_version.$package_arch" >&2; exit 1; }
