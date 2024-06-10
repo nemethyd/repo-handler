@@ -15,8 +15,8 @@ packages=("$@")
 # Function to determine the status of a package
 get_package_status() {
     local package_name=$1
-    local package_version=$2
-    local epoch=$3
+    local epoch=$2
+    local package_version=$3
     local repo_path=$4
 
     [ "$DEBUG_MODE" -ge 1 ] && echo "name=$package_name epoch=$epoch version=$package_version path=$repo_path" >&2
@@ -57,7 +57,7 @@ download_packages() {
 
     for pkg in "${packages[@]}"; do
         IFS="@" read -r pkg_info repo_path <<< "$pkg"
-        IFS="|" read -r package_name package_version epoch <<< "$pkg_info"
+        IFS="|" read -r package_name epoch package_version <<< "$pkg_info"
         if [[ -n "$epoch" ]]; then
             repo_packages["$repo_path"]+="$package_name-$epoch:$package_version "
         else
@@ -79,10 +79,10 @@ download_packages() {
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
     IFS="@" read -r pkg_info repo_path <<< "$pkg"
-    IFS="|" read -r package_name package_version epoch <<< "$pkg_info"
+    IFS="|" read -r package_name epoch package_version <<< "$pkg_info"
 
-    package_status=$(get_package_status "$package_name" "$package_version" "$epoch" "$repo_path")
-    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
+    package_status=$(get_package_status "$package_name" "$epoch" "$package_version" "$repo_path")
+    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$epoch:$package_version" >&2; exit 1; }
 
     case $package_status in
         "EXISTS")

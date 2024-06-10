@@ -1,52 +1,18 @@
 #!/bin/bash
 
-# Set debugging mode based on DEBUG_MODE environment variable
-DEBUG_MODE=${DEBUG_MODE:-0}
-
-# Enable tracing if in tracing mode
-if [ "$DEBUG_MODE" -ge 3 ]; then
-    set -x
-fi
-
-# Set the maximum number of packages to process
-MAX_PACKAGES=${MAX_PACKAGES:-0}
-
-# Set the maximum number of parallel jobs
+MAX_PACKAGES=3
 MAX_PARALLEL_JOBS=2
-
-# Set the batch size for processing packages
 BATCH_SIZE=10
-
-# Determine the directory of the current script
-SCRIPT_DIR=$(dirname "$BASH_SOURCE")
-
-# Local repository path
-LOCAL_REPO_PATH="/repo"
-
-# Shared repository path
-SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-
-# Temporary file to store the list of installed packages
+SCRIPT_DIR=$(dirname "$0")
+LOCAL_REPO_PATH=/repo
+SHARED_REPO_PATH=/mnt/hgfs/ForVMware/ol9_repos
 INSTALLED_PACKAGES_FILE=$(mktemp)
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
-if ! dnf list --installed > "$INSTALLED_PACKAGES_FILE"; then
-    echo "Failed to fetch list of installed packages" >&2
-    exit 1
-fi
+dnf list --installed > "$INSTALLED_PACKAGES_FILE"
 
-# Define the mapping of virtual repositories to actual repositories
 declare -A virtual_repo_map
 virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL")
-
-get_repo_path() {
-    local package_repo=$1
-    if [[ -n "${virtual_repo_map[$package_repo]}" ]]; then
-        echo "$LOCAL_REPO_PATH/${virtual_repo_map[$package_repo]}/getPackage"
-    else
-        echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
-    fi
-}
 
 declare -A used_directories
 declare -A identified_packages
@@ -57,130 +23,71 @@ initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*
 mapfile -t package_lines < "$INSTALLED_PACKAGES_FILE"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
-
 package_counter=0
 batch_counter=0
 batch_packages=()
 
-wait_for_jobs() {
-    while (( $(jobs -r | wc -l) >= MAX_PARALLEL_JOBS )); do
-        sleep 1
-    done
+get_repo_path() {
+    local package_repo=$1
+    local repo_dir
+
+    repo_dir=${virtual_repo_map[$package_repo]}
+    if [[ -n "$repo_dir" ]]; then
+        echo "$LOCAL_REPO_PATH/$repo_dir/getPackage"
+    else
+        echo ""
+    fi
 }
 
 for line in "${package_lines[@]}"; do
-    if [ "$DEBUG_MODE" -ge 1 ]; then
-        echo "Processing line: $line" >&2
-    fi
+    [ "$DEBUG_MODE" -ge 1 ] && echo "Processing line: $line"
 
-    if [[ $line =~ ^Installed\ Packages$ || $line =~ ^Waiting ]]; then
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Skipping line: $line" >&2
-        fi
+    if [[ "$line" =~ ^Installed\ Packages$ ]]; then
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping line: $line"
         continue
     fi
 
-    if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+) ]]; then
-        package_name=${BASH_REMATCH[1]}
-        package_version=${BASH_REMATCH[3]}
-        package_repo=${BASH_REMATCH[4]}
+    if [[ "$line" =~ ^([^ ]+)\.([^ ]+)\ +([^ ]+)\ +@([^ ]+)\ *$ ]]; then
+        package_name="${BASH_REMATCH[1]}"
+        package_arch="${BASH_REMATCH[2]}"
+        package_version="${BASH_REMATCH[3]}"
+        package_repo="${BASH_REMATCH[4]}"
 
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Matched package: $package_name, Version: $package_version, Repo: $package_repo" >&2
-        fi
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $package_version, Repo: $package_repo"
 
         repo_path=$(get_repo_path "$package_repo")
+        if [[ -z "$repo_path" ]]; then
+            [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping package due to unknown repo: $package_name-$package_version@$package_repo"
+            continue
+        fi
+
+        if [[ "$package_version" =~ ([0-9]+):(.+) ]]; then
+            epoch="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
+        else
+            epoch=""
+            version="$package_version"
+        fi
+
         used_directories["$repo_path"]=1
+        batch_packages+=("$package_name|$epoch|$version|$repo_path")
 
-        batch_packages+=("$package_name-$package_version@$repo_path")
-
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Before incrementing batch_counter: $batch_counter" >&2
-        fi
-
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Before incrementing batch_counter: $batch_counter"
         batch_counter=$((batch_counter + 1))
+        [ "$DEBUG_MODE" -ge 1 ] && echo "After incrementing batch_counter: $batch_counter"
 
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "After incrementing batch_counter: $batch_counter" >&2
-        fi
-
-        if (( batch_counter >= BATCH_SIZE )); then
-            wait_for_jobs
-
-            if [ "$DEBUG_MODE" -ge 1 ]; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for batch: ${batch_packages[@]}" >&2
-            fi
-
-            "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
-
-            if [ "$DEBUG_MODE" -ge 1 ]; then
-                echo "Started process-package.sh with PID $!" >&2
-            fi
-
-            batch_packages=()
-            batch_counter=0
-        fi
-
-        if (( MAX_PACKAGES > 0 )); then
-            package_counter=$((package_counter + 1))
-            if (( package_counter >= MAX_PACKAGES )); then
-                echo "Processed $MAX_PACKAGES packages. Stopping." >&2
-                break
-            fi
-        fi
-    else
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "No match for line: $line" >&2
-        fi
+        (( package_counter++ ))
+        (( batch_counter >= BATCH_SIZE )) && { wait_for_jobs; batch_counter=0; }
+        (( package_counter >= MAX_PACKAGES )) && { echo "Processed $MAX_PACKAGES packages. Stopping."; break; }
     fi
 done
 
-# Process any remaining packages in the batch
 if (( batch_counter > 0 )); then
-    wait_for_jobs
-
-    if [ "$DEBUG_MODE" -ge 1 ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for remaining batch: ${batch_packages[@]}" >&2
-    fi
-
-    "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
-
-    if [ "$DEBUG_MODE" -ge 1 ]; then
-        echo "Started process-package.sh with PID $!" >&2
-    fi
-fi
-
-# Wait for all background jobs to finish
-wait
-
-if (( MAX_PACKAGES == 0 )); then
-    echo "Removing obsolete packages..."
-    for file in "${initial_rpm_files[@]}"; do
-        if [[ -z "${identified_packages["$file"]}" ]]; then
-            echo "Removing obsolete package $file"
-            rm -f "$file"
-        fi
-    done
-
-    echo "Updating repositories in used directories..."
-    for dir in "${!used_directories[@]}"; do
-        parent_dir=$(dirname "$dir")
-        echo "Updating repository at $parent_dir..."
-        createrepo --update "$parent_dir"
-    done
-
-    echo "Syncing local repository to shared repository..."
-    rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
-    if [ $? -ne 0 ]; then
-        echo "Failed to sync local repository to shared repository" >&2
-        exit 1
-    fi
-
-    echo "Sync complete. All packages have been processed and repositories have been updated."
-else
-    echo "Skipping metadata update and sync due to MAX_PACKAGES setting."
+    [ "$DEBUG_MODE" -ge 1 ] && echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting process-package.sh for remaining batch: ${batch_packages[*]}"
+    ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}" &
+    echo "Started process-package.sh with PID $!"
+    wait
 fi
 
 rm "$INSTALLED_PACKAGES_FILE"
-
-
+echo "Skipping metadata update and sync due to MAX_PACKAGES setting."
