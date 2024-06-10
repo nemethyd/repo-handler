@@ -14,11 +14,18 @@ packages=("$@")
 
 # Function to determine the status of a package
 get_package_status() {
-    local package_name=$1
-    local package_version=$2
+    local package_name
+    local package_version
     local repo_path=$3
 
-    [[ $package_version =~ ([0-9]+):(.+) ]] && local version=${BASH_REMATCH[2]} || local version=$package_version
+    # Split the package version to handle epoch
+    if [[ $2 =~ ([0-9]+):(.+) ]]; then
+        local epoch=${BASH_REMATCH[1]}
+        local version=${BASH_REMATCH[2]}
+    else
+        local epoch=""
+        local version=$2
+    fi
 
     local package_pattern="${repo_path}/${package_name}-${version}*.rpm"
 

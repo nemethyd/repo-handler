@@ -153,23 +153,34 @@ fi
 # Wait for all background jobs to finish
 wait
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') - All packages have been processed."
+if (( MAX_PACKAGES == 0 )); then
+    echo "Removing obsolete packages..."
+    for file in "${initial_rpm_files[@]}"; do
+        if [[ -z "${identified_packages["$file"]}" ]]; then
+            echo "Removing obsolete package $file"
+            rm -f "$file"
+        fi
+    done
 
-echo "Removing obsolete packages..."
-for file in "${initial_rpm_files[@]}"; do
-    if [[ -z "${identified_packages["$file"]}" ]]; then
-        echo "Removing obsolete package $file"
-        rm -f "$file"
+    echo "Updating repositories in used directories..."
+    for dir in "${!used_directories[@]}"; do
+        parent_dir=$(dirname "$dir")
+        echo "Updating repository at $parent_dir..."
+        createrepo --update "$parent_dir"
+    done
+
+    echo "Syncing local repository to shared repository..."
+    rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
+    if [ $? -ne 0 ]; then
+        echo "Failed to sync local repository to shared repository" >&2
+        exit 1
     fi
-done
 
-echo "Updating repositories in used directories..."
-for dir in "${!used_directories[@]}"; do
-    parent_dir=$(dirname "$dir")
-    echo "Updating repository at $parent_dir..."
-    createrepo --update "$parent_dir"
-done
+    echo "Sync complete. All packages have been processed and repositories have been updated."
+else
+    echo "Skipping metadata update and sync due to MAX_PACKAGES setting."
+fi
 
 rm "$INSTALLED_PACKAGES_FILE"
 
-echo "All packages have been processed and repositories have been updated."
+
