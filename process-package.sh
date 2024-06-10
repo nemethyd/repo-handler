@@ -1,18 +1,16 @@
 #!/bin/bash
 
+echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
+
 DEBUG_MODE=$1
 shift
 packages=("$@")
 
 # If debug mode is 2, start bashdb
-if [ "$DEBUG_MODE" -eq 2 ]; then
-    exec bashdb "$0" "$DEBUG_MODE" "${packages[@]}"
-fi
+[ "$DEBUG_MODE" -eq 2 ] && exec bashdb "$0" "$DEBUG_MODE" "${packages[@]}"
 
 # If debug mode is 3, enable tracing
-if [ "$DEBUG_MODE" -ge 3 ]; then
-    set -x
-fi
+[ "$DEBUG_MODE" -ge 3 ] && set -x
 
 # Function to determine the status of a package
 get_package_status() {
@@ -20,11 +18,7 @@ get_package_status() {
     local package_version=$2
     local repo_path=$3
 
-    if [[ $package_version =~ ([0-9]+):(.+) ]]; then
-        local version=${BASH_REMATCH[2]}
-    else
-        local version=$package_version
-    fi
+    [[ $package_version =~ ([0-9]+):(.+) ]] && local version=${BASH_REMATCH[2]} || local version=$package_version
 
     local package_pattern="${repo_path}/${package_name}-${version}*.rpm"
 
@@ -35,6 +29,15 @@ get_package_status() {
     else
         echo "NEW"
     fi
+}
+
+# Function to remove existing package files
+remove_existing_packages() {
+    local package_name=$1
+    local repo_path=$2
+
+    echo "Removing existing packages for $package_name from $repo_path"
+    rm -f "$repo_path/${package_name}"*.rpm
 }
 
 # Function to download packages
@@ -49,27 +52,15 @@ download_packages() {
     for pkg in "${packages[@]}"; do
         IFS="@" read -r pkg_info repo_path <<< "$pkg"
         IFS="-" read -r package_name package_version <<< "$pkg_info"
-
         repo_packages["$repo_path"]+="$package_name-$package_version "
     done
 
     for repo_path in "${!repo_packages[@]}"; do
-        # Ensure the getPackage subdirectory exists
-        mkdir -p "$repo_path"
-        if [ $? -ne 0 ]; then
-            echo "Failed to create directory: $repo_path" >&2
-            exit 1
-        fi
+        mkdir -p "$repo_path" || { echo "Failed to create directory: $repo_path" >&2; exit 1; }
 
-        # Download packages
-        if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-        fi
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
         dnf download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"
-        if [ $? -ne 0 ]; then
-            echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2
-            exit 1
-        fi
+        [ $? -ne 0 ] && { echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2; exit 1; }
     done
 }
 
@@ -79,25 +70,17 @@ for pkg in "${packages[@]}"; do
     IFS="-" read -r package_name package_version <<< "$pkg_info"
 
     package_status=$(get_package_status "$package_name" "$package_version" "$repo_path")
-    if [ $? -ne 0 ]; then
-        echo "Failed to determine status for package: $package_name-$package_version" >&2
-        exit 1
-    fi
+    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
 
     case $package_status in
         "EXISTS")
-            echo -e "\e[32m$repo_path: $package_name-$package_version is already there.\e[0m"
+            echo -e "\e[32m$repo_path: $package_name-$package_version exists.\e[0m"
             ;;
         "NEW")
-            echo -e "\e[33mDownloading new package: $package_name-$package_version...\e[0m"
+            echo -e "\e[33m$(download_packages "$pkg")\e[0m"
             ;;
         "UPDATE")
-            echo -e "\e[34mUpdating package: $package_name-$package_version...\e[0m"
-            remove_existing_packages "$package_name" "$repo_path"
-            if [ $? -ne 0 ]; then
-                echo "Failed to remove existing packages for: $package_name" >&2
-                exit 1
-            fi
+            echo -e "\e[34m$(remove_existing_packages "$package_name" "$repo_path" && download_packages "$pkg")\e[0m"
             ;;
         *)
             echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.\e[0m"
@@ -107,7 +90,4 @@ done
 
 # Download all packages in batch
 download_packages "${packages[@]}"
-if [ $? -ne 0 ]; then
-    echo "Failed to download packages in batch." >&2
-    exit 1
-fi
+[ $? -ne 0 ] && { echo "Failed to download packages in batch." >&2; exit 1; }
