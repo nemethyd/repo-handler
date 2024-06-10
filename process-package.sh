@@ -16,23 +16,18 @@ packages=("$@")
 get_package_status() {
     local package_name=$1
     local package_version=$2
-    local repo_path=$3
+    local epoch=$3
+    local repo_path=$4
 
-    # Split the package version to handle epoch
-    if [[ $package_version =~ ([0-9]+):(.+) ]]; then
-        local epoch=${BASH_REMATCH[1]}
-        local version=${BASH_REMATCH[2]}
-    else
-        local epoch=""
-        local version=$package_version
-    fi
+    [ "$DEBUG_MODE" -ge 1 ] && echo "name=$package_name epoch=$epoch version=$package_version path=$repo_path" >&2
 
-    local package_pattern="${repo_path}/${package_name}-${version}*.rpm"
-    [ -n "$epoch" ] && package_pattern="${repo_path}/${package_name}-${epoch}:${version}*.rpm"
+    local package_pattern="${repo_path}/${package_name}-${package_version}*.rpm"
 
     if compgen -G "$package_pattern" > /dev/null; then
         echo "EXISTS"
-    elif compgen -G "$repo_path/${package_name}-*.rpm" > /dev/null; then
+    elif [[ -n "$epoch" ]] && compgen -G "${repo_path}/${package_name}-${epoch}:${package_version}*.rpm" > /dev/null; then
+        echo "EXISTS"
+    elif compgen -G "${repo_path}/${package_name}-*.rpm" > /dev/null; then
         echo "UPDATE"
     else
         echo "NEW"
@@ -44,8 +39,10 @@ remove_existing_packages() {
     local package_name=$1
     local repo_path=$2
 
-    echo "Removing existing packages for $package_name from $repo_path"
-    rm -f "$repo_path/${package_name}-*.rpm"
+    local package_pattern="${repo_path}/${package_name}-*.rpm"
+    [ "$DEBUG_MODE" -ge 1 ] && echo "Removing existing packages for $package_name from $repo_path with pattern $package_pattern"
+
+    rm -f "$package_pattern"
 }
 
 # Function to download packages
@@ -54,13 +51,27 @@ download_packages() {
     local repo_path
     local package_name
     local package_version
+    local epoch
 
     declare -A repo_packages
 
     for pkg in "${packages[@]}"; do
         IFS="@" read -r pkg_info repo_path <<< "$pkg"
         IFS="-" read -r package_name package_version <<< "$pkg_info"
-        repo_packages["$repo_path"]+="$package_name-$package_version "
+
+        # Correctly parse package name and version for epoch
+        if [[ $package_version =~ ([0-9]+):(.+) ]]; then
+            epoch=${BASH_REMATCH[1]}
+            package_version=${BASH_REMATCH[2]}
+        else
+            epoch=""
+        fi
+
+        if [[ -n "$epoch" ]]; then
+            repo_packages["$repo_path"]+="$package_name-$epoch:$package_version "
+        else
+            repo_packages["$repo_path"]+="$package_name-$package_version "
+        fi
     done
 
     for repo_path in "${!repo_packages[@]}"; do
@@ -79,7 +90,15 @@ for pkg in "${packages[@]}"; do
     IFS="@" read -r pkg_info repo_path <<< "$pkg"
     IFS="-" read -r package_name package_version <<< "$pkg_info"
 
-    package_status=$(get_package_status "$package_name" "$package_version" "$repo_path")
+    # Ensure proper package name and version parsing
+    if [[ $package_version =~ ([0-9]+):(.+) ]]; then
+        epoch=${BASH_REMATCH[1]}
+        package_version=${BASH_REMATCH[2]}
+    else
+        epoch=""
+    fi
+
+    package_status=$(get_package_status "$package_name" "$package_version" "$epoch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
 
     case $package_status in
