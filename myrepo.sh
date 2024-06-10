@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=5
+VERSION=6
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -14,6 +14,13 @@ SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
+
+# Function to wait for background jobs to finish
+wait_for_jobs() {
+    while (( $(jobs -r | wc -l) >= MAX_PARALLEL_JOBS )); do
+        sleep 1
+    done
+}
 
 # Fetch installed packages list
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
@@ -90,7 +97,7 @@ for line in "${package_lines[@]}"; do
 
         # Check if we have reached the batch size
         if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
-             [ "$DEBUG_MODE" -ge 1 ] && echo ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}"
+            [ "$DEBUG_MODE" -ge 1 ] && echo "./process-package.sh $DEBUG_MODE \"${batch_packages[@]}\""
             ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}" &
             batch_packages=()
             wait_for_jobs
@@ -100,16 +107,11 @@ done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
+    [ "$DEBUG_MODE" -ge 1 ] && echo "./process-package.sh $DEBUG_MODE \"${batch_packages[@]}\""
     ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}"
 fi
 
-# Wait for any background jobs to finish
-wait_for_jobs() {
-    while (( $(jobs -r | wc -l) >= MAX_PARALLEL_JOBS )); do
-        sleep 1
-    done
-}
-
+# If MAX_PACKAGES is set and greater than zero, skip repository updates and syncing
 if (( MAX_PACKAGES == 0 )); then
     echo "Updating repositories in used directories..."
     for dir in "${!used_directories[@]}"; do

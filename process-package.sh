@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=5
+VERSION=6
 
 DEBUG_MODE=$1
 [ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
