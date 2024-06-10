@@ -14,24 +14,25 @@ packages=("$@")
 
 # Function to determine the status of a package
 get_package_status() {
-    local package_name
-    local package_version
+    local package_name=$1
+    local package_version=$2
     local repo_path=$3
 
     # Split the package version to handle epoch
-    if [[ $2 =~ ([0-9]+):(.+) ]]; then
+    if [[ $package_version =~ ([0-9]+):(.+) ]]; then
         local epoch=${BASH_REMATCH[1]}
         local version=${BASH_REMATCH[2]}
     else
         local epoch=""
-        local version=$2
+        local version=$package_version
     fi
 
     local package_pattern="${repo_path}/${package_name}-${version}*.rpm"
+    [ -n "$epoch" ] && package_pattern="${repo_path}/${package_name}-${epoch}:${version}*.rpm"
 
     if compgen -G "$package_pattern" > /dev/null; then
         echo "EXISTS"
-    elif compgen -G "$repo_path/${package_name}"*.rpm > /dev/null; then
+    elif compgen -G "$repo_path/${package_name}-*.rpm" > /dev/null; then
         echo "UPDATE"
     else
         echo "NEW"
@@ -44,7 +45,7 @@ remove_existing_packages() {
     local repo_path=$2
 
     echo "Removing existing packages for $package_name from $repo_path"
-    rm -f "$repo_path/${package_name}"*.rpm
+    rm -f "$repo_path/${package_name}-*.rpm"
 }
 
 # Function to download packages
