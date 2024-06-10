@@ -26,11 +26,11 @@ get_package_status() {
         local version=$package_version
     fi
 
-    local package_pattern="${repo_path}/getPackage/${package_name}-${version}*.rpm"
+    local package_pattern="${repo_path}/${package_name}-${version}*.rpm"
 
     if compgen -G "$package_pattern" > /dev/null; then
         echo "EXISTS"
-    elif compgen -G "$repo_path/getPackage/${package_name}"*.rpm > /dev/null; then
+    elif compgen -G "$repo_path/${package_name}"*.rpm > /dev/null; then
         echo "UPDATE"
     else
         echo "NEW"
@@ -55,13 +55,21 @@ download_packages() {
 
     for repo_path in "${!repo_packages[@]}"; do
         # Ensure the getPackage subdirectory exists
-        mkdir -p "$repo_path/getPackage"
+        mkdir -p "$repo_path"
+        if [ $? -ne 0 ]; then
+            echo "Failed to create directory: $repo_path" >&2
+            exit 1
+        fi
 
         # Download packages
         if [ "$DEBUG_MODE" -ge 1 ]; then
-            echo "Downloading packages to $repo_path/getPackage: ${repo_packages[$repo_path]}"
+            echo "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
         fi
-        dnf download --arch=x86_64,noarch --destdir="$repo_path/getPackage" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"
+        dnf download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"
+        if [ $? -ne 0 ]; then
+            echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2
+            exit 1
+        fi
     done
 }
 
@@ -71,6 +79,10 @@ for pkg in "${packages[@]}"; do
     IFS="-" read -r package_name package_version <<< "$pkg_info"
 
     package_status=$(get_package_status "$package_name" "$package_version" "$repo_path")
+    if [ $? -ne 0 ]; then
+        echo "Failed to determine status for package: $package_name-$package_version" >&2
+        exit 1
+    fi
 
     case $package_status in
         "EXISTS")
@@ -82,6 +94,10 @@ for pkg in "${packages[@]}"; do
         "UPDATE")
             echo -e "\e[34mUpdating package: $package_name-$package_version...\e[0m"
             remove_existing_packages "$package_name" "$repo_path"
+            if [ $? -ne 0 ]; then
+                echo "Failed to remove existing packages for: $package_name" >&2
+                exit 1
+            fi
             ;;
         *)
             echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.\e[0m"
@@ -91,3 +107,7 @@ done
 
 # Download all packages in batch
 download_packages "${packages[@]}"
+if [ $? -ne 0 ]; then
+    echo "Failed to download packages in batch." >&2
+    exit 1
+fi
