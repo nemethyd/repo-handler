@@ -70,7 +70,7 @@ for line in "${package_lines[@]}"; do
         fi
 
         used_directories["$repo_path"]=1
-        batch_packages+=("$package_name|$epoch|$version|$repo_path")
+        batch_packages+=("$package_name|$epoch|$version|$package_arch|$repo_path")
 
         [ "$DEBUG_MODE" -ge 1 ] && echo "Before incrementing batch_counter: $batch_counter"
         batch_counter=$((batch_counter + 1))
