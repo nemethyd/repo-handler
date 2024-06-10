@@ -57,15 +57,7 @@ download_packages() {
 
     for pkg in "${packages[@]}"; do
         IFS="@" read -r pkg_info repo_path <<< "$pkg"
-        IFS="-" read -r package_name package_version <<< "$pkg_info"
-
-        # Correctly parse package name and version for epoch
-        if [[ $package_version =~ ([0-9]+):(.+) ]]; then
-            epoch=${BASH_REMATCH[1]}
-            package_version=${BASH_REMATCH[2]}
-        else
-            epoch=""
-        fi
+        IFS="|" read -r package_name package_version epoch <<< "$pkg_info"
 
         if [[ -n "$epoch" ]]; then
             repo_packages["$repo_path"]+="$package_name-$epoch:$package_version "
@@ -88,15 +80,7 @@ download_packages() {
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
     IFS="@" read -r pkg_info repo_path <<< "$pkg"
-    IFS="-" read -r package_name package_version <<< "$pkg_info"
-
-    # Ensure proper package name and version parsing
-    if [[ $package_version =~ ([0-9]+):(.+) ]]; then
-        epoch=${BASH_REMATCH[1]}
-        package_version=${BASH_REMATCH[2]}
-    else
-        epoch=""
-    fi
+    IFS="|" read -r package_name package_version epoch <<< "$pkg_info"
 
     package_status=$(get_package_status "$package_name" "$package_version" "$epoch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
