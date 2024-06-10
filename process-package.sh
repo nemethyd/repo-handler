@@ -1,8 +1,8 @@
 #!/bin/bash
 
-echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
-
 DEBUG_MODE=$1
+[ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
+
 shift
 packages=("$@")
 
@@ -59,8 +59,10 @@ download_packages() {
         mkdir -p "$repo_path" || { echo "Failed to create directory: $repo_path" >&2; exit 1; }
 
         [ "$DEBUG_MODE" -ge 1 ] && echo "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-        dnf download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"
-        [ $? -ne 0 ] && { echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2; exit 1; }
+        if ! dnf download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"; then
+            echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2
+            return 1
+        fi
     done
 }
 
@@ -77,10 +79,18 @@ for pkg in "${packages[@]}"; do
             echo -e "\e[32m$repo_path: $package_name-$package_version exists.\e[0m"
             ;;
         "NEW")
-            echo -e "\e[33m$(download_packages "$pkg")\e[0m"
+            echo -e "\e[33mDownloading new package: $package_name-$package_version...\e[0m"
+            if ! download_packages "$pkg"; then
+                echo "Failed to download new package: $package_name-$package_version" >&2
+                exit 1
+            fi
             ;;
         "UPDATE")
-            echo -e "\e[34m$(remove_existing_packages "$package_name" "$repo_path" && download_packages "$pkg")\e[0m"
+            echo -e "\e[34mUpdating package: $package_name-$package_version...\e[0m"
+            if ! remove_existing_packages "$package_name" "$repo_path" || ! download_packages "$pkg"; then
+                echo "Failed to update package: $package_name-$package_version" >&2
+                exit 1
+            fi
             ;;
         *)
             echo -e "\e[31mError: Unknown package status '$package_status' for $package_name-$package_version.\e[0m"
@@ -89,5 +99,7 @@ for pkg in "${packages[@]}"; do
 done
 
 # Download all packages in batch
-download_packages "${packages[@]}"
-[ $? -ne 0 ] && { echo "Failed to download packages in batch." >&2; exit 1; }
+if ! download_packages "${packages[@]}"; then
+    echo "Failed to download packages in batch." >&2
+    exit 1
+fi

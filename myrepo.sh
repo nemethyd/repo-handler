@@ -12,16 +12,10 @@ fi
 MAX_PACKAGES=${MAX_PACKAGES:-0}
 
 # Set the maximum number of parallel jobs
-MAX_PARALLEL_JOBS=4
+MAX_PARALLEL_JOBS=2
 
 # Set the batch size for processing packages
 BATCH_SIZE=10
-
-# Break at any error
-set -e
-
-# Reset echo
-echo -e "\e[0m"
 
 # Determine the directory of the current script
 SCRIPT_DIR=$(dirname "$BASH_SOURCE")
@@ -36,7 +30,10 @@ SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
-dnf list --installed > "$INSTALLED_PACKAGES_FILE"
+if ! dnf list --installed > "$INSTALLED_PACKAGES_FILE"; then
+    echo "Failed to fetch list of installed packages" >&2
+    exit 1
+fi
 
 # Define the mapping of virtual repositories to actual repositories
 declare -A virtual_repo_map
@@ -101,8 +98,8 @@ for line in "${package_lines[@]}"; do
             echo "Before incrementing batch_counter: $batch_counter" >&2
         fi
 
-        let batch_counter++
-        
+        batch_counter=$((batch_counter + 1))
+
         if [ "$DEBUG_MODE" -ge 1 ]; then
             echo "After incrementing batch_counter: $batch_counter" >&2
         fi
@@ -115,14 +112,17 @@ for line in "${package_lines[@]}"; do
             fi
 
             "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
-            wait_for_jobs
+
+            if [ "$DEBUG_MODE" -ge 1 ]; then
+                echo "Started process-package.sh with PID $!" >&2
+            fi
 
             batch_packages=()
             batch_counter=0
         fi
 
         if (( MAX_PACKAGES > 0 )); then
-            let package_counter++
+            package_counter=$((package_counter + 1))
             if (( package_counter >= MAX_PACKAGES )); then
                 echo "Processed $MAX_PACKAGES packages. Stopping." >&2
                 break
@@ -144,6 +144,10 @@ if (( batch_counter > 0 )); then
     fi
 
     "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" &
+
+    if [ "$DEBUG_MODE" -ge 1 ]; then
+        echo "Started process-package.sh with PID $!" >&2
+    fi
 fi
 
 # Wait for all background jobs to finish
