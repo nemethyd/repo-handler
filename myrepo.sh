@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.5
+VERSION=1.8
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
