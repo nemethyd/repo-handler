@@ -1,19 +1,20 @@
 #!/bin/bash
 
 # Script version
-VERSION=6
+VERSION=1.1
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
 
 # Configuration
-MAX_PARALLEL_JOBS=2
+MAX_PARALLEL_JOBS=1
 BATCH_SIZE=10
 SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
+LOCAL_REPOS=("ol9_edge")  # Add more local repos if needed
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
@@ -28,7 +29,8 @@ dnf list --installed > "$INSTALLED_PACKAGES_FILE"
 
 # Virtual repository map
 declare -A virtual_repo_map
-virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL")
+virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL" \
+       	["System"]="ol9_edge" ["@commandline"]="ol9_edge")
 
 # Arrays to hold used directories and identified packages
 declare -A used_directories
@@ -42,6 +44,17 @@ get_repo_path() {
         echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
     else
         echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
+    fi
+}
+
+# Function to get the repository name
+get_repo_name() {
+    local package_repo=$1
+    local repo_key="${virtual_repo_map[$package_repo]}"
+    if [[ -n "$repo_key" ]]; then
+        echo "$repo_key"
+    else
+        echo "$package_repo"
     fi
 }
 
@@ -83,9 +96,10 @@ for line in "${package_lines[@]}"; do
         [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $version, Epoch: $epoch, Repo: $package_repo"
         
         repo_path=$(get_repo_path "$package_repo")
+        repo_name=$(get_repo_name "$package_repo")
         if [[ -n "$repo_path" ]]; then
             used_directories["$repo_path"]=1
-            batch_packages+=("$package_name|$epoch|$version|$package_arch|$repo_path")
+            batch_packages+=("$repo_name|$package_name|$epoch|$version|$package_arch|$repo_path")
         fi
         
         ((package_counter++))
@@ -97,8 +111,8 @@ for line in "${package_lines[@]}"; do
 
         # Check if we have reached the batch size
         if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
-            [ "$DEBUG_MODE" -ge 1 ] && echo "./process-package.sh $DEBUG_MODE \"${batch_packages[@]}\""
-            ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}" &
+            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]}"
+            "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}" &
             batch_packages=()
             wait_for_jobs
         fi
@@ -107,8 +121,8 @@ done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
-    [ "$DEBUG_MODE" -ge 1 ] && echo "./process-package.sh $DEBUG_MODE \"${batch_packages[@]}\""
-    ./process-package.sh "$DEBUG_MODE" "${batch_packages[@]}"
+    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]}"
+    "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}"
 fi
 
 # If MAX_PACKAGES is set and greater than zero, skip repository updates and syncing
