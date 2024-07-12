@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.1
+VERSION=1.3
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -30,7 +30,7 @@ dnf list --installed > "$INSTALLED_PACKAGES_FILE"
 # Virtual repository map
 declare -A virtual_repo_map
 virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL" \
-       	["System"]="ol9_edge" ["@commandline"]="ol9_edge")
+        ["System"]="ol9_edge" ["@commandline"]="ol9_edge")
 
 # Arrays to hold used directories and identified packages
 declare -A used_directories

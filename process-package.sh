@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.0
+VERSION=1.4
 
 DEBUG_MODE=$1
 [ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
@@ -64,7 +64,11 @@ download_packages() {
     for pkg in "${packages[@]}"; do
         IFS='|' read -r repo_name package_name epoch package_version package_arch repo_path <<< "$pkg"
         [ -n "$epoch" ] && package_version="${epoch}:${package_version}"
-        repo_packages["$repo_path"]+="$package_name-$package_version.$package_arch "
+        if [ -n "$repo_path" ]; then
+            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+                repo_packages["$repo_path"]+="$package_name-$package_version.$package_arch "
+            fi
+        fi
     done
 
     for repo_path in "${!repo_packages[@]}"; do
@@ -85,21 +89,26 @@ for pkg in "${packages[@]}"; do
     package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_arch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
 
-    if [[ " ${local_repos[@]} " =~ " ${repo_name} " ]]; then
-        echo -e "\e[32m$repo_name: $package_name-$package_version.$package_arch is locally installed.\e[0m"
-        continue
-    fi
-
     case $package_status in
         "EXISTS")
             echo -e "\e[32m$repo_name: $package_name-$package_version.$package_arch exists.\e[0m"
             ;;
         "NEW")
-            echo -e "\e[33m$repo_name:$(download_packages "$pkg")\e[0m"
+            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+                echo -e "\e[33m$repo_name: Downloading $package_name-$package_version.$package_arch...\e[0m"
+                download_packages "$pkg"
+            else
+                echo -e "\e[33m$repo_name: $package_name-$package_version.$package_arch is in a local repository.\e[0m"
+            fi
             ;;
         "UPDATE")
-            remove_existing_packages "$package_name" "$repo_path"
-            echo -e "\e[34m$repo_name:$(download_packages "$pkg")\e[0m"
+            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+                remove_existing_packages "$package_name" "$repo_path"
+                echo -e "\e[34m$repo_name: Updating $package_name-$package_version.$package_arch...\e[0m"
+                download_packages "$pkg"
+            else
+                echo -e "\e[34m$repo_name: $package_name-$package_version.$package_arch is in a local repository.\e[0m"
+            fi
             ;;
         *)
             echo -e "\e[31mError: Unknown package status '$package_status' for $repo_name::$package_name-$package_version.$package_arch.\e[0m"
