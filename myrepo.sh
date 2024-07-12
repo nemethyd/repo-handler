@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.3
+VERSION=1.5
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -111,7 +111,7 @@ for line in "${package_lines[@]}"; do
 
         # Check if we have reached the batch size
         if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
-            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]}"
+            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]} ${LOCAL_REPOS[*]}"
             "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}" &
             batch_packages=()
             wait_for_jobs
@@ -121,7 +121,7 @@ done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
-    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]}"
+    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]} ${LOCAL_REPOS[*]}"
     "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}"
 fi
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.4
+VERSION=1.6
 
 DEBUG_MODE=$1
 [ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
@@ -86,6 +86,11 @@ download_packages() {
 for pkg in "${packages[@]}"; do
     IFS='|' read -r repo_name package_name epoch package_version package_arch repo_path <<< "$pkg"
 
+    if [[ " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+        echo -e "\e[33m$repo_name: $package_name-$package_version.$package_arch is in a local repository.\e[0m"
+        continue
+    fi
+
     package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_arch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
 
@@ -94,21 +99,13 @@ for pkg in "${packages[@]}"; do
             echo -e "\e[32m$repo_name: $package_name-$package_version.$package_arch exists.\e[0m"
             ;;
         "NEW")
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                echo -e "\e[33m$repo_name: Downloading $package_name-$package_version.$package_arch...\e[0m"
-                download_packages "$pkg"
-            else
-                echo -e "\e[33m$repo_name: $package_name-$package_version.$package_arch is in a local repository.\e[0m"
-            fi
+            echo -e "\e[33m$repo_name: Downloading $package_name-$package_version.$package_arch...\e[0m"
+            download_packages "$pkg"
             ;;
         "UPDATE")
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                remove_existing_packages "$package_name" "$repo_path"
-                echo -e "\e[34m$repo_name: Updating $package_name-$package_version.$package_arch...\e[0m"
-                download_packages "$pkg"
-            else
-                echo -e "\e[34m$repo_name: $package_name-$package_version.$package_arch is in a local repository.\e[0m"
-            fi
+            remove_existing_packages "$package_name" "$repo_path"
+            echo -e "\e[34m$repo_name: Updating $package_name-$package_version.$package_arch...\e[0m"
+            download_packages "$pkg"
             ;;
         *)
             echo -e "\e[31mError: Unknown package status '$package_status' for $repo_name::$package_name-$package_version.$package_arch.\e[0m"
