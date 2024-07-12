@@ -14,7 +14,7 @@ SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
-LOCAL_REPOS=("ol9_edge")  # Add more local repos if needed
+LOCAL_REPOS=("ol9_edge","pgdg-common","pgdg16")  # Add more local repos if needed
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
