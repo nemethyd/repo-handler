@@ -1,20 +1,57 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.8
+VERSION=2.11
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
+: "${BATCH_SIZE:=10}"
 
 # Configuration
 MAX_PARALLEL_JOBS=1
-BATCH_SIZE=10
 SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
-LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")  # Add more local repos if needed
+LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
+
+# Parse options
+while [[ "$1" =~ ^-- ]]; do
+    case "$1" in
+        --debug-level)
+            shift
+            DEBUG_MODE=$1
+            ;;
+        --max-packages)
+            shift
+            MAX_PACKAGES=$1
+            ;;
+        --batch-size)
+            shift
+            BATCH_SIZE=$1
+            ;;
+        --version)
+            echo "myrepo.sh Version $VERSION"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM]"
+            echo "Options:"
+            echo "  --debug-level LEVEL  Set the debug level (default: 0)"
+            echo "  --max-packages NUM   Set the maximum number of packages to process (default: 0)"
+            echo "  --batch-size NUM     Set the batch size for processing packages (default: 10)"
+            echo "  --version            Show script version"
+            echo "  --help               Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
@@ -29,8 +66,13 @@ dnf list --installed > "$INSTALLED_PACKAGES_FILE"
 
 # Virtual repository map
 declare -A virtual_repo_map
-virtual_repo_map=(["baseos"]="ol9_baseos_latest" ["appstream"]="ol9_appstream" ["epel"]="ol9_developer_EPEL" \
-        ["System"]="ol9_edge" ["@commandline"]="ol9_edge")
+virtual_repo_map=(
+    ["baseos"]="ol9_baseos_latest"
+    ["appstream"]="ol9_appstream"
+    ["epel"]="ol9_developer_EPEL"
+    ["System"]="ol9_edge"
+    ["@commandline"]="@commandline"
+)
 
 # Arrays to hold used directories and identified packages
 declare -A used_directories
@@ -40,10 +82,10 @@ declare -A identified_packages
 get_repo_path() {
     local package_repo=$1
     local repo_key="${virtual_repo_map[$package_repo]}"
-    if [[ -n "$repo_key" ]]; then
+    if [[ -n "$repo_key" && "$repo_key" != "@commandline" ]]; then
         echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
     else
-        echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
+        echo ""
     fi
 }
 
@@ -84,6 +126,12 @@ for line in "${package_lines[@]}"; do
         package_version=${BASH_REMATCH[3]}
         package_repo=${BASH_REMATCH[4]}
         
+        # Skip @commandline packages
+        if [[ "$package_repo" == "@commandline" ]]; then
+            [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping @commandline package: $package_name"
+            continue
+        fi
+
         # Extract epoch if present
         if [[ $package_version =~ ([0-9]+):(.+) ]]; then
             epoch=${BASH_REMATCH[1]}
@@ -111,8 +159,8 @@ for line in "${package_lines[@]}"; do
 
         # Check if we have reached the batch size
         if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
-            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]} ${LOCAL_REPOS[*]}"
-            "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}" &
+            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*]}\""
+            "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}" &
             batch_packages=()
             wait_for_jobs
         fi
@@ -121,8 +169,8 @@ done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
-    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh $DEBUG_MODE ${batch_packages[*]} ${LOCAL_REPOS[*]}"
-    "$SCRIPT_DIR/process-package.sh" "$DEBUG_MODE" "${batch_packages[@]}" "${LOCAL_REPOS[@]}"
+    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*]}\""
+    "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"
 fi
 
 # If MAX_PACKAGES is set and greater than zero, skip repository updates and syncing

@@ -1,15 +1,53 @@
 #!/bin/bash
 
 # Script version
-VERSION=1.8
+VERSION=2.11
 
-DEBUG_MODE=$1
-[ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with parameters: $*"  # Add debug output to see parameters
+# Parse options
+DEBUG_MODE=0
+PACKAGES=""
+LOCAL_REPOS=""
 
-shift
-packages=("$@")
-local_repos=("${packages[@]: -1}")
-packages=("${packages[@]::${#packages[@]}-1}")
+while [[ "$1" =~ ^-- ]]; do
+    case "$1" in
+        --debug-level)
+            shift
+            DEBUG_MODE=$1
+            ;;
+        --packages)
+            shift
+            PACKAGES=$1
+            ;;
+        --local-repos)
+            shift
+            LOCAL_REPOS=$1
+            ;;
+        --version)
+            echo "process-package.sh Version $VERSION"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: process-package.sh [--debug-level LEVEL] --packages \"PACKAGES\" --local-repos \"REPOS\""
+            echo "Options:"
+            echo "  --debug-level LEVEL  Set the debug level (default: 0)"
+            echo "  --packages \"PACKAGES\"  Set the packages to process (required)"
+            echo "  --local-repos \"REPOS\"   Set the local repositories (required)"
+            echo "  --version            Show script version"
+            echo "  --help               Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+[ "$DEBUG_MODE" -gt 0 ] && echo "process-package.sh started with packages: $PACKAGES and local repos: $LOCAL_REPOS"
+
+IFS=' ' read -r -a packages <<< "$PACKAGES"
+IFS=' ' read -r -a local_repos <<< "$LOCAL_REPOS"
 
 # If debug mode is 2, start bashdb
 [ "$DEBUG_MODE" -eq 2 ] && exec bashdb "$0" "$DEBUG_MODE" "${packages[@]}"
@@ -85,6 +123,12 @@ download_packages() {
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
     IFS='|' read -r repo_name package_name epoch package_version package_arch repo_path <<< "$pkg"
+
+    # Skip processing if repo_path is empty
+    if [[ -z "$repo_path" ]]; then
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping package with empty repo_path: $package_name"
+        continue
+    fi
 
     package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_arch" "$repo_path")
     [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version" >&2; exit 1; }
