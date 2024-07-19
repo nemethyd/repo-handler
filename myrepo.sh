@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.11
+VERSION=2.15
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
 : "${BATCH_SIZE:=10}"
+: "${MAX_PARALLEL_JOBS:=1}"
 
 # Configuration
-MAX_PARALLEL_JOBS=1
 SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
@@ -31,16 +31,21 @@ while [[ "$1" =~ ^-- ]]; do
             shift
             BATCH_SIZE=$1
             ;;
+        --parallel)
+            shift
+            MAX_PARALLEL_JOBS=$1
+            ;;
         --version)
             echo "myrepo.sh Version $VERSION"
             exit 0
             ;;
         --help)
-            echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM]"
+            echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM] [--parallel NUM]"
             echo "Options:"
             echo "  --debug-level LEVEL  Set the debug level (default: 0)"
             echo "  --max-packages NUM   Set the maximum number of packages to process (default: 0)"
             echo "  --batch-size NUM     Set the batch size for processing packages (default: 10)"
+            echo "  --parallel NUM       Set the number of parallel jobs (default: 1)"
             echo "  --version            Show script version"
             echo "  --help               Show this help message"
             exit 0
@@ -58,6 +63,19 @@ wait_for_jobs() {
     while (( $(jobs -r | wc -l) >= MAX_PARALLEL_JOBS )); do
         sleep 1
     done
+}
+
+# Function to check if a package is available in any of the local repositories
+is_package_in_local_repos() {
+    local package_name=$1
+    local repos=${LOCAL_REPOS[*]}
+
+    available_repo=$(dnf repoquery --disablerepo="*" --enablerepo="$repos" --qf "%{repoid}" "$package_name" 2>/dev/null | head -n 1)
+    if [[ -n "$available_repo" ]]; then
+        echo "$available_repo"
+    else
+        echo "no"
+    fi
 }
 
 # Fetch installed packages list
@@ -85,7 +103,7 @@ get_repo_path() {
     if [[ -n "$repo_key" && "$repo_key" != "@commandline" ]]; then
         echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
     else
-        echo ""
+        echo "$LOCAL_REPO_PATH/$1/getPackage"
     fi
 }
 
@@ -98,6 +116,26 @@ get_repo_name() {
     else
         echo "$package_repo"
     fi
+}
+
+# Function to determine the repository source of a package
+determine_repo_source() {
+    local package_name=$1
+
+    # Check if the package exists in any of the local repositories
+    local_repo=$(is_package_in_local_repos "$package_name")
+    if [[ "$local_repo" != "no" ]]; then
+        echo "$local_repo"
+        return
+    fi
+
+    # If the package is not found in the local repositories, determine the original repository
+    local repo_id=$(dnf repoquery --qf "%{reponame}" "$package_name" 2>/dev/null | head -n 1)
+    if [[ -z "$repo_id" || "$repo_id" == "System" || "$repo_id" == "@System" ]]; then
+        repo_id="System"
+    fi
+
+    echo "$repo_id"
 }
 
 # Collect initial list of RPM files
@@ -120,12 +158,17 @@ for line in "${package_lines[@]}"; do
         continue
     fi
     
-    if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+) ]]; then
+    if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
         package_name=${BASH_REMATCH[1]}
         package_arch=${BASH_REMATCH[2]}
         package_version=${BASH_REMATCH[3]}
         package_repo=${BASH_REMATCH[4]}
         
+        # Determine the actual repository source
+        if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
+            package_repo=$(determine_repo_source "$package_name")
+        fi
+
         # Skip @commandline packages
         if [[ "$package_repo" == "@commandline" ]]; then
             [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping @commandline package: $package_name"
@@ -184,7 +227,7 @@ if (( MAX_PACKAGES == 0 )); then
     
     echo "Syncing $SHARED_REPO_PATH with $LOCAL_REPO_PATH..."
     rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
-    if [ $? -eq 0 ]; then
+   if [ $? -eq 0 ]; then
         echo "Sync completed successfully."
     else
         echo "Error occurred during sync." >&2
@@ -198,5 +241,4 @@ fi
 rm "$INSTALLED_PACKAGES_FILE"
 
 echo "All packages have been processed."
-
 echo "myrepo.sh Version $VERSION completed."
