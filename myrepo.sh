@@ -72,7 +72,7 @@ download_repo_metadata() {
     declare -gA repo_cache
     for repo in "${ENABLED_REPOS[@]}"; do
         echo "Fetching metadata for $repo..."
-        repo_cache[$repo]=$(dnf repoquery --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>/dev/null)
+        repo_cache["$repo"]=$(dnf repoquery --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>/dev/null)
         if [[ $DEBUG_MODE -ge 1 ]]; then
             echo "Metadata for $repo:"
             echo "${repo_cache[$repo]}"
@@ -129,7 +129,9 @@ determine_repo_source() {
 
     # If the package is not found in the local sources, determine the original repository
     for repo in "${ENABLED_REPOS[@]}"; do
-        if [ de]
+        if [[ $DEBUG_MODE -ge 1 ]]; then
+            echo "Checking ${repo} for ${package_name}-${package_version}.${package_arch}"
+        fi
         if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
             echo "$repo"
             return
@@ -171,32 +173,6 @@ get_repo_name() {
     else
         echo "$package_repo"
     fi
-}
-
-# Function to determine the repository source of a package
-determine_repo_source() {
-    local package_name=$1
-    local package_version=$2
-    local package_arch=$3
-
-    # Check if the package exists in any of the local sources
-    local_repo=$(is_package_in_local_sources "$package_name" "$package_version" "$package_arch")
-    if [[ "$local_repo" != "no" ]]; then
-        echo "$local_repo"
-        return
-    fi
-
-    # If the package is not found in the local sources, determine the original repository
-    for repo in "${ENABLED_REPOS[@]}"; do
-        [ "$DEBUG_MODE" -ge 1 ] && echo "${repo_cache[$repo]}\n" @@ echo "${package_name}-${package_version}.${package_arch}"
-        
-        if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
-            echo "$repo"
-            return
-        fi
-    done
-
-    echo "System"
 }
 
 for line in "${package_lines[@]}"; do
@@ -276,7 +252,7 @@ if (( MAX_PACKAGES == 0 )); then
     
     echo "Syncing $SHARED_REPO_PATH with $LOCAL_REPO_PATH..."
     rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/"
-   if [ $? -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         echo "Sync completed successfully."
     else
         echo "Error occurred during sync." >&2

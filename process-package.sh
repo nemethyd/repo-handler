@@ -157,5 +157,3 @@ for pkg in "${packages[@]}"; do
             ;;
     esac
 done
-
-[ "$DEBUG_MODE" -ge 1 ] && echo "process-package.sh Version $VERSION completed."
