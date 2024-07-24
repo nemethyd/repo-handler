@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.15
+VERSION=2.17
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -15,6 +15,7 @@ LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
+RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
 # Parse options
 while [[ "$1" =~ ^-- ]]; do
@@ -65,36 +66,90 @@ wait_for_jobs() {
     done
 }
 
-# Function to check if a package is available in any of the local repositories
-is_package_in_local_repos() {
-    local package_name=$1
-    local repos=${LOCAL_REPOS[*]}
-
-    available_repo=$(dnf repoquery --disablerepo="*" --enablerepo="$repos" --qf "%{repoid}" "$package_name" 2>/dev/null | head -n 1)
-    if [[ -n "$available_repo" ]]; then
-        echo "$available_repo"
-    else
-        echo "no"
-    fi
+# Function to download repository metadata and store in memory
+download_repo_metadata() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Downloading repository metadata..."
+    declare -gA repo_cache
+    for repo in "${ENABLED_REPOS[@]}"; do
+        echo "Fetching metadata for $repo..."
+        repo_cache[$repo]=$(dnf repoquery --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>/dev/null)
+        if [[ $DEBUG_MODE -ge 1 ]]; then
+            echo "Metadata for $repo:"
+            echo "${repo_cache[$repo]}"
+        fi
+    done
 }
 
 # Fetch installed packages list
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
 dnf list --installed > "$INSTALLED_PACKAGES_FILE"
 
-# Virtual repository map
-declare -A virtual_repo_map
-virtual_repo_map=(
-    ["baseos"]="ol9_baseos_latest"
-    ["appstream"]="ol9_appstream"
-    ["epel"]="ol9_developer_EPEL"
-    ["System"]="ol9_edge"
-    ["@commandline"]="@commandline"
-)
+# Fetch the list of enabled repositories
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of enabled repositories..."
+ENABLED_REPOS=($(dnf repolist enabled | awk 'NR>1 {print $1}'))
 
-# Arrays to hold used directories and identified packages
-declare -A used_directories
-declare -A identified_packages
+# Download repository metadata for enabled repos
+download_repo_metadata
+
+# Function to check if a package is available in the local repos or rpmbuild directory
+is_package_in_local_sources() {
+    local package_name=$1
+    local package_version=$2
+    local package_arch=$3
+
+    # Check in local repos metadata
+    for repo in "${LOCAL_REPOS[@]}"; do
+        if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
+            echo "$repo"
+            return
+        fi
+    done
+
+    # Check in rpmbuild directory
+    if find "$RPMBUILD_PATH" -name "${package_name}-${package_version}*.rpm" | grep -q .; then
+        echo "rpmbuild"
+        return
+    fi
+
+    echo "no"
+}
+
+# Function to determine the repository source of a package
+determine_repo_source() {
+    local package_name=$1
+    local package_version=$2
+    local package_arch=$3
+
+    # Check if the package exists in any of the local sources
+    local_repo=$(is_package_in_local_sources "$package_name" "$package_version" "$package_arch")
+    if [[ "$local_repo" != "no" ]]; then
+        echo "$local_repo"
+        return
+    fi
+
+    # If the package is not found in the local sources, determine the original repository
+    for repo in "${ENABLED_REPOS[@]}"; do
+        if [ de]
+        if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
+            echo "$repo"
+            return
+        fi
+    done
+
+    echo "System"
+}
+
+# Collect initial list of RPM files
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
+initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
+
+# Read the installed packages list
+mapfile -t package_lines < "$INSTALLED_PACKAGES_FILE"
+
+# Processing installed packages
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
+package_counter=0
+batch_packages=()
 
 # Function to get the repository path
 get_repo_path() {
@@ -121,34 +176,28 @@ get_repo_name() {
 # Function to determine the repository source of a package
 determine_repo_source() {
     local package_name=$1
+    local package_version=$2
+    local package_arch=$3
 
-    # Check if the package exists in any of the local repositories
-    local_repo=$(is_package_in_local_repos "$package_name")
+    # Check if the package exists in any of the local sources
+    local_repo=$(is_package_in_local_sources "$package_name" "$package_version" "$package_arch")
     if [[ "$local_repo" != "no" ]]; then
         echo "$local_repo"
         return
     fi
 
-    # If the package is not found in the local repositories, determine the original repository
-    local repo_id=$(dnf repoquery --qf "%{reponame}" "$package_name" 2>/dev/null | head -n 1)
-    if [[ -z "$repo_id" || "$repo_id" == "System" || "$repo_id" == "@System" ]]; then
-        repo_id="System"
-    fi
+    # If the package is not found in the local sources, determine the original repository
+    for repo in "${ENABLED_REPOS[@]}"; do
+        [ "$DEBUG_MODE" -ge 1 ] && echo "${repo_cache[$repo]}\n" @@ echo "${package_name}-${package_version}.${package_arch}"
+        
+        if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
+            echo "$repo"
+            return
+        fi
+    done
 
-    echo "$repo_id"
+    echo "System"
 }
-
-# Collect initial list of RPM files
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
-initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
-
-# Read the installed packages list
-mapfile -t package_lines < "$INSTALLED_PACKAGES_FILE"
-
-# Processing installed packages
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
-package_counter=0
-batch_packages=()
 
 for line in "${package_lines[@]}"; do
     [ "$DEBUG_MODE" -ge 1 ] && echo "Processing line: $line"
@@ -166,7 +215,7 @@ for line in "${package_lines[@]}"; do
         
         # Determine the actual repository source
         if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
-            package_repo=$(determine_repo_source "$package_name")
+            package_repo=$(determine_repo_source "$package_name" "$package_version" "$package_arch")
         fi
 
         # Skip @commandline packages
@@ -212,7 +261,7 @@ done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
-    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*]}\""
+    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*']}\""
     "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"
 fi
 
