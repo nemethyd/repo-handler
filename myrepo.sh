@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.17
+VERSION=2.22
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -23,23 +23,23 @@ while [[ "$1" =~ ^-- ]]; do
         --debug-level)
             shift
             DEBUG_MODE=$1
-            ;;
+        ;;
         --max-packages)
             shift
             MAX_PACKAGES=$1
-            ;;
+        ;;
         --batch-size)
             shift
             BATCH_SIZE=$1
-            ;;
+        ;;
         --parallel)
             shift
             MAX_PARALLEL_JOBS=$1
-            ;;
+        ;;
         --version)
             echo "myrepo.sh Version $VERSION"
             exit 0
-            ;;
+        ;;
         --help)
             echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM] [--parallel NUM]"
             echo "Options:"
@@ -50,11 +50,11 @@ while [[ "$1" =~ ^-- ]]; do
             echo "  --version            Show script version"
             echo "  --help               Show this help message"
             exit 0
-            ;;
+        ;;
         *)
             echo "Unknown option: $1"
             exit 1
-            ;;
+        ;;
     esac
     shift
 done
@@ -72,11 +72,7 @@ download_repo_metadata() {
     declare -gA repo_cache
     for repo in "${ENABLED_REPOS[@]}"; do
         echo "Fetching metadata for $repo..."
-        repo_cache["$repo"]=$(dnf repoquery --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>/dev/null)
-        if [[ $DEBUG_MODE -ge 1 ]]; then
-            echo "Metadata for $repo:"
-            echo "${repo_cache[$repo]}"
-        fi
+        repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>myrepo.err)
     done
 }
 
@@ -96,7 +92,7 @@ is_package_in_local_sources() {
     local package_name=$1
     local package_version=$2
     local package_arch=$3
-
+    
     # Check in local repos metadata
     for repo in "${LOCAL_REPOS[@]}"; do
         if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
@@ -104,13 +100,13 @@ is_package_in_local_sources() {
             return
         fi
     done
-
+    
     # Check in rpmbuild directory
     if find "$RPMBUILD_PATH" -name "${package_name}-${package_version}*.rpm" | grep -q .; then
         echo "rpmbuild"
         return
     fi
-
+    
     echo "no"
 }
 
@@ -119,26 +115,28 @@ determine_repo_source() {
     local package_name=$1
     local package_version=$2
     local package_arch=$3
-
+    
     # Check if the package exists in any of the local sources
     local_repo=$(is_package_in_local_sources "$package_name" "$package_version" "$package_arch")
     if [[ "$local_repo" != "no" ]]; then
         echo "$local_repo"
         return
     fi
-
+    
     # If the package is not found in the local sources, determine the original repository
     for repo in "${ENABLED_REPOS[@]}"; do
         if [[ $DEBUG_MODE -ge 1 ]]; then
-            echo "Checking ${repo} for ${package_name}-${package_version}.${package_arch}"
+            echo "Checking ${repo} for ${package_name}-${package_version}.${package_arch}" >&2
+            # echo "${repo_cache[$repo]}" > "$repo.cache"
         fi
-        if echo "${repo_cache[$repo]}" | grep -q "${package_name}-${package_version}.${package_arch}"; then
+        if echo "${repo_cache[$repo]}" | grep -qE "${package_name}(-[0-9]+:)?${package_version}.${package_arch}"; then
             echo "$repo"
             return
         fi
+        
     done
-
-    echo "System"
+    
+    echo "Invalid"  # Default to Invalid if not found elsewhere
 }
 
 # Collect initial list of RPM files
@@ -156,11 +154,18 @@ batch_packages=()
 # Function to get the repository path
 get_repo_path() {
     local package_repo=$1
+    
+    # Handle System and invalid cases
+    if [[ "$package_repo" == "System" || "$package_repo" == "Invalid" ]]; then
+        echo ""
+        return
+    fi
+    
     local repo_key="${virtual_repo_map[$package_repo]}"
     if [[ -n "$repo_key" && "$repo_key" != "@commandline" ]]; then
         echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
     else
-        echo "$LOCAL_REPO_PATH/$1/getPackage"
+        echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
     fi
 }
 
@@ -175,6 +180,7 @@ get_repo_name() {
     fi
 }
 
+#main loop processing the lines
 for line in "${package_lines[@]}"; do
     [ "$DEBUG_MODE" -ge 1 ] && echo "Processing line: $line"
     
@@ -183,61 +189,61 @@ for line in "${package_lines[@]}"; do
         continue
     fi
     
-    if [[ $line =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
-        package_name=${BASH_REMATCH[1]}
-        package_arch=${BASH_REMATCH[2]}
-        package_version=${BASH_REMATCH[3]}
-        package_repo=${BASH_REMATCH[4]}
-        
-        # Determine the actual repository source
-        if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
-            package_repo=$(determine_repo_source "$package_name" "$package_version" "$package_arch")
-        fi
+if [[ $line =~ ^([^\ ]+)-([0-9]*:)?([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
+    package_name=${BASH_REMATCH[1]}
+    epoch_version=${BASH_REMATCH[2]}
+    package_version=${BASH_REMATCH[3]}
+    package_arch=${BASH_REMATCH[4]}
+    package_repo=${BASH_REMATCH[6]}
 
-        # Skip @commandline packages
-        if [[ "$package_repo" == "@commandline" ]]; then
-            [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping @commandline package: $package_name"
-            continue
-        fi
-
-        # Extract epoch if present
-        if [[ $package_version =~ ([0-9]+):(.+) ]]; then
-            epoch=${BASH_REMATCH[1]}
-            version=${BASH_REMATCH[2]}
-        else
-            epoch=""
-            version=$package_version
-        fi
-        
-        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $version, Epoch: $epoch, Repo: $package_repo"
-        
-        repo_path=$(get_repo_path "$package_repo")
-        repo_name=$(get_repo_name "$package_repo")
-        if [[ -n "$repo_path" ]]; then
-            used_directories["$repo_path"]=1
-            batch_packages+=("$repo_name|$package_name|$epoch|$version|$package_arch|$repo_path")
-        fi
-        
-        ((package_counter++))
-        
-        if (( MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES )); then
-            echo "Processed $MAX_PACKAGES packages. Stopping."
-            break
-        fi
-
-        # Check if we have reached the batch size
-        if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
-            [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*]}\""
-            "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}" &
-            batch_packages=()
-            wait_for_jobs
-        fi
+    # Determine the actual repository source
+    if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
+        package_repo=$(determine_repo_source "$package_name" "$package_version" "$package_arch")
     fi
+
+    # Skip @commandline packages and those from invalid repos
+    if [[ "$package_repo" == "@commandline" || "$package_repo" == "Invalid" ]]; then
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping $package_repo package: $package_name"
+        continue
+    fi
+
+    [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $package_version, Epoch: $epoch, Repo: $package_repo"
+
+    repo_path=$(get_repo_path "$package_repo")
+    repo_name=$(get_repo_name "$package_repo")
+
+    # Add debugging information about repo_path and repo_name
+    [ "$DEBUG_MODE" -ge 1 ] && echo "Determined repo_path: $repo_path, repo_name: $repo_name for package: $package_name"
+
+    if [[ -n "$repo_path" ]]; then
+        used_directories["$repo_name"]="$repo_path"
+        batch_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_arch|$repo_path")
+    else
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Invalid or non-existent repo path: $repo_path for package: $package_name"
+        continue
+    fi
+
+    ((package_counter++))
+
+    if (( MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES )); then
+        echo "Processed $MAX_PACKAGES packages. Stopping."
+        break
+    fi
+
+    # Check if we have reached the batch size
+    if (( ${#batch_packages[@]} >= BATCH_SIZE )); then
+        [ $DEBUG_MODE -gt 0 ] && echo '$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"'
+        "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}" &
+        batch_packages=()
+        wait_for_jobs
+    fi
+fi
+
 done
 
 # Process any remaining packages in the last batch
 if (( ${#batch_packages[@]} > 0 )); then
-    [ "$DEBUG_MODE" -gt 0 ] && echo "$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages \"${batch_packages[*]}\" --local-repos \"${LOCAL_REPOS[*']}\""
+    [ "$DEBUG_MODE" -gt 0 ] && echo '$SCRIPT_DIR/process-package.sh --debug-level $DEBUG_MODE --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"'
     "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"
 fi
 
@@ -267,3 +273,4 @@ rm "$INSTALLED_PACKAGES_FILE"
 
 echo "All packages have been processed."
 echo "myrepo.sh Version $VERSION completed."
+
