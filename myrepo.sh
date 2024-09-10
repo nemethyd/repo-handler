@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.22
+VERSION=2.23
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -190,11 +190,12 @@ for line in "${package_lines[@]}"; do
     fi
     
 if [[ $line =~ ^([^\ ]+)-([0-9]*:)?([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
-    package_name=${BASH_REMATCH[1]}
-    epoch_version=${BASH_REMATCH[2]}
-    package_version=${BASH_REMATCH[3]}
-    package_arch=${BASH_REMATCH[4]}
-    package_repo=${BASH_REMATCH[6]}
+    package_name=${BASH_REMATCH[1]}    # This now captures the full package name, including any hyphens
+    epoch_version=${BASH_REMATCH[2]}   # Captures the epoch (if present)
+    package_version=${BASH_REMATCH[3]} # Captures the version
+    package_arch=${BASH_REMATCH[4]}    # Captures the architecture
+    package_repo=${BASH_REMATCH[6]}    # Captures the repository name
+
 
     # Determine the actual repository source
     if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
@@ -217,7 +218,7 @@ if [[ $line =~ ^([^\ ]+)-([0-9]*:)?([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:s
 
     if [[ -n "$repo_path" ]]; then
         used_directories["$repo_name"]="$repo_path"
-        batch_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_arch|$repo_path")
+        batch_packages+=("$repo_name|$package_name|$epoch_version|$package_version|$package_arch|$repo_path")
     else
         [ "$DEBUG_MODE" -ge 1 ] && echo "Invalid or non-existent repo path: $repo_path for package: $package_name"
         continue
@@ -237,6 +238,7 @@ if [[ $line =~ ^([^\ ]+)-([0-9]*:)?([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:s
         batch_packages=()
         wait_for_jobs
     fi
+fi
 fi
 
 done
