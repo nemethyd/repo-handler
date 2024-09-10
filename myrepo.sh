@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.25
+VERSION=2.26
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -189,20 +189,20 @@ for line in "${package_lines[@]}"; do
         continue
     fi
     
-    if [[ $line =~ ^([^.]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
-        package_name=${BASH_REMATCH[1]}    # Package name (before the first dot)
-        package_arch=${BASH_REMATCH[2]}    # Package architecture (after the dot)
-        full_version=${BASH_REMATCH[3]}    # Full version string (can include epoch)
-        package_repo=${BASH_REMATCH[4]}    # Package repository (after the second group of spaces and @ symbol)
-        
-        # Check if the version part contains a colon
-        if [[ "$full_version" =~ ^([0-9]+):(.*)$ ]]; then
-            epoch_version=${BASH_REMATCH[1]}    # Epoch (part before the colon)
-            package_version=${BASH_REMATCH[2]}  # Package version (part after the colon)
-        else
-            epoch_version=""                    # No epoch, set to empty
-            package_version=$full_version       # Entire version is the package_version
-        fi
+if [[ $line =~ ^([^.]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
+    package_name=${BASH_REMATCH[1]}    # Package name (before the first dot)
+    package_arch=${BASH_REMATCH[2]}    # Package architecture (after the dot)
+    full_version=${BASH_REMATCH[3]}    # Full version string (can include epoch)
+    package_repo=${BASH_REMATCH[4]}    # Package repository (after the second group of spaces and @ symbol)
+    
+    # Ensure $full_version is set correctly
+    if [[ "$full_version" =~ ^([0-9]+):(.*)$ ]]; then
+        epoch_version=${BASH_REMATCH[1]}    # Epoch (part before the colon)
+        package_version=${BASH_REMATCH[2]}  # Package version (part after the colon)
+    else
+        epoch_version=""                    # No epoch, set to empty
+        package_version=$full_version       # Entire version is the package_version
+    fi
         
         # Determine the actual repository source
         if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
@@ -215,7 +215,7 @@ for line in "${package_lines[@]}"; do
             continue
         fi
         
-        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $package_version, Epoch: $epoch, Repo: $package_repo"
+        [ "$DEBUG_MODE" -ge 1 ] && echo "Matched package: $package_name, Version: $package_version, Epoch: $epoch_version, Repo: $package_repo"
         
         repo_path=$(get_repo_path "$package_repo")
         repo_name=$(get_repo_name "$package_repo")
