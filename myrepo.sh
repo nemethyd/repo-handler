@@ -1,13 +1,18 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.26
+VERSION=2.28
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
 : "${BATCH_SIZE:=10}"
 : "${MAX_PARALLEL_JOBS:=1}"
+
+#truncate working files
+echo "" > locally_found.lst
+echo "" > myrepo.err
+echo "" > process_package.log
 
 # Configuration
 SCRIPT_DIR=$(dirname "$0")
@@ -103,8 +108,7 @@ is_package_in_local_sources() {
     
     # Check in rpmbuild directory
     if find "$RPMBUILD_PATH" -name "${package_name}-${package_version}*.rpm" | grep -q .; then
-        echo "rpmbuild"
-        return
+        echo "${package_name}-${package_version}*.rpm" >> "locally_found.lst" #locally found packages
     fi
     
     echo "no"

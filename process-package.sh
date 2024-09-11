@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.26
+VERSION=2.28
 
 # Parse options
 DEBUG_MODE=0
