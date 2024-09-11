@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script version
-VERSION=2.11
+VERSION=2.26
 
 # Parse options
 DEBUG_MODE=0
@@ -68,11 +68,11 @@ get_package_status() {
 
     local package_pattern="${repo_path}/${package_name}-${package_version}.${package_arch}.rpm"
 
-    if compgen -G "$package_pattern" > /dev/null; then
+    if compgen -G "$package_pattern" >> process_package.log; then
         echo "EXISTS"
-    elif compgen -G "${repo_path}/${package_name}-${epoch}:${package_version}.${package_arch}.rpm" > /dev/null; then
+    elif compgen -G "${repo_path}/${package_name}-${epoch}:${package_version}.${package_arch}.rpm" >> process_package.log; then
         echo "EXISTS"
-    elif compgen -G "${repo_path}/${package_name}-*.rpm" > /dev/null; then
+    elif compgen -G "${repo_path}/${package_name}-*.rpm" >> process_package.log; then
         echo "UPDATE"
     else
         echo "NEW"

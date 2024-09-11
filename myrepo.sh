@@ -72,7 +72,7 @@ download_repo_metadata() {
     declare -gA repo_cache
     for repo in "${ENABLED_REPOS[@]}"; do
         echo "Fetching metadata for $repo..."
-        repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>myrepo.err)
+        repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}-%{epoch}:%{version}-%{release}.%{arch}" 2>>myrepo.err)
     done
 }
 
