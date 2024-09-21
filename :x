@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Version: 2.33 
+# Version: 2.30
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-21
 #
@@ -13,17 +13,12 @@
 # - This script is called by the main `myrepo.sh` script with package and repository details.
 
 # Script version
-VERSION=2.33
+VERSION=2.30
 
 # Parse options
 DEBUG_MODE=0
 PACKAGES=""
 LOCAL_REPOS=""
-LONGEST_REPO_NAME=0
-
-# Minimum length for repo_name alignment
-MIN_REPO_NAME_LENGTH=22  # Set a minimum length; adjust as needed
-LONGEST_REPO_NAME=0
 
 while [[ "$1" =~ ^-- ]]; do
     case "$1" in
@@ -58,24 +53,6 @@ done
 IFS=' ' read -r -a packages <<< "$PACKAGES"
 IFS=' ' read -r -a local_repos <<< "$LOCAL_REPOS"
 
-# Determine the longest repo_name dynamically
-for pkg in "${packages[@]}"; do
-    IFS='|' read -r repo_name package_name epoch package_version package_arch repo_path <<< "$pkg"
-    repo_name_length=${#repo_name}
-    if (( repo_name_length > LONGEST_REPO_NAME )); then
-        LONGEST_REPO_NAME=$repo_name_length
-    fi
-done
-
-# Set the final padding length (either the longest repo name or the minimum length)
-PADDING_LENGTH=$(( LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH ))
-
-# Function to align the output by padding the repo_name
-align_repo_name() {
-    local repo_name="$1"
-    printf "%-${PADDING_LENGTH}s" "$repo_name"
-}
-
 # Function to determine the status of a package
 get_package_status() {
     local repo_name="$1"
@@ -100,7 +77,7 @@ get_package_status() {
     fi
 }
 
-# Function to remove existing package files (ensures only older versions are removed)
+# Function to remove existing package files
 remove_existing_packages() {
     local package_name="$1"
     local package_version="$2"
@@ -109,20 +86,14 @@ remove_existing_packages() {
     local version_regex='^[0-9]+:(.*)$'
     [[ "$package_version" =~ $version_regex ]] && package_version=${BASH_REMATCH[1]}
 
-    [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_path"
+    [ "$DEBUG_MODE" -ge 1 ] && echo "$repo_name: Removing older versions of $package_name from $repo_path"
 
     for file in "$repo_path/${package_name}"-*.rpm; do
-        local filename=$(basename "$file")
-
-        # Extract the version from the file and compare it with the current version
-        file_version=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$file")
-
-        # Only remove if the file version is older than the current version
-        if [[ "$file_version" < "$package_version" ]]; then
-            echo -e "\e[34m$(align_repo_name "$repo_name"): $filename removed\e[0m"
+        if [[ -f "$file" && "$file" != *"$package_version"* ]]; then
+            echo -e "\e[34m$repo_name: $file removed\e[0m"
             rm -f "$file"
         fi
-    done
+    done    
 }
 
 # Function to download packages
@@ -171,25 +142,25 @@ for pkg in "${packages[@]}"; do
 
     case $package_status in
         "EXISTS")
-            echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version.$package_arch exists.\e[0m"
+            echo -e "\e[32m$repo_name: $package_name-$package_version.$package_arch exists.\e[0m"
             ;;
         "NEW")
             if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                echo -e "\e[33m$(align_repo_name "$repo_name"): $(download_packages "$pkg")\e[0m"
+                echo -e "\e[33m$repo_name:$(download_packages "$pkg")\e[0m"
             else
-                echo -e "\e[33m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version.$package_arch.\e[0m"
+                echo -e "\e[33m$repo_name: Skipping download for local package $package_name-$package_version.$package_arch.\e[0m"
             fi
             ;;
         "UPDATE")
             if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
                 remove_existing_packages "$package_name" "$package_version" "$repo_path"
-                echo -e "\e[34m$(align_repo_name "$repo_name"): $(download_packages "$pkg")\e[0m"
+                echo -e "\e[34m$repo_name:$(download_packages "$pkg")\e[0m"
             else
-                echo -e "\e[34m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version.$package_arch.\e[0m"
+                echo -e "\e[34m$repo_name: Skipping download for local package $package_name-$package_version.$package_arch.\e[0m"
             fi
             ;;
         *)
-            echo -e "\e[31mError: Unknown package status '$package_status' for $(align_repo_name "$repo_name"): $package_name-$package_version.$package_arch.\e[0m"
+            echo -e "\e[31mError: Unknown package status '$package_status' for $repo_name::$package_name-$package_version.$package_arch.\e[0m"
             ;;
     esac
 done
