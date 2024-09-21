@@ -4,6 +4,7 @@
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-21
 #
+# MIT licensing
 # Purpose: 
 # This script replicates and updates a local repository from installed packages 
 # and synchronizes it with a shared repository, handling updates and cleanup of 

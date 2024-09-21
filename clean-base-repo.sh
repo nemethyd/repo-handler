@@ -4,6 +4,7 @@
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT 4o
 # Date: 2024-09-21
 #
+# MIT licensing
 # Script purpose:
 # This script cleans up local repositories by removing older versions of packages,
 # regenerates metadata using createrepo, and synchronizes the cleaned repositories

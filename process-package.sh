@@ -4,6 +4,7 @@
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-21
 #
+# MIT licensing
 # Purpose:
 # This script processes packages in batches and checks their status within a local 
 # repository. If a package is outdated, it removes the older versions and downloads
