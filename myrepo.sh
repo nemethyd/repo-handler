@@ -1,24 +1,18 @@
 #!/bin/bash
 
-# Version: 2.34
+# Version: 2.35
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Date: 2024-09-21
-#
+# Date: 2024-09-22
+
 # MIT licensing
-# Purpose: 
-# This script replicates and updates a local repository from installed packages 
-# and synchronizes it with a shared repository, handling updates and cleanup of 
+# Purpose:
+# This script replicates and updates a local repository from installed packages
+# and synchronizes it with a shared repository, handling updates and cleanup of
 # older package versions.
-#
-# Usage:
-# - Set the appropriate local and shared repo paths.
-# - This script processes packages installed on the system and replicates them 
-#   to the local repository, ensuring the latest versions are always kept.
-# - Finally, it syncs the cleaned local repository with the shared repository.
 
 # Script version
-VERSION=2.34
-echo $0 $VERSION
+VERSION=2.35
+echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -26,7 +20,7 @@ echo $0 $VERSION
 : "${BATCH_SIZE:=10}"
 : "${MAX_PARALLEL_JOBS:=1}"
 
-#truncate working files
+# Truncate working files
 echo "" > locally_found.lst
 echo "" > myrepo.err
 echo "" > process_package.log
@@ -102,6 +96,10 @@ ENABLED_REPOS=($(dnf repolist enabled | awk 'NR>1 {print $1}'))
 # Download repository metadata for enabled repos
 download_repo_metadata
 
+# Declare associative arrays
+declare -A used_directories
+declare -A repo_cache
+
 # Function to check if a package is available in the local repos or rpmbuild directory
 is_package_in_local_sources() {
     local package_name=$1
@@ -115,10 +113,10 @@ is_package_in_local_sources() {
             return
         fi
     done
-    
+
     # Check in rpmbuild directory
     if find "$RPMBUILD_PATH" -name "${package_name}-${package_version}*.rpm" | grep -q .; then
-        echo "${package_name}-${package_version}*.rpm" >> "locally_found.lst" #locally found packages
+        echo "${package_name}-${package_version}*.rpm" >> "locally_found.lst" # Locally found packages
     fi
 
     echo "no"
@@ -170,40 +168,31 @@ get_repo_path() {
         echo ""
         return
     fi
-    
-    local repo_key="${virtual_repo_map[$package_repo]}"
-    if [[ -n "$repo_key" && "$repo_key" != "@commandline" ]]; then
-        echo "$LOCAL_REPO_PATH/$repo_key/getPackage"
-    else
-        echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
-    fi
+
+    # Simplify by directly constructing the path
+    echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
 }
 
 # Function to get the repository name
 get_repo_name() {
     local package_repo=$1
-    local repo_key="${virtual_repo_map[$package_repo]}"
-    if [[ -n "$repo_key" ]]; then
-        echo "$repo_key"
-    else
-        echo "$package_repo"
-    fi
+    echo "$package_repo"
 }
 
 # Main loop processing the lines
 for line in "${package_lines[@]}"; do
     if [[ "$line" =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
-        package_name=${BASH_REMATCH[1]}    
-        package_arch=${BASH_REMATCH[2]}    
-        full_version=${BASH_REMATCH[3]}    
-        package_repo=${BASH_REMATCH[4]}    
+        package_name=${BASH_REMATCH[1]}
+        package_arch=${BASH_REMATCH[2]}
+        full_version=${BASH_REMATCH[3]}
+        package_repo=${BASH_REMATCH[4]}
 
         if [[ "$full_version" =~ ^([0-9]+):(.*)$ ]]; then
-            epoch_version=${BASH_REMATCH[1]}    
-            package_version=${BASH_REMATCH[2]}  
+            epoch_version=${BASH_REMATCH[1]}
+            package_version=${BASH_REMATCH[2]}
         else
-            epoch_version=""                    
-            package_version=$full_version       
+            epoch_version=""
+            package_version=$full_version
         fi
 
         if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
@@ -242,20 +231,20 @@ if (( ${#batch_packages[@]} > 0 )); then
     "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"
 fi
 
-# Function to remove uninstalled packages from the repo
+# Function to remove uninstalled or removed packages from the repo
 remove_uninstalled_packages() {
     local repo_path="$1"
-    
-    echo "Checking for uninstalled packages in: $repo_path"
-    
+
+    echo "Checking for uninstalled or removed packages in: $repo_path"
+
     # Find all RPM files in the repo
     find "$repo_path" -type f -name "*.rpm" | while read -r rpm_file; do
         package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file")
         package_version=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$rpm_file")
         package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file")
-        
+
         # Check if the package is installed on the golden copy machine
-        if ! grep -q "${package_name}.${package_arch}" "$INSTALLED_PACKAGES_FILE"; then
+        if ! grep -q "${package_name}\.${package_arch}" "$INSTALLED_PACKAGES_FILE"; then
             echo "Removing uninstalled package: $package_name-$package_version.$package_arch from $repo_path"
             rm -f "$rpm_file"
         fi
@@ -263,20 +252,22 @@ remove_uninstalled_packages() {
 }
 
 # Remove uninstalled packages from each repo
-for repo in "${LOCAL_REPOS[@]}"; do
-    local_repo_path="$LOCAL_REPO_PATH/$repo"
-    
-    if [[ -d "$local_repo_path" ]]; then
-        remove_uninstalled_packages "$local_repo_path"
+for repo in "${!used_directories[@]}"; do
+    repo_path="${used_directories[$repo]}"
+    parent_dir=$(dirname "$repo_path")
+
+    if [[ -d "$parent_dir" ]]; then
+        remove_uninstalled_packages "$repo_path"
     else
-        echo "Repository path $local_repo_path does not exist, skipping."
+        echo "Repository path $parent_dir does not exist, skipping."
     fi
 done
 
 # Update and sync the repositories
 if (( MAX_PACKAGES == 0 )); then
-    for dir in "${used_directories[@]}"; do
-        parent_dir=$(dirname "$dir")
+    for repo in "${!used_directories[@]}"; do
+        repo_path="${used_directories[$repo]}"
+        parent_dir=$(dirname "$repo_path")
         createrepo --update "$parent_dir"
     done
 
@@ -287,4 +278,3 @@ fi
 rm "$INSTALLED_PACKAGES_FILE"
 
 echo "myrepo.sh Version $VERSION completed."
-
