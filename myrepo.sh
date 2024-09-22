@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Version: 2.33
+# Version: 2.34
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-21
 #
@@ -17,7 +17,8 @@
 # - Finally, it syncs the cleaned local repository with the shared repository.
 
 # Script version
-VERSION=2.33
+VERSION=2.34
+echo $0 $VERSION
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -191,7 +192,7 @@ get_repo_name() {
 
 # Main loop processing the lines
 for line in "${package_lines[@]}"; do
-    if [[ "$line" =~ ^([^.]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
+    if [[ "$line" =~ ^([^\ ]+)\.([^\ ]+)\ +([^\ ]+)\ +@([^\ ]+)[[:space:]]*$ ]]; then
         package_name=${BASH_REMATCH[1]}    
         package_arch=${BASH_REMATCH[2]}    
         full_version=${BASH_REMATCH[3]}    
