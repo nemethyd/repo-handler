@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Version: 2.32
+# Version: 2.33
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-21
 #
@@ -17,7 +17,7 @@
 # - Finally, it syncs the cleaned local repository with the shared repository.
 
 # Script version
-VERSION=2.32
+VERSION=2.33
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -274,7 +274,7 @@ done
 
 # Update and sync the repositories
 if (( MAX_PACKAGES == 0 )); then
-    for dir in "${!used_directories[@]}"; do
+    for dir in "${used_directories[@]}"; do
         parent_dir=$(dirname "$dir")
         createrepo --update "$parent_dir"
     done
