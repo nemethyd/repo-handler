@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Version: 2.37
+# Version: 2.38
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Date: 2024-09-23
+# Date: 2024-09-24
 
 # MIT licensing
 # Purpose:
@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.37
+VERSION=2.38
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -75,11 +75,6 @@ wait_for_jobs() {
     done
 }
 
-# Function to escape regex metacharacters
-escape_regex() {
-    printf '%s\n' "$1" | sed 's/[][\\.^$*+?|(){}]/\\&/g'
-}
-
 # Function to download repository metadata and store in memory
 download_repo_metadata() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Downloading repository metadata..."
@@ -90,9 +85,9 @@ download_repo_metadata() {
     done
 }
 
-# Fetch installed packages list
+# Fetch installed packages list using rpm for precise matching
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
-dnf list --installed > "$INSTALLED_PACKAGES_FILE"
+rpm -qa --qf "%{NAME}.%{ARCH}\n" > "$INSTALLED_PACKAGES_FILE"
 
 # Fetch the list of enabled repositories
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of enabled repositories..."
@@ -125,7 +120,6 @@ is_package_in_local_sources() {
 
     echo "no"
 }
-
 # Function to determine the repository source of a package
 determine_repo_source() {
     local package_name=$1
@@ -136,6 +130,12 @@ determine_repo_source() {
     local_repo=$(is_package_in_local_sources "$package_name" "$package_version" "$package_arch")
     if [[ "$local_repo" != "no" ]]; then
         echo "$local_repo"
+        return
+    fi
+
+    # Check if the package is system-installed (from @System)
+    if grep -qE "^${package_name}\.${package_arch}[[:space:]]" "$INSTALLED_PACKAGES_FILE"; then
+        echo "System"
         return
     fi
 
@@ -249,6 +249,11 @@ done
 if (( ${#batch_packages[@]} > 0 )); then
     "$SCRIPT_DIR/process-package.sh" --debug-level "$DEBUG_MODE" --packages "${batch_packages[*]}" --local-repos "${LOCAL_REPOS[*]}"
 fi
+
+# Function to escape regex metacharacters
+escape_regex() {
+    printf '%s\n' "$1" | sed 's/[][\\.^$*+?|(){}]/\\&/g'
+}
 
 # Function to remove uninstalled or removed packages from the repo
 remove_uninstalled_packages() {
