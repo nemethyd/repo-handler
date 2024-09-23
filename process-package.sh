@@ -1,79 +1,124 @@
 #!/bin/bash
 
-# Version: 2.45
+# Version: 2.51
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Date: 2024-09-26
+# Date: 2024-09-28
 #
 # MIT licensing
 # Purpose:
 # This script processes packages in batches and checks their status within a local
 # repository. If a package is outdated, it removes the older versions and downloads
 # the latest version from the enabled repositories.
-#
-# Usage:
-# - This script is called by the main `myrepo.sh` script with package and repository details.
 
 # Script version
-VERSION=2.45
+VERSION=2.51
 
 # Parse options
-DEBUG_MODE=0
+: "${DEBUG_MODE:=0}"
 DRY_RUN=0
 PACKAGES=""
 LOCAL_REPOS=""
-LONGEST_REPO_NAME=0
+PARALLEL_DOWNLOADS=1 # Default parallel downloads for dnf
+PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
+LOCK_FILE="/tmp/package_process.lock"
+LONGEST_REPO_NAME=22
 
-# Minimum length for repo_name alignment
-MIN_REPO_NAME_LENGTH=22  # Set a minimum length; adjust as needed
-LONGEST_REPO_NAME=0
-
+# Parse arguments
 while [[ "$1" =~ ^-- ]]; do
     case "$1" in
-        --debug-level)
-            shift
-            DEBUG_MODE=$1
+    --debug-level)
+        shift
+        DEBUG_MODE=$1
         ;;
-        --dry-run)
-            DRY_RUN=1
+    --dry-run)
+        DRY_RUN=1
         ;;
-        --packages)
-            shift
-            PACKAGES=$1
+    --packages)
+        shift
+        PACKAGES=$1
         ;;
-        --local-repos)
-            shift
-            LOCAL_REPOS=$1
+    --local-repos)
+        shift
+        LOCAL_REPOS=$1
         ;;
-        --version)
-            echo "process-package.sh Version $VERSION"
-            exit 0
+    --processed-file)
+        shift
+        PROCESSED_PACKAGES_FILE=$1
         ;;
-        --help)
-            echo "Usage: process-package.sh [--debug-level LEVEL] --packages \"PACKAGES\" --local-repos \"REPOS\" --dry-run"
-            exit 0
+    --lock-file)
+        shift
+        LOCK_FILE=$1
         ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
+    --temp-file)
+        shift
+        TEMP_FILE=$1
+        ;;
+    --parallel)
+        shift
+        PARALLEL_DOWNLOADS=$1
+        ;;
+    --version)
+        echo "process-package.sh Version $VERSION"
+        exit 0
+        ;;
+    --help)
+        echo "Usage: process-package.sh [--debug-level LEVEL] --packages \"PACKAGES\" --local-repos \"REPOS\" --parallel NUM --processed-file FILE --lock-file FILE"
+        exit 0
+        ;;
+    *)
+        echo "Unknown option: $1"
+        exit 1
         ;;
     esac
     shift
 done
 
-IFS=' ' read -r -a packages <<< "$PACKAGES"
-IFS=' ' read -r -a local_repos <<< "$LOCAL_REPOS"
+# Check if script is run as root
+if [[ $DEBUG_MODE -ge 1 && $DEBUG_MODE -lt 3 && $EUID -ne 0 ]]; then
+    echo "This script must be run as root or with sudo privileges." >&2
+    exit 1
+fi
 
-# Determine the longest repo_name dynamically
-for pkg in "${packages[@]}"; do
-    IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<< "$pkg"
-    repo_name_length=${#repo_name}
-    if (( repo_name_length > LONGEST_REPO_NAME )); then
-        LONGEST_REPO_NAME=$repo_name_length
-    fi
-done
+# truncate PROCESSED_PACKAGES_FILE for debug level ==3
+if [[ $DEBUG_MODE -eq 3 ]]; then
+    >$PROCESSED_PACKAGES_FILE
+fi
 
-# Set the final padding length (either the longest repo name or the minimum length)
-PADDING_LENGTH=$(( LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH ))
+IFS=' ' read -r -a packages <<<"$PACKAGES"
+IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
+
+# Ensure a temporary file is set for the thread
+if [[ -z "$TEMP_FILE" ]]; then
+    echo "Error: Temporary file not provided. Creating one." >&2
+    TEMP_FILE =$(mktemp)
+fi
+
+# Function to write log to the specific temporary file
+log_to_temp_file() {
+    echo "$1" >>"$TEMP_FILE"
+}
+
+# Example: Write debug information to the temp file
+if [[ $DEBUG_MODE -ge 1 ]]; then
+    log_to_temp_file "Debug Mode Active - Process PID: $$"
+fi
+
+# Function to safely track a processed package
+track_processed_package() {
+    local pkg_key="$1"
+    (
+        flock -x 200 # Exclusive lock
+        echo "$pkg_key" >>"$PROCESSED_PACKAGES_FILE"
+    ) 200>"$LOCK_FILE"
+}
+
+# Function to check if the package has already been processed
+is_package_processed() {
+    local pkg_key="$1"
+    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
+}
+
+PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
 
 # Function to align the output by padding the repo_name
 align_repo_name() {
@@ -95,19 +140,19 @@ get_package_status() {
 
     local package_pattern="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
 
-    if compgen -G "$package_pattern" > /dev/null; then
+    if compgen -G "$package_pattern" >/dev/null; then
         echo "EXISTS"
         return
     elif [[ -n "$epoch" ]]; then
         local package_pattern_with_epoch="${repo_path}/${package_name}-${epoch}:${package_version}-${package_release}.${package_arch}.rpm"
-        if compgen -G "$package_pattern_with_epoch" > /dev/null; then
+        if compgen -G "$package_pattern_with_epoch" >/dev/null; then
             echo "EXISTS"
             return
         fi
     fi
 
     # Check if there are any packages with this name in the repo_path
-    if compgen -G "${repo_path}/${package_name}-*.rpm" > /dev/null; then
+    if compgen -G "${repo_path}/${package_name}-*.rpm" >/dev/null; then
         echo "UPDATE"
     else
         echo "NEW"
@@ -134,7 +179,7 @@ remove_existing_packages() {
 
         # Compare versions
         if [[ "$file_version_release" < "$current_version_release" ]]; then
-            if (( DRY_RUN )); then
+            if ((DRY_RUN)); then
                 echo -e "\e[34m$(align_repo_name "$repo_name"): $filename would be removed (dry-run)\e[0m"
             else
                 echo -e "\e[34m$(align_repo_name "$repo_name"): $filename removed\e[0m"
@@ -144,7 +189,8 @@ remove_existing_packages() {
     done
 }
 
-# Function to download packages
+# Ensure to append all logs to the temp file
+# Function to download packages with parallel downloads
 download_packages() {
     local packages=("$@")
     local repo_path
@@ -157,7 +203,7 @@ download_packages() {
     declare -A repo_packages
 
     for pkg in "${packages[@]}"; do
-        IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<< "$pkg"
+        IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
         if [ -n "$epoch" ]; then
             package_version="${epoch}:${package_version}"
         fi
@@ -169,55 +215,77 @@ download_packages() {
     done
 
     for repo_path in "${!repo_packages[@]}"; do
-        mkdir -p "$repo_path" || { echo "Failed to create directory: $repo_path" >&2; exit 1; }
+        mkdir -p "$repo_path" || {
+            log_to_temp_file "Failed to create directory: $repo_path"
+            exit 1
+        }
 
-        if (( DRY_RUN )); then
-            echo "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
+        if ((DRY_RUN)); then
+            log_to_temp_file "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
         else
-            [ "$DEBUG_MODE" -ge 1 ] && echo "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-            if ! dnf download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 2>&1 | grep -v "metadata expiration check"; then
-                echo "Failed to download packages: ${repo_packages[$repo_path]}" >&2
+            log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
+            if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 1>>process_package.log 2>>myrepo.err; then
+                log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
                 return 1
             fi
+
         fi
     done
 }
 
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
-    IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<< "$pkg"
+    IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
+
+    pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+
+    # Skip if already processed (this check should be synchronized)
+    if is_package_processed "$pkg_key"; then
+        [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
+        continue
+    fi
 
     if [[ -z "$repo_path" ]]; then
         [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping package with empty repo_path: $package_name" >&2
         continue
     fi
 
+    repo_name_length=${#repo_name}
+    if ((repo_name_length > LONGEST_REPO_NAME)); then
+        LONGEST_REPO_NAME=$repo_name_length
+    fi
+
     package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$repo_path")
-    [ $? -ne 0 ] && { echo "Failed to determine status for package: $package_name-$package_version-$package_release" >&2; exit 1; }
+    [ $? -ne 0 ] && {
+        echo "Failed to determine status for package: $package_name-$package_version-$package_release" >&2
+        exit 1
+    }
 
     case $package_status in
-        "EXISTS")
-            echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
-            ;;
-        "NEW")
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                echo -e "\e[33m$(align_repo_name "$repo_name"): Downloading $package_name-$package_version-$package_release.$package_arch\e[0m"
-                download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
-            else
-                echo -e "\e[33m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
-            fi
-            ;;
-        "UPDATE")
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
-                echo -e "\e[34m$(align_repo_name "$repo_name"): Downloading $package_name-$package_version-$package_release.$package_arch\e[0m"
-                download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
-            else
-                echo -e "\e[34m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
-            fi
-            ;;
-        *)
-            echo -e "\e[31mError: Unknown package status '$package_status' for $(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch.\e[0m"
-            ;;
+    "EXISTS")
+        echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
+        ;;
+    "NEW")
+        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+            track_processed_package "$pkg_key"
+            echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch added.\e[0m"
+            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+        else
+            echo -e "\e[33m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
+        fi
+        ;;
+    "UPDATE")
+        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+            track_processed_package "$pkg_key"
+            remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
+            echo -e "\e[34m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch updated.\e[0m"
+            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+        else
+            echo -e "\e[34m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
+        fi
+        ;;
+    *)
+        echo -e "\e[31mError: Unknown package status '$package_status' for $(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch.\e[0m"
+        ;;
     esac
 done
