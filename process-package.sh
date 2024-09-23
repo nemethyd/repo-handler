@@ -10,10 +10,11 @@
 # the latest version from the enabled repositories.
 
 # Script version
-VERSION=2.51
+VERSION=2.52
 
 # Parse options
 : "${DEBUG_MODE:=0}"
+: "${NO_SUDO}"
 DRY_RUN=0
 PACKAGES=""
 LOCAL_REPOS=""
@@ -40,21 +41,24 @@ while [[ "$1" =~ ^-- ]]; do
         shift
         LOCAL_REPOS=$1
         ;;
-    --processed-file)
-        shift
-        PROCESSED_PACKAGES_FILE=$1
-        ;;
     --lock-file)
         shift
         LOCK_FILE=$1
         ;;
-    --temp-file)
-        shift
-        TEMP_FILE=$1
+    --no-sudo)
+        NO_SUDO=1
         ;;
     --parallel)
         shift
         PARALLEL_DOWNLOADS=$1
+        ;;
+    --processed-file)
+        shift
+        PROCESSED_PACKAGES_FILE=$1
+        ;;
+    --temp-file)
+        shift
+        TEMP_FILE=$1
         ;;
     --version)
         echo "process-package.sh Version $VERSION"
@@ -73,15 +77,22 @@ while [[ "$1" =~ ^-- ]]; do
 done
 
 # Check if script is run as root
-if [[ $DEBUG_MODE -ge 1 && $DEBUG_MODE -lt 3 && $EUID -ne 0 ]]; then
+if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     echo "This script must be run as root or with sudo privileges." >&2
     exit 1
 fi
 
 # truncate PROCESSED_PACKAGES_FILE for debug level ==3
 if [[ $DEBUG_MODE -eq 3 ]]; then
-    >$PROCESSED_PACKAGES_FILE
+    : >"$PROCESSED_PACKAGES_FILE"
 fi
+
+# Function to wait for background jobs to finish
+wait_for_jobs() {
+    while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
+        sleep 1
+    done
+}
 
 IFS=' ' read -r -a packages <<<"$PACKAGES"
 IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
@@ -89,7 +100,7 @@ IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
 # Ensure a temporary file is set for the thread
 if [[ -z "$TEMP_FILE" ]]; then
     echo "Error: Temporary file not provided. Creating one." >&2
-    TEMP_FILE =$(mktemp)
+    TEMP_FILE=$(mktemp)
 fi
 
 # Function to write log to the specific temporary file
@@ -168,9 +179,9 @@ remove_existing_packages() {
     [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_path" >&2
 
     # Find all RPM files for the package
-    for file in "$repo_path/${package_name}-*.rpm"; do
+    for file in "$repo_path/${package_name}-"*.rpm; do
         [ -e "$file" ] || continue
-        local filename=$(basename "$file")
+        filename=$(basename "$file")
 
         # Extract the version-release
         file_version_release=$(rpm -qp --queryformat '%{EPOCH}:%{VERSION}-%{RELEASE}' "$file" 2>/dev/null)
@@ -188,8 +199,7 @@ remove_existing_packages() {
     done
 }
 
-# Ensure to append all logs to the temp file
-# Function to download packages with parallel downloads
+# Download packages with parallel downloads
 download_packages() {
     local packages=("$@")
     local repo_path
@@ -207,7 +217,7 @@ download_packages() {
             package_version="${epoch}:${package_version}"
         fi
         if [ -n "$repo_path" ]; then
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+            if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
                 repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
             fi
         fi
@@ -219,15 +229,18 @@ download_packages() {
             exit 1
         }
 
+        # Run download in background and wait for jobs if parallel limit is reached
         if ((DRY_RUN)); then
             log_to_temp_file "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
         else
-            log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-            if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve ${repo_packages[$repo_path]} 1>>process_package.log 2>>myrepo.err; then
-                log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
-                return 1
-            fi
-
+            {
+                log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
+                if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve "${repo_packages[$repo_path]}" 1>>process_package.log 2>>myrepo.err; then
+                    log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
+                    return 1
+                fi
+            } &
+            wait_for_jobs # Control the number of parallel jobs
         fi
     done
 }
@@ -238,7 +251,7 @@ for pkg in "${packages[@]}"; do
 
     pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
 
-    # Skip if already processed (this check should be synchronized)
+    # Skip if already processed
     if is_package_processed "$pkg_key"; then
         [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
         continue
@@ -248,43 +261,20 @@ for pkg in "${packages[@]}"; do
         [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping package with empty repo_path: $package_name" >&2
         continue
     fi
-
-    repo_name_length=${#repo_name}
-    if ((repo_name_length > LONGEST_REPO_NAME)); then
-        LONGEST_REPO_NAME=$repo_name_length
-    fi
-
-    package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$repo_path")
-    [ $? -ne 0 ] && {
+    
+    if ! package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$repo_path"); then
         echo "Failed to determine status for package: $package_name-$package_version-$package_release" >&2
         exit 1
-    }
+    fi
 
     case $package_status in
-    "EXISTS")
-        echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
-        ;;
-    "NEW")
-        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-            track_processed_package "$pkg_key"
-            echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch added.\e[0m"
-            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
-        else
-            echo -e "\e[33m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
-        fi
-        ;;
-    "UPDATE")
-        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-            track_processed_package "$pkg_key"
-            remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
-            echo -e "\e[34m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch updated.\e[0m"
-            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
-        else
-            echo -e "\e[34m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
-        fi
-        ;;
-    *)
-        echo -e "\e[31mError: Unknown package status '$package_status' for $(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch.\e[0m"
+    "NEW" | "UPDATE")
+        # Run download_packages in the background and control parallel jobs
+        download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path" &
+        wait_for_jobs # Control the number of parallel jobs
         ;;
     esac
 done
+
+# Wait for all background jobs to complete before finishing the script
+wait

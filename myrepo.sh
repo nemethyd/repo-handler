@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.51
+VERSION=2.52
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -19,6 +19,7 @@ echo "$0 Version $VERSION"
 : "${BATCH_SIZE:=10}"
 : "${MAX_PARALLEL_JOBS:=1}"
 : "${DRY_RUN:=0}"
+: "${NO_SUDO}"
 
 # Configuration
 SCRIPT_DIR=$(dirname "$0")
@@ -31,11 +32,11 @@ PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share" #$(mktemp)
 LOCK_FILE="/tmp/package_process.lock"
 
 # Truncate working files
->locally_found.lst
->myrepo.err
->process_package.log
->$PROCESSED_PACKAGES_FILE
->$LOCK_FILE
+: >locally_found.lst
+: >myrepo.err
+: >process_package.log
+: >$PROCESSED_PACKAGES_FILE
+: >$LOCK_FILE
 
 # Local repos updated to contain only the required ones
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
@@ -47,31 +48,34 @@ declare -A used_directories
 # Parse options
 while [[ "$1" =~ ^-- ]]; do
     case "$1" in
+    --batch-size)
+        shift
+        BATCH_SIZE=$1
+        ;;
     --debug-level)
         shift
         DEBUG_MODE=$1
+        ;;
+    --dry-run)
+        DRY_RUN=1
         ;;
     --max-packages)
         shift
         MAX_PACKAGES=$1
         ;;
-    --batch-size)
-        shift
-        BATCH_SIZE=$1
+    --no-sudo)
+        NO_SUDO=1
         ;;
     --parallel)
         shift
         MAX_PARALLEL_JOBS=$1
-        ;;
-    --dry-run)
-        DRY_RUN=1
         ;;
     --version)
         echo "myrepo.sh Version $VERSION"
         exit 0
         ;;
     --help)
-        echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM] [--parallel NUM] [--dry-run]"
+        echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM] [--parallel NUM] [--dry-run] [--no-sudo]"
         exit 0
         ;;
     *)
@@ -83,7 +87,7 @@ while [[ "$1" =~ ^-- ]]; do
 done
 
 # Check if script is run as root
-if [[ $EUID -ne 0 ]]; then
+if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     echo "This script must be run as root or with sudo privileges." >&2
     exit 1
 fi
@@ -104,7 +108,7 @@ wait_for_jobs() {
 
 # Function to create a unique temporary file for each thread
 create_temp_file() {
-    mktemp /tmp/myrepo_$(date +%s)_$$.XXXXXX
+    mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX
 }
 
 # Function to download repository metadata and store in memory
@@ -113,8 +117,7 @@ download_repo_metadata() {
     declare -gA repo_cache
     for repo in "${ENABLED_REPOS[@]}"; do
         echo "Fetching metadata for $repo..."
-        repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
-        if [[ $? -ne 0 ]]; then
+        if ! repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err); then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for $repo" >>myrepo.err
         fi
     done
@@ -199,15 +202,16 @@ is_package_in_local_sources() {
 
 # Fetch installed packages list with detailed information
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
-dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>myrepo.err
-if [[ $? -ne 0 ]]; then
+
+if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>myrepo.err; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching installed packages list." >>myrepo.err
     exit 1
 fi
 
 # Fetch the list of enabled repositories
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of enabled repositories..."
-ENABLED_REPOS=($(dnf repolist enabled | awk 'NR>1 {print $1}'))
+mapfile -t ENABLED_REPOS < <(dnf repolist enabled | awk 'NR>1 {print $1}')
+
 if [[ ${#ENABLED_REPOS[@]} -eq 0 ]]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - No enabled repositories found." >>myrepo.err
     exit 1
@@ -216,9 +220,9 @@ fi
 # Download repository metadata for enabled repos
 download_repo_metadata
 
-# Collect initial list of RPM files
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
-initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
+# # Collect initial list of RPM files
+# echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
+# initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
 
 # Read the installed packages list
 mapfile -t package_lines <"$INSTALLED_PACKAGES_FILE"
@@ -315,8 +319,8 @@ for line in "${package_lines[@]}"; do
             --temp-file "$temp_file" &
 
         batch_packages=()
-        wait_for_jobs
     fi
+    wait_for_jobs
 
 done
 
@@ -334,7 +338,8 @@ fi
 # Function to remove uninstalled or removed packages from the repo
 remove_uninstalled_packages() {
     local repo_path="$1"
-    local repo_name=$(basename "$repo_path") # Extract repository name from path
+    local repo_name
+    repo_name=$(basename "$repo_path") # Extract repository name from path
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for uninstalled or removed packages in: $repo_path"
 
@@ -380,15 +385,14 @@ if ((MAX_PACKAGES == 0)); then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
     for repo in "${!used_directories[@]}"; do
         repo_path="${used_directories[$repo]}"
-        parent_dir=$(dirname "$repo_path")
-        repo_name=$(basename "$repo_path") 
+        repo_name=$(basename "$repo_path")
 
         if ((DRY_RUN)); then
-            echo "Dry Run: Would run 'createrepo --update $parent_dir'"
+            echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
             echo "Creating $repo_name repository indexes"
-            createrepo --update "$parent_dir" >>process_package.log 2>>myrepo.err
-            if [[ $? -ne 0 ]]; then
+
+            if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
             fi
         fi
@@ -398,8 +402,8 @@ if ((MAX_PACKAGES == 0)); then
     if ((DRY_RUN)); then
         echo "Dry Run: Would run 'rsync -av --delete $LOCAL_REPO_PATH/ $SHARED_REPO_PATH/'"
     else
-        rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/" >>process_package.log 2>>myrepo.err
-        if [[ $? -ne 0 ]]; then
+
+        if ! rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/" >>process_package.log 2>>myrepo.err; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Error synchronizing repositories." >>myrepo.err
         fi
     fi
