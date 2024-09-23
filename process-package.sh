@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Version: 2.51
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-28
 #

@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Version: 2.50
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-28
 
@@ -11,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.50
+VERSION=2.51
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -362,7 +361,7 @@ remove_uninstalled_packages() {
 # Remove uninstalled packages from each repo in parallel
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
 for repo in "${!used_directories[@]}"; do
-    local repo_path="${used_directories[$repo]}"
+    repo_path="${used_directories[$repo]}"
 
     if [[ -d "$repo_path" ]]; then
         # Run remove_uninstalled_packages in the background
@@ -380,9 +379,9 @@ wait
 if ((MAX_PACKAGES == 0)); then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
     for repo in "${!used_directories[@]}"; do
-        local repo_path="${used_directories[$repo]}"
-        local parent_dir=$(dirname "$repo_path")
-         local repo_name=$(basename "$repo_path") 
+        repo_path="${used_directories[$repo]}"
+        parent_dir=$(dirname "$repo_path")
+        repo_name=$(basename "$repo_path") 
 
         if ((DRY_RUN)); then
             echo "Dry Run: Would run 'createrepo --update $parent_dir'"
