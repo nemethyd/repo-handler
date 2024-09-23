@@ -2,25 +2,24 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
 # Date: 2024-09-28
-#
+
 # MIT licensing
 # Purpose:
-# This script processes packages in batches and checks their status within a local
-# repository. If a package is outdated, it removes the older versions and downloads
-# the latest version from the enabled repositories.
+# This script processes packages in batches and handles updates and cleanup of older package versions.
 
 # Script version
-VERSION=2.52
+VERSION=2.54
 
-# Parse options
+# Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
-: "${NO_SUDO}"
-DRY_RUN=0
+: "${BATCH_SIZE:=10}"
+: "${DRY_RUN:=0}"
+
 PACKAGES=""
 LOCAL_REPOS=""
 PARALLEL_DOWNLOADS=1 # Default parallel downloads for dnf
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
-LOCK_FILE="/tmp/package_process.lock"
+LOCK_DIR="/tmp/package_process.lock.d"
 LONGEST_REPO_NAME=22
 
 # Parse arguments
@@ -82,6 +81,25 @@ if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Lock functions using atomic directory creation
+acquire_lock() {
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "Lock directory already exists. Another process may be running."
+        exit 1
+    fi
+}
+
+release_lock() {
+    rmdir "$LOCK_DIR"
+}
+
+# Use trap to ensure release_lock is always called
+# trap release_lock EXIT
+
+# Acquiring the lock
+# acquire_lock
+
+
 # truncate PROCESSED_PACKAGES_FILE for debug level ==3
 if [[ $DEBUG_MODE -eq 3 ]]; then
     : >"$PROCESSED_PACKAGES_FILE"
@@ -90,6 +108,7 @@ fi
 # Function to wait for background jobs to finish
 wait_for_jobs() {
     while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
+        echo "Waiting for jobs in process_package ... Currently running: $(jobs -rp | wc -l)" # Debugging line
         sleep 1
     done
 }
@@ -261,7 +280,7 @@ for pkg in "${packages[@]}"; do
         [ "$DEBUG_MODE" -ge 1 ] && echo "Skipping package with empty repo_path: $package_name" >&2
         continue
     fi
-    
+
     if ! package_status=$(get_package_status "$repo_name" "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$repo_path"); then
         echo "Failed to determine status for package: $package_name-$package_version-$package_release" >&2
         exit 1
@@ -271,10 +290,12 @@ for pkg in "${packages[@]}"; do
     "NEW" | "UPDATE")
         # Run download_packages in the background and control parallel jobs
         download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path" &
-        wait_for_jobs # Control the number of parallel jobs
+        # wait_for_jobs # Control the number of parallel jobs
         ;;
     esac
 done
 
 # Wait for all background jobs to complete before finishing the script
-wait
+wait 
+
+

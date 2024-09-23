@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.52
+VERSION=2.54
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -27,16 +27,15 @@ LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE=$(mktemp)
 # Declare a file to keep track of processed packages
-PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share" #$(mktemp)
+PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 [[ $DEBUG_MODE -ge 1 ]] && echo "PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"
-LOCK_FILE="/tmp/package_process.lock"
+LOCK_DIR="/tmp/package_process.lock.d"
 
 # Truncate working files
 : >locally_found.lst
 : >myrepo.err
 : >process_package.log
 : >$PROCESSED_PACKAGES_FILE
-: >$LOCK_FILE
 
 # Local repos updated to contain only the required ones
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
@@ -92,6 +91,21 @@ if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Lock functions using atomic directory creation
+acquire_lock() {
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "Lock directory already exists. Another process may be running."
+        exit 1
+    fi
+}
+
+release_lock() {
+    rmdir "$LOCK_DIR"
+}
+
+# Use trap to ensure release_lock is always called
+# trap release_lock EXIT
+
 # Calculate the parallel download factor by multiplying MAX_PARALLEL_JOBS and BATCH_SIZE
 PARALLEL_DOWNLOADS=$((MAX_PARALLEL_JOBS * BATCH_SIZE))
 # Cap the parallel downloads at a maximum of 20
@@ -102,7 +116,8 @@ fi
 # Function to wait for background jobs to finish
 wait_for_jobs() {
     while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
-        sleep 1
+          echo "Waiting for jobs in myrepo ... Currently running: $(jobs -rp | wc -l)"  # Debugging line
+          sleep 1
     done
 }
 
@@ -319,8 +334,10 @@ for line in "${package_lines[@]}"; do
             --temp-file "$temp_file" &
 
         batch_packages=()
+
+        # Wait for background jobs to finish before starting a new batch
+        # wait_for_jobs
     fi
-    wait_for_jobs
 
 done
 
@@ -371,7 +388,7 @@ for repo in "${!used_directories[@]}"; do
     if [[ -d "$repo_path" ]]; then
         # Run remove_uninstalled_packages in the background
         remove_uninstalled_packages "$repo_path" &
-        wait_for_jobs
+        # wait_for_jobs
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
     fi
@@ -391,7 +408,6 @@ if ((MAX_PACKAGES == 0)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
             echo "Creating $repo_name repository indexes"
-
             if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
             fi
@@ -402,7 +418,6 @@ if ((MAX_PACKAGES == 0)); then
     if ((DRY_RUN)); then
         echo "Dry Run: Would run 'rsync -av --delete $LOCAL_REPO_PATH/ $SHARED_REPO_PATH/'"
     else
-
         if ! rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/" >>process_package.log 2>>myrepo.err; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Error synchronizing repositories." >>myrepo.err
         fi
