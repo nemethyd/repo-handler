@@ -116,8 +116,8 @@ fi
 # Function to wait for background jobs to finish
 wait_for_jobs() {
     while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
-          echo "Waiting for jobs in myrepo ... Currently running: $(jobs -rp | wc -l)"  # Debugging line
-          sleep 1
+        echo "Waiting for jobs in myrepo ... Currently running: $(jobs -rp | wc -l)" # Debugging line
+        sleep 1
     done
 }
 
@@ -398,7 +398,7 @@ done
 wait
 
 # Update and sync the repositories
-if ((MAX_PACKAGES == 0)); then
+if [ "$MAX_PACKAGES" -eq 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
     for repo in "${!used_directories[@]}"; do
         repo_path="${used_directories[$repo]}"
@@ -408,8 +408,8 @@ if ((MAX_PACKAGES == 0)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
             echo "Creating $repo_name repository indexes"
-            createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err
-            if [[ $? -ne 0 ]]; then
+
+            if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
             fi
         fi

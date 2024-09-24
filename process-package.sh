@@ -99,7 +99,6 @@ release_lock() {
 # Acquiring the lock
 # acquire_lock
 
-
 # truncate PROCESSED_PACKAGES_FILE for debug level ==3
 if [[ $DEBUG_MODE -eq 3 ]]; then
     : >"$PROCESSED_PACKAGES_FILE"
@@ -240,7 +239,7 @@ download_packages() {
         fi
         if [ -n "$repo_path" ]; then
             if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
-            if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+                echo "repo_name=$repo_name"
                 repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
             fi
         fi
@@ -291,15 +290,31 @@ for pkg in "${packages[@]}"; do
     fi
 
     case $package_status in
-    "NEW" | "UPDATE")
-        # Run download_packages in the background and control parallel jobs
-        download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path" &
-        # wait_for_jobs # Control the number of parallel jobs
+    "EXISTS")
+        echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
+        ;;
+    "NEW")
+        if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+            echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch added.\e[0m"
+            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+        else
+            echo -e "\e[33m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
+        fi
+        ;;
+    "UPDATE")
+        if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+            remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
+            echo -e "\e[34m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch updated.\e[0m"
+            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+        else
+            echo -e "\e[34m$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch.\e[0m"
+        fi
+        ;;
+    *)
+        echo -e "\e[31mError: Unknown package status '$package_status' for $(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch.\e[0m"
         ;;
     esac
 done
 
 # Wait for all background jobs to complete before finishing the script
-wait 
-
-
+wait
