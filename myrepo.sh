@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.54
+VERSION=2.55
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -408,7 +408,8 @@ if ((MAX_PACKAGES == 0)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
             echo "Creating $repo_name repository indexes"
-            if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
+            createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err
+            if [[ $? -ne 0 ]]; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
             fi
         fi

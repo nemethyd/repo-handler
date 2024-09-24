@@ -8,7 +8,7 @@
 # This script processes packages in batches and handles updates and cleanup of older package versions.
 
 # Script version
-VERSION=2.54
+VERSION=2.55
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -103,6 +103,7 @@ release_lock() {
 # truncate PROCESSED_PACKAGES_FILE for debug level ==3
 if [[ $DEBUG_MODE -eq 3 ]]; then
     : >"$PROCESSED_PACKAGES_FILE"
+    : >"$PROCESSED_PACKAGES_FILE"
 fi
 
 # Function to wait for background jobs to finish
@@ -119,6 +120,7 @@ IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
 # Ensure a temporary file is set for the thread
 if [[ -z "$TEMP_FILE" ]]; then
     echo "Error: Temporary file not provided. Creating one." >&2
+    TEMP_FILE=$(mktemp)
     TEMP_FILE=$(mktemp)
 fi
 
@@ -198,8 +200,9 @@ remove_existing_packages() {
     [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_path" >&2
 
     # Find all RPM files for the package
-    for file in "$repo_path/${package_name}-"*.rpm; do
+    for file in "$repo_path/${package_name}"-*.rpm; do
         [ -e "$file" ] || continue
+        local filename
         filename=$(basename "$file")
 
         # Extract the version-release
@@ -236,6 +239,7 @@ download_packages() {
             package_version="${epoch}:${package_version}"
         fi
         if [ -n "$repo_path" ]; then
+            if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
             if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
                 repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
             fi
