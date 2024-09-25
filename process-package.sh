@@ -8,18 +8,19 @@
 # This script processes packages in batches and handles updates and cleanup of older package versions.
 
 # Script version
-VERSION=2.55
+VERSION=2.56
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${BATCH_SIZE:=10}"
 : "${DRY_RUN:=0}"
+: "${MAX_PARALLEL_JOBS:=1}"
+
 
 PACKAGES=""
 LOCAL_REPOS=""
 PARALLEL_DOWNLOADS=1 # Default parallel downloads for dnf
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
-LOCK_DIR="/tmp/package_process.lock.d"
 LONGEST_REPO_NAME=22
 
 # Parse arguments
@@ -39,10 +40,6 @@ while [[ "$1" =~ ^-- ]]; do
     --local-repos)
         shift
         LOCAL_REPOS=$1
-        ;;
-    --lock-file)
-        shift
-        LOCK_FILE=$1
         ;;
     --no-sudo)
         NO_SUDO=1
@@ -64,7 +61,7 @@ while [[ "$1" =~ ^-- ]]; do
         exit 0
         ;;
     --help)
-        echo "Usage: process-package.sh [--debug-level LEVEL] --packages \"PACKAGES\" --local-repos \"REPOS\" --parallel NUM --processed-file FILE --lock-file FILE"
+        echo "Usage: process-package.sh [--debug-level LEVEL] --packages \"PACKAGES\" --local-repos \"REPOS\" --parallel NUM --processed-file FILE"
         exit 0
         ;;
     *)
@@ -81,37 +78,26 @@ if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Lock functions using atomic directory creation
-acquire_lock() {
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo "Lock directory already exists. Another process may be running."
-        exit 1
-    fi
-}
-
-release_lock() {
-    rmdir "$LOCK_DIR"
-}
-
-# Use trap to ensure release_lock is always called
-# trap release_lock EXIT
-
-# Acquiring the lock
-# acquire_lock
-
 # truncate PROCESSED_PACKAGES_FILE for debug level ==3
 if [[ $DEBUG_MODE -eq 3 ]]; then
-    : >"$PROCESSED_PACKAGES_FILE"
     : >"$PROCESSED_PACKAGES_FILE"
 fi
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
-    while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
-        echo "Waiting for jobs in process_package ... Currently running: $(jobs -rp | wc -l)" # Debugging line
-        sleep 1
+    local current_jobs
+
+    while true; do
+        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
+        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+            sleep 2
+        else
+            break
+        fi
     done
 }
+
 
 IFS=' ' read -r -a packages <<<"$PACKAGES"
 IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
@@ -119,7 +105,6 @@ IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
 # Ensure a temporary file is set for the thread
 if [[ -z "$TEMP_FILE" ]]; then
     echo "Error: Temporary file not provided. Creating one." >&2
-    TEMP_FILE=$(mktemp)
     TEMP_FILE=$(mktemp)
 fi
 
@@ -132,21 +117,6 @@ log_to_temp_file() {
 if [[ $DEBUG_MODE -ge 1 ]]; then
     log_to_temp_file "Debug Mode Active - Process PID: $$"
 fi
-
-# Function to safely track a processed package
-track_processed_package() {
-    local pkg_key="$1"
-    (
-        flock -x 200 # Exclusive lock
-        echo "$pkg_key" >>"$PROCESSED_PACKAGES_FILE"
-    ) 200>"$LOCK_FILE"
-}
-
-# Function to check if the package has already been processed
-is_package_processed() {
-    local pkg_key="$1"
-    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
-}
 
 PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
 
@@ -238,7 +208,7 @@ download_packages() {
             package_version="${epoch}:${package_version}"
         fi
         if [ -n "$repo_path" ]; then
-            if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
                 echo "repo_name=$repo_name"
                 repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
             fi
@@ -265,6 +235,12 @@ download_packages() {
             wait_for_jobs # Control the number of parallel jobs
         fi
     done
+}
+
+# Function to check if the package has already been processed
+is_package_processed() {
+    local pkg_key="$1"
+    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
 }
 
 # Handle the packages based on their status
@@ -294,7 +270,7 @@ for pkg in "${packages[@]}"; do
         echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
         ;;
     "NEW")
-        if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
             echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch added.\e[0m"
             download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
         else
@@ -302,7 +278,7 @@ for pkg in "${packages[@]}"; do
         fi
         ;;
     "UPDATE")
-        if [[ ! " ${local_repos[*]} " =~ ${repo_name} ]]; then
+        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
             remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
             echo -e "\e[34m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch updated.\e[0m"
             download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"

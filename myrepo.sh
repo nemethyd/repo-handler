@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.55
+VERSION=2.56
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -29,7 +29,6 @@ INSTALLED_PACKAGES_FILE=$(mktemp)
 # Declare a file to keep track of processed packages
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 [[ $DEBUG_MODE -ge 1 ]] && echo "PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"
-LOCK_DIR="/tmp/package_process.lock.d"
 
 # Truncate working files
 : >locally_found.lst
@@ -91,20 +90,6 @@ if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Lock functions using atomic directory creation
-acquire_lock() {
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo "Lock directory already exists. Another process may be running."
-        exit 1
-    fi
-}
-
-release_lock() {
-    rmdir "$LOCK_DIR"
-}
-
-# Use trap to ensure release_lock is always called
-# trap release_lock EXIT
 
 # Calculate the parallel download factor by multiplying MAX_PARALLEL_JOBS and BATCH_SIZE
 PARALLEL_DOWNLOADS=$((MAX_PARALLEL_JOBS * BATCH_SIZE))
@@ -115,11 +100,19 @@ fi
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
-    while (($(jobs -rp | wc -l) >= MAX_PARALLEL_JOBS)); do
-        echo "Waiting for jobs in myrepo ... Currently running: $(jobs -rp | wc -l)" # Debugging line
-        sleep 1
+    local current_jobs
+
+    while true; do
+        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
+        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+            sleep 1
+        else
+            break
+        fi
     done
 }
+
 
 # Function to create a unique temporary file for each thread
 create_temp_file() {
@@ -163,7 +156,7 @@ determine_repo_source() {
 
     # If repoid is empty or 'System', attempt to find the repository from metadata
     for repo in "${ENABLED_REPOS[@]}"; do
-        if [[ $DEBUG_MODE -ge 1 ]]; then
+        if [[ $DEBUG_MODE -ge 2 ]]; then
             echo "Checking ${repo} for ${package_name}-${epoch_version}:${package_version}-${package_release}.${package_arch}" >&2
         fi
 
@@ -330,7 +323,6 @@ for line in "${package_lines[@]}"; do
             --packages "${batch_packages[*]}" \
             --local-repos "${LOCAL_REPOS[*]}" \
             --processed-file "$PROCESSED_PACKAGES_FILE" \
-            --lock-file "$LOCK_FILE" \
             --temp-file "$temp_file" &
 
         batch_packages=()
@@ -348,7 +340,7 @@ if ((${#batch_packages[@]} > 0)); then
         --packages "${batch_packages[*]}" \
         --local-repos "${LOCAL_REPOS[*]}" \
         --processed-file "$PROCESSED_PACKAGES_FILE" \
-        --lock-file "$LOCK_FILE" \
+        --parallel "$MAX_PARALLEL_JOBS" \
         --temp-file "$temp_file" &
 fi
 
@@ -401,13 +393,14 @@ wait
 if [ "$MAX_PACKAGES" -eq 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
     for repo in "${!used_directories[@]}"; do
-        repo_path="${used_directories[$repo]}"
+        package_path="${used_directories[$repo]}"
+        repo_path=$(dirname "$package_path")
         repo_name=$(basename "$repo_path")
 
         if ((DRY_RUN)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
-            echo "Creating $repo_name repository indexes"
+            [[ $DEBUG_MODE -ge 1 ]] && echo "Creating $repo_name repository indexes"
 
             if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
