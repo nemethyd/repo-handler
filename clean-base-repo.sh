@@ -33,13 +33,11 @@ clean_repo() {
     find "$repo_path" -type f -name "*.rpm" | while read -r rpm_file; do
         # Extract package name and version info from the RPM file
         package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file")
-        package_version=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$rpm_file")
-
         # Find all versions of the same package
         package_files=$(find "$repo_path" -name "${package_name}-*.rpm")
 
         # Sort package files by version (latest version should come last)
-        sorted_files=$(printf "%s\n" $package_files | sort -V)
+        sorted_files=$(printf "%s\n" "$package_files" | sort -V)
 
         # Get the latest file
         latest_file=$(echo "$sorted_files" | tail -n 1)

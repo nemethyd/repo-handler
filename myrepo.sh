@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.56
+VERSION=2.57
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -25,23 +25,23 @@ echo "$0 Version $VERSION"
 SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-INSTALLED_PACKAGES_FILE=$(mktemp)
+INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
 # Declare a file to keep track of processed packages
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 [[ $DEBUG_MODE -ge 1 ]] && echo "PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"
 
-# Truncate working files
+# Ensure that the files exist, then truncate them
+touch locally_found.lst myrepo.err process_package.log "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
+
 : >locally_found.lst
 : >myrepo.err
 : >process_package.log
-: >$PROCESSED_PACKAGES_FILE
+: >"$PROCESSED_PACKAGES_FILE"
+: >"$INSTALLED_PACKAGES_FILE"
 
 # Local repos updated to contain only the required ones
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
-
-# Declare associative array for used_directories
-declare -A used_directories
 
 # Parse options
 while [[ "$1" =~ ^-- ]]; do
@@ -98,40 +98,19 @@ if ((PARALLEL_DOWNLOADS > 20)); then
     PARALLEL_DOWNLOADS=20
 fi
 
-# Function to wait for background jobs to finish
-wait_for_jobs() {
-    local current_jobs
+# Declare associative array for used_directories
+declare -A used_directories
+# Declare associative array for available packages in enabled repos
+declare -A available_repo_packages
 
-    while true; do
-        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
-        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
-            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
-            sleep 1
-        else
-            break
-        fi
-    done
-}
-
+### Functions section in abc order ###
 
 # Function to create a unique temporary file for each thread
 create_temp_file() {
     mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX
 }
 
-# Function to download repository metadata and store in memory
-download_repo_metadata() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Downloading repository metadata..."
-    declare -gA repo_cache
-    for repo in "${ENABLED_REPOS[@]}"; do
-        echo "Fetching metadata for $repo..."
-        if ! repo_cache["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err); then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for $repo" >>myrepo.err
-        fi
-    done
-}
-
-# Function to determine the repository source of a package
+# Function to determine the repository source of a package based on available packages
 determine_repo_source() {
     local package_name=$1
     local epoch_version=$2
@@ -139,28 +118,9 @@ determine_repo_source() {
     local package_release=$4
     local package_arch=$5
 
-    # Check if the package exists in any of the local sources
-    local_repo=$(is_package_in_local_sources "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
-    if [[ "$local_repo" != "no" ]]; then
-        echo "$local_repo"
-        return
-    fi
-
-    # Attempt to find the repository ID using dnf repoquery
-    repoid=$(dnf repoquery --installed --qf "%{repoid}" "$package_name" 2>>myrepo.err | head -n1)
-
-    if [[ -n "$repoid" && "$repoid" != "@System" && "$repoid" != "System" ]]; then
-        echo "$repoid"
-        return
-    fi
-
-    # If repoid is empty or 'System', attempt to find the repository from metadata
     for repo in "${ENABLED_REPOS[@]}"; do
-        if [[ $DEBUG_MODE -ge 2 ]]; then
-            echo "Checking ${repo} for ${package_name}-${epoch_version}:${package_version}-${package_release}.${package_arch}" >&2
-        fi
-
-        # Reconstruct the exact package string
+        # Reconstruct the expected package string
+        local expected_package
         if [[ -n "$epoch_version" ]]; then
             expected_package="${package_name}|${epoch_version}|${package_version}|${package_release}|${package_arch}"
         else
@@ -168,13 +128,55 @@ determine_repo_source() {
         fi
 
         # Compare with cached repo metadata
-        if echo "${repo_cache[$repo]}" | grep -Fxq "$expected_package"; then
+        if echo "${available_repo_packages[$repo]}" | grep -Fxq "$expected_package"; then
             echo "$repo"
             return
         fi
     done
 
-    echo "Invalid" # Default to Invalid if not found elsewhere
+    echo "Invalid"  # Default to Invalid if no matching repo is found
+}
+
+# Function to download repository metadata and store in memory
+download_repo_metadata() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Downloading repository metadata..."
+
+    # For enabled repositories
+    for repo in "${ENABLED_REPOS[@]}"; do
+        echo "Fetching metadata for $repo..."
+        available_repo_packages["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
+        if [[ -z "${available_repo_packages[$repo]}" ]]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for $repo" >>myrepo.err
+        fi
+    done
+
+    # For local repositories
+    declare -gA repo_cache  # Declare repo_cache globally to be used later
+    for local_repo in "${LOCAL_REPOS[@]}"; do
+        echo "Fetching metadata for local repo $local_repo..."
+        repo_cache["$local_repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$local_repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
+        if [[ -z "${repo_cache[$local_repo]}" ]]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for local repo $local_repo" >>myrepo.err
+        fi
+    done
+}
+
+# Function to get the repository name
+get_repo_name() {
+    local package_repo=$1
+    echo "$package_repo"
+}
+
+# Function to get the repository path
+get_repo_path() {
+    local package_repo=$1
+    if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "Invalid" ]]; then
+        echo ""
+        return
+    fi
+
+    # Construct the path based on repository name
+    echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
 }
 
 # Function to check if a package exists in local sources
@@ -207,6 +209,50 @@ is_package_in_local_sources() {
 
     echo "no"
 }
+# Function to remove uninstalled or removed packages from the repo
+remove_uninstalled_packages() {
+    local repo_path="$1"
+    local repo_name
+    repo_name=$(basename "$repo_path") # Extract repository name from path
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for uninstalled or removed packages in: $repo_name"
+
+    # Find all RPM files for the repository
+    find "$repo_path" -type f -name "*.rpm" | while read -r rpm_file; do
+        package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>myrepo.err)
+        package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>myrepo.err)
+
+        # Check if the package is installed on the system using awk
+        if ! awk -F'|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
+            rpm_filename=$(basename "$rpm_file")
+            if ((DRY_RUN)); then
+                echo "$repo_name: $rpm_filename would be removed."
+            else
+                echo "$repo_name: $rpm_filename removed."
+                rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>myrepo.err
+            fi
+        else
+            [[ $DEBUG_MODE -ge 1 ]] && echo "$repo_name: $(basename "$rpm_file") exists." >&2
+        fi
+    done
+}
+
+# Function to wait for background jobs to finish
+wait_for_jobs() {
+    local current_jobs
+
+    while true; do
+        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
+        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+            sleep 1
+        else
+            break
+        fi
+    done
+}
+
+### Main processing section ###
 
 # Fetch installed packages list with detailed information
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
@@ -228,10 +274,6 @@ fi
 # Download repository metadata for enabled repos
 download_repo_metadata
 
-# # Collect initial list of RPM files
-# echo "$(date '+%Y-%m-%d %H:%M:%S') - Collecting initial list of RPM files..."
-# initial_rpm_files=($(find "$LOCAL_REPO_PATH"/ol9_* -type f -path "*/getPackage/*.rpm"))
-
 # Read the installed packages list
 mapfile -t package_lines <"$INSTALLED_PACKAGES_FILE"
 
@@ -240,29 +282,18 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
 package_counter=0
 batch_packages=()
 
-# Function to get the repository path
-get_repo_path() {
-    local package_repo=$1
-    if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "Invalid" ]]; then
-        echo ""
-        return
-    fi
-
-    # Construct the path based on repository name
-    echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
-}
-
-# Function to get the repository name
-get_repo_name() {
-    local package_repo=$1
-    echo "$package_repo"
-}
-
 # Main loop processing the lines
 for line in "${package_lines[@]}"; do
     # Expected format: name|epoch|version|release|arch|repoid
-
     IFS='|' read -r package_name epoch_version package_version package_release package_arch package_repo <<<"$line"
+
+    # If the package repo is System, @System, or @commandline, find the corresponding repo
+    if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
+        package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
+        if [[ $DEBUG_MODE -ge 1 ]]; then
+            echo "Mapped $package_name to repo: $package_repo"
+        fi
+    fi
 
     pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
 
@@ -343,34 +374,6 @@ if ((${#batch_packages[@]} > 0)); then
         --parallel "$MAX_PARALLEL_JOBS" \
         --temp-file "$temp_file" &
 fi
-
-# Function to remove uninstalled or removed packages from the repo
-remove_uninstalled_packages() {
-    local repo_path="$1"
-    local repo_name
-    repo_name=$(basename "$repo_path") # Extract repository name from path
-
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for uninstalled or removed packages in: $repo_path"
-
-    # Find all RPM files for the repository
-    find "$repo_path" -type f -name "*.rpm" | while read -r rpm_file; do
-        package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>myrepo.err)
-        package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>myrepo.err)
-
-        # Check if the package is installed on the system using awk
-        if ! awk -F'|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
-            rpm_filename=$(basename "$rpm_file")
-            if ((DRY_RUN)); then
-                echo "$repo_name: $rpm_filename would be removed."
-            else
-                echo "$repo_name: $rpm_filename removed."
-                rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>myrepo.err
-            fi
-        else
-            [[ $DEBUG_MODE -ge 1 ]] && echo "$repo_name: $(basename "$rpm_file") exists." >&2
-        fi
-    done
-}
 
 # Remove uninstalled packages from each repo in parallel
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
