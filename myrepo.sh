@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.57
+VERSION=2.58
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -349,7 +349,7 @@ for line in "${package_lines[@]}"; do
 
     # If batch size reached, process the batch
     if ((${#batch_packages[@]} >= BATCH_SIZE)); then
-        [[ DEBUG_MODE -ge 1 ]] && echo "batch: ${batch_packages[*]}"
+        [[ DEBUG_MODE -ge 1 ]] && echo "local-repos: ${LOCAL_REPOS[*]} batch: ${batch_packages[*]}"
         "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" \
             --packages "${batch_packages[*]}" \
             --local-repos "${LOCAL_REPOS[*]}" \

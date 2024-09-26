@@ -8,7 +8,7 @@
 # This script processes packages in batches and handles updates and cleanup of older package versions.
 
 # Script version
-VERSION=2.56
+VERSION=2.58
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
@@ -83,47 +83,59 @@ if [[ $DEBUG_MODE -eq 3 ]]; then
     : >"$PROCESSED_PACKAGES_FILE"
 fi
 
-# Function to wait for background jobs to finish
-wait_for_jobs() {
-    local current_jobs
-
-    while true; do
-        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
-        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
-            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
-            sleep 2
-        else
-            break
-        fi
-    done
-}
-
-
-IFS=' ' read -r -a packages <<<"$PACKAGES"
-IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
-
-# Ensure a temporary file is set for the thread
-if [[ -z "$TEMP_FILE" ]]; then
-    echo "Error: Temporary file not provided. Creating one." >&2
-    TEMP_FILE=$(mktemp)
-fi
-
-# Function to write log to the specific temporary file
-log_to_temp_file() {
-    echo "$1" >>"$TEMP_FILE"
-}
-
-# Example: Write debug information to the temp file
-if [[ $DEBUG_MODE -ge 1 ]]; then
-    log_to_temp_file "Debug Mode Active - Process PID: $$"
-fi
-
-PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
+### Functions section in abc order ###
 
 # Function to align the output by padding the repo_name
 align_repo_name() {
     local repo_name="$1"
     printf "%-${PADDING_LENGTH}s" "$repo_name"
+}
+
+# Download packages with parallel downloads
+download_packages() {
+    local packages=("$@")
+    local repo_path
+    local package_name
+    local package_version
+    local package_release
+    local package_arch
+    local epoch
+
+    declare -A repo_packages
+
+    for pkg in "${packages[@]}"; do
+        IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
+        if [ -n "$epoch" ]; then
+            package_version="${epoch}:${package_version}"
+        fi
+        if [ -n "$repo_path" ]; then
+            if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
+                echo "repo_name=$repo_name"
+                repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
+            fi
+        fi
+    done
+
+    for repo_path in "${!repo_packages[@]}"; do
+        mkdir -p "$repo_path" || {
+            log_to_temp_file "Failed to create directory: $repo_path"
+            exit 1
+        }
+
+        # Run download in background and wait for jobs if parallel limit is reached
+        if ((DRY_RUN)); then
+            log_to_temp_file "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
+        else
+            {
+                log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
+                if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve "${repo_packages[$repo_path]}" 1>>process_package.log 2>>myrepo.err; then
+                    log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
+                    return 1
+                fi
+            } &
+        fi
+        wait_for_jobs # Control the number of parallel jobs
+    done
 }
 
 # Function to determine the status of a package
@@ -159,6 +171,17 @@ get_package_status() {
     fi
 }
 
+# Function to check if the package has already been processed
+is_package_processed() {
+    local pkg_key="$1"
+    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
+}
+
+# Function to write log to the specific temporary file
+log_to_temp_file() {
+    echo "$1" >>"$TEMP_FILE"
+}
+
 # Function to remove existing package files (ensures only older versions are removed)
 remove_existing_packages() {
     local package_name="$1"
@@ -166,10 +189,13 @@ remove_existing_packages() {
     local package_release="$3"
     local repo_path="$4"
 
-    [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_path" >&2
+    [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_name" >&2
 
-    # Find all RPM files for the package
-    for file in "$repo_path/${package_name}"-*.rpm; do
+    # Enable nullglob so that the pattern expands to nothing if there are no matches
+    shopt -s nullglob
+
+    # Find all RPM files for the exact package
+    for file in "$repo_path/${package_name}"-[0-9]*.rpm; do
         [ -e "$file" ] || continue
         local filename
         filename=$(basename "$file")
@@ -188,65 +214,50 @@ remove_existing_packages() {
             fi
         fi
     done
+
+    # Disable nullglob after we're done
+    shopt -u nullglob
 }
 
-# Download packages with parallel downloads
-download_packages() {
-    local packages=("$@")
-    local repo_path
-    local package_name
-    local package_version
-    local package_release
-    local package_arch
-    local epoch
 
-    declare -A repo_packages
+# Function to wait for background jobs to finish
+wait_for_jobs() {
+    local current_jobs
 
-    for pkg in "${packages[@]}"; do
-        IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
-        if [ -n "$epoch" ]; then
-            package_version="${epoch}:${package_version}"
-        fi
-        if [ -n "$repo_path" ]; then
-            if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
-                echo "repo_name=$repo_name"
-                repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
-            fi
-        fi
-    done
-
-    for repo_path in "${!repo_packages[@]}"; do
-        mkdir -p "$repo_path" || {
-            log_to_temp_file "Failed to create directory: $repo_path"
-            exit 1
-        }
-
-        # Run download in background and wait for jobs if parallel limit is reached
-        if ((DRY_RUN)); then
-            log_to_temp_file "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
+    while true; do
+        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
+        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+            sleep 2
         else
-            {
-                log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-                if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve "${repo_packages[$repo_path]}" 1>>process_package.log 2>>myrepo.err; then
-                    log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
-                    return 1
-                fi
-            } &
-            wait_for_jobs # Control the number of parallel jobs
+            break
         fi
     done
 }
 
-# Function to check if the package has already been processed
-is_package_processed() {
-    local pkg_key="$1"
-    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
-}
+### Main processing section ###
+
+IFS=' ' read -r -a packages <<<"$PACKAGES"
+IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
+
+# Ensure a temporary file is set for the thread
+if [[ -z "$TEMP_FILE" ]]; then
+    echo "Error: Temporary file not provided. Creating one." >&2
+    TEMP_FILE=$(mktemp)
+fi
+
+# Example: Write debug information to the temp file
+if [[ $DEBUG_MODE -ge 1 ]]; then
+    log_to_temp_file "Debug Mode Active - Process PID: $$"
+fi
+
 
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
     IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
 
+    PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
+    
     pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
 
     # Skip if already processed
@@ -270,7 +281,7 @@ for pkg in "${packages[@]}"; do
         echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists.\e[0m"
         ;;
     "NEW")
-        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+        if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
             echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch added.\e[0m"
             download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
         else
@@ -278,7 +289,7 @@ for pkg in "${packages[@]}"; do
         fi
         ;;
     "UPDATE")
-        if [[ ! " ${local_repos[*]} " =~ " ${repo_name} " ]]; then
+        if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
             remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
             echo -e "\e[34m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch updated.\e[0m"
             download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
