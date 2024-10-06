@@ -11,7 +11,9 @@ The scripts help:
 - Replicate and update a local repository based on installed packages from a "golden copy" system.
 - Remove uninstalled or outdated packages from the repository.
 - Sync the cleaned local repository with a shared repository.
-  
+
+![MyRepo Workflow](images/MyRepo.png)
+
 ### Key Features:
 - **Batch Processing**: Efficiently processes packages in batches for performance optimization.
 - **Automatic Cleanup**: Removes older or uninstalled package versions from the local repository.
@@ -89,4 +91,3 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## Contributing
 
 Feel free to submit issues or pull requests to improve the functionality or performance of the scripts.
-
