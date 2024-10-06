@@ -10,14 +10,14 @@
 # older package versions.
 
 # Script version
-VERSION=2.58
+VERSION=2.61
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${MAX_PACKAGES:=0}"
 : "${BATCH_SIZE:=10}"
-: "${MAX_PARALLEL_JOBS:=1}"
+: "${PARALLEL:=2}"
 : "${DRY_RUN:=0}"
 : "${NO_SUDO}"
 
@@ -66,7 +66,7 @@ while [[ "$1" =~ ^-- ]]; do
         ;;
     --parallel)
         shift
-        MAX_PARALLEL_JOBS=$1
+        PARALLEL=$1
         ;;
     --version)
         echo "myrepo.sh Version $VERSION"
@@ -90,9 +90,8 @@ if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
     exit 1
 fi
 
-
-# Calculate the parallel download factor by multiplying MAX_PARALLEL_JOBS and BATCH_SIZE
-PARALLEL_DOWNLOADS=$((MAX_PARALLEL_JOBS * BATCH_SIZE))
+# Calculate the parallel download factor by multiplying PARALLEL and BATCH_SIZE
+PARALLEL_DOWNLOADS=$((PARALLEL * BATCH_SIZE))
 # Cap the parallel downloads at a maximum of 20
 if ((PARALLEL_DOWNLOADS > 20)); then
     PARALLEL_DOWNLOADS=20
@@ -119,9 +118,9 @@ determine_repo_source() {
     local package_arch=$5
 
     for repo in "${ENABLED_REPOS[@]}"; do
-        # Reconstruct the expected package string
+        # Reconstruct the expected package string without epoch if it's '0'
         local expected_package
-        if [[ -n "$epoch_version" ]]; then
+        if [[ -n "$epoch_version" && "$epoch_version" != "0" ]]; then
             expected_package="${package_name}|${epoch_version}|${package_version}|${package_release}|${package_arch}"
         else
             expected_package="${package_name}|0|${package_version}|${package_release}|${package_arch}"
@@ -134,7 +133,7 @@ determine_repo_source() {
         fi
     done
 
-    echo "Invalid"  # Default to Invalid if no matching repo is found
+    echo "Invalid" # Default to Invalid if no matching repo is found
 }
 
 # Function to download repository metadata and store in memory
@@ -151,7 +150,7 @@ download_repo_metadata() {
     done
 
     # For local repositories
-    declare -gA repo_cache  # Declare repo_cache globally to be used later
+    declare -gA repo_cache # Declare repo_cache globally to be used later
     for local_repo in "${LOCAL_REPOS[@]}"; do
         echo "Fetching metadata for local repo $local_repo..."
         repo_cache["$local_repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$local_repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
@@ -161,7 +160,7 @@ download_repo_metadata() {
     done
 }
 
-# Function to get the repository name
+# Function to get the repository name leaved here for consistency
 get_repo_name() {
     local package_repo=$1
     echo "$package_repo"
@@ -209,32 +208,50 @@ is_package_in_local_sources() {
 
     echo "no"
 }
+#Function for batch processing subprocess
+process_batch() {
+    local batch_packages=("$@")
+
+    if ((${#batch_packages[@]} > 0)); then
+        [[ DEBUG_MODE -ge 1 ]] && echo "local-repos: ${LOCAL_REPOS[*]} batch: ${batch_packages[*]}"
+        "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" \
+            --packages "${batch_packages[*]}" \
+            --local-repos "${LOCAL_REPOS[*]}" \
+            --processed-file "$PROCESSED_PACKAGES_FILE" \
+            --parallel "$PARALLEL" \
+            --temp-file "$temp_file" &
+
+        # Wait for background jobs to finish before starting a new batch
+        wait_for_jobs
+    fi
+}
+
 # Function to remove uninstalled or removed packages from the repo
 remove_uninstalled_packages() {
     local repo_path="$1"
     local repo_name
-    repo_name=$(basename "$repo_path") # Extract repository name from path
+    repo_name=$(basename "$(dirname "$repo_path")") # Extract the parent directory name of getPackage
 
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for uninstalled or removed packages in: $repo_name"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for removed packages in: $repo_name"
 
-    # Find all RPM files for the repository
-    find "$repo_path" -type f -name "*.rpm" | while read -r rpm_file; do
-        package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>myrepo.err)
-        package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>myrepo.err)
-
-        # Check if the package is installed on the system using awk
-        if ! awk -F'|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
-            rpm_filename=$(basename "$rpm_file")
-            if ((DRY_RUN)); then
-                echo "$repo_name: $rpm_filename would be removed."
-            else
-                echo "$repo_name: $rpm_filename removed."
-                rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>myrepo.err
-            fi
+    # Find all RPM files for the repository and paralle process them
+    find "$repo_path" -type f -name "*.rpm" -print0 |
+        xargs -0 -P "$PARALLEL" -I {} bash -c "
+    package_name=\$(rpm -qp --queryformat '%{NAME}' \"{}\" 2>>myrepo.err);
+    package_arch=\$(rpm -qp --queryformat '%{ARCH}' \"{}\" 2>>myrepo.err);
+    if ! awk -F '|' -v name=\"\$package_name\" -v arch=\"\$package_arch\" '\$1 == name && \$5 == arch' \"$INSTALLED_PACKAGES_FILE\" > /dev/null; then
+        if ((DRY_RUN)); then
+            echo \"{} would be removed.\";
         else
-            [[ $DEBUG_MODE -ge 1 ]] && echo "$repo_name: $(basename "$rpm_file") exists." >&2
+            rm -f \"{}\" && echo \"Successfully removed {}\" || echo \"Failed to remove {}\" >>myrepo.err;
         fi
-    done
+    else
+        if ((DEBUG_MODE >= 1)); then
+            echo \"{} exists and is not being removed.\" >&2;
+        fi
+    fi
+"
+
 }
 
 # Function to wait for background jobs to finish
@@ -242,9 +259,9 @@ wait_for_jobs() {
     local current_jobs
 
     while true; do
-        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
-        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
-            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+        current_jobs=$(jobs -rp | wc -l) # Assign the number of running jobs
+        if ((current_jobs >= PARALLEL)); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}" # Debugging line
             sleep 1
         else
             break
@@ -295,7 +312,14 @@ for line in "${package_lines[@]}"; do
         fi
     fi
 
-    pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+    # Handle the case where epoch is '0' or empty (skip it in the filename)
+    if [[ "$epoch_version" == "0" || -z "$epoch_version" ]]; then
+        package_version_full="$package_version-$package_release.$package_arch"
+    else
+        package_version_full="$epoch_version:$package_version-$package_release.$package_arch"
+    fi
+
+    pkg_key="${package_name}-${package_version_full}"
 
     # Skip if the package has already been processed
     if grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"; then
@@ -349,32 +373,17 @@ for line in "${package_lines[@]}"; do
 
     # If batch size reached, process the batch
     if ((${#batch_packages[@]} >= BATCH_SIZE)); then
-        [[ DEBUG_MODE -ge 1 ]] && echo "local-repos: ${LOCAL_REPOS[*]} batch: ${batch_packages[*]}"
-        "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" \
-            --packages "${batch_packages[*]}" \
-            --local-repos "${LOCAL_REPOS[*]}" \
-            --processed-file "$PROCESSED_PACKAGES_FILE" \
-            --temp-file "$temp_file" &
-
+        process_batch "${batch_packages[@]}"
         batch_packages=()
-
-        # Wait for background jobs to finish before starting a new batch
-        # wait_for_jobs
     fi
-
 done
 
 # Process any remaining packages in the last batch
 if ((${#batch_packages[@]} > 0)); then
-    [[ DEBUG_MODE -ge 1 ]] && echo "batch: ${batch_packages[*]}"
-    "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" \
-        --packages "${batch_packages[*]}" \
-        --local-repos "${LOCAL_REPOS[*]}" \
-        --processed-file "$PROCESSED_PACKAGES_FILE" \
-        --parallel "$MAX_PARALLEL_JOBS" \
-        --temp-file "$temp_file" &
+    process_batch "${batch_packages[@]}"
 fi
 
+wait
 # Remove uninstalled packages from each repo in parallel
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
 for repo in "${!used_directories[@]}"; do
@@ -394,11 +403,11 @@ wait
 
 # Update and sync the repositories
 if [ "$MAX_PACKAGES" -eq 0 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
     for repo in "${!used_directories[@]}"; do
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $repo metadata"
         package_path="${used_directories[$repo]}"
         repo_path=$(dirname "$package_path")
-        repo_name=$(basename "$repo_path")
+        repo_name=$(dirname "$repo_path")
 
         if ((DRY_RUN)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
@@ -422,6 +431,6 @@ if [ "$MAX_PACKAGES" -eq 0 ]; then
 fi
 
 # Clean up
-rm "$INSTALLED_PACKAGES_FILE"
+# rm "$INSTALLED_PACKAGES_FILE"
 
 echo "myrepo.sh Version $VERSION completed."

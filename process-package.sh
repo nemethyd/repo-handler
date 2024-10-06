@@ -8,18 +8,17 @@
 # This script processes packages in batches and handles updates and cleanup of older package versions.
 
 # Script version
-VERSION=2.58
+VERSION=2.60
 
 # Default values for environment variables if not set
 : "${DEBUG_MODE:=0}"
 : "${BATCH_SIZE:=10}"
 : "${DRY_RUN:=0}"
-: "${MAX_PARALLEL_JOBS:=1}"
-
+: "${PARALLEL:=2}"
 
 PACKAGES=""
 LOCAL_REPOS=""
-PARALLEL_DOWNLOADS=1 # Default parallel downloads for dnf
+PARALLEL=1 # Default parallel downloads for dnf
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 LONGEST_REPO_NAME=22
 
@@ -46,7 +45,7 @@ while [[ "$1" =~ ^-- ]]; do
         ;;
     --parallel)
         shift
-        PARALLEL_DOWNLOADS=$1
+        PARALLEL=$1
         ;;
     --processed-file)
         shift
@@ -90,8 +89,7 @@ align_repo_name() {
     local repo_name="$1"
     printf "%-${PADDING_LENGTH}s" "$repo_name"
 }
-
-# Download packages with parallel downloads
+# Download packages with parallel downloads or use local cached RPMs
 download_packages() {
     local packages=("$@")
     local repo_path
@@ -105,13 +103,27 @@ download_packages() {
 
     for pkg in "${packages[@]}"; do
         IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
-        if [ -n "$epoch" ]; then
-            package_version="${epoch}:${package_version}"
+
+        # Only include epoch if it's not '0'
+        if [[ -n "$epoch" && "$epoch" != "0" ]]; then
+            package_version_full="${epoch}:${package_version}-${package_release}.$package_arch"
+        else
+            package_version_full="${package_version}-${package_release}.$package_arch"
         fi
+
         if [ -n "$repo_path" ]; then
             if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
-                echo "repo_name=$repo_name"
-                repo_packages["$repo_path"]+="$package_name-$package_version-$package_release.$package_arch "
+                # Check if RPM is available locally
+                local rpm_path
+                rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+
+                if [[ -n "$rpm_path" ]]; then
+                    echo -e "\e[32m$(align_repo_name "$repo_name"): Using local RPM for $package_name-$package_version-$package_release.$package_arch\e[0m"
+                    cp "$rpm_path" "$repo_path"
+                else
+                    # Add to repo_packages for downloading
+                    repo_packages["$repo_path"]+="$package_name-$package_version_full "
+                fi
             fi
         fi
     done
@@ -122,13 +134,20 @@ download_packages() {
             exit 1
         }
 
-        # Run download in background and wait for jobs if parallel limit is reached
+        # Run download in background
         if ((DRY_RUN)); then
             log_to_temp_file "Dry Run: Would download packages to $repo_path: ${repo_packages[$repo_path]}"
         else
             {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
-                if ! dnf --setopt=max_parallel_downloads="$PARALLEL_DOWNLOADS" download --arch=x86_64,noarch --destdir="$repo_path" --resolve "${repo_packages[$repo_path]}" 1>>process_package.log 2>>myrepo.err; then
+                # Check if sudo is required and set the appropriate command prefix
+                DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
+                if [[ -z "$NO_SUDO" ]]; then
+                    DNF_COMMAND="sudo $DNF_COMMAND"
+                fi
+
+                [[ DEBUG_MODE -ge 2 ]] && echo "$DNF_COMMAND"
+                if ! $DNF_COMMAND 1>>process_package.log 2>>myrepo.err; then
                     log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
                     return 1
                 fi
@@ -137,7 +156,6 @@ download_packages() {
         wait_for_jobs # Control the number of parallel jobs
     done
 }
-
 # Function to determine the status of a package
 get_package_status() {
     local repo_name="$1"
@@ -176,9 +194,27 @@ is_package_processed() {
     local pkg_key="$1"
     grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
 }
+# Function to locate RPM from local cache if available
+locate_local_rpm() {
+    local package_name="$1"
+    local package_version="$2"
+    local package_release="$3"
+    local package_arch="$4"
 
+    local rpm_path
+
+    # Search in dnf cache directory
+    rpm_path=$(find /var/cache/dnf -name "${package_name}-${package_version}-${package_release}.${package_arch}.rpm" 2>/dev/null | head -n 1)
+
+    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+        echo "$rpm_path"
+    else
+        echo ""
+    fi
+}
 # Function to write log to the specific temporary file
 log_to_temp_file() {
+    [[ DEBUG_MODE -ge 1 ]] && echo "$1"
     echo "$1" >>"$TEMP_FILE"
 }
 
@@ -219,15 +255,14 @@ remove_existing_packages() {
     shopt -u nullglob
 }
 
-
 # Function to wait for background jobs to finish
 wait_for_jobs() {
     local current_jobs
 
     while true; do
-        current_jobs=$(jobs -rp | wc -l)  # Assign the number of running jobs
-        if (( current_jobs >= MAX_PARALLEL_JOBS )); then
-            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${MAX_PARALLEL_JOBS}" # Debugging line
+        current_jobs=$(jobs -rp | wc -l) # Assign the number of running jobs
+        if ((current_jobs >= PARALLEL)); then
+            echo "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}" # Debugging line
             sleep 2
         else
             break
@@ -246,18 +281,12 @@ if [[ -z "$TEMP_FILE" ]]; then
     TEMP_FILE=$(mktemp)
 fi
 
-# Example: Write debug information to the temp file
-if [[ $DEBUG_MODE -ge 1 ]]; then
-    log_to_temp_file "Debug Mode Active - Process PID: $$"
-fi
-
-
 # Handle the packages based on their status
 for pkg in "${packages[@]}"; do
     IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
 
     PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
-    
+
     pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
 
     # Skip if already processed
