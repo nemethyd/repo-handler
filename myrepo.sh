@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.7
+VERSION=2.75
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -22,7 +22,6 @@ echo "$0 Version $VERSION"
 : "${NO_SUDO}"
 
 # Configuration
-SCRIPT_DIR=$(dirname "$0")
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
@@ -355,13 +354,13 @@ process_batch() {
 
     if ((${#batch_packages[@]} > 0)); then
         [[ DEBUG_MODE -ge 1 ]] && echo "local-repos: ${LOCAL_REPOS[*]} batch: ${batch_packages[*]}"
-        "$SCRIPT_DIR"/process-package.sh --debug-level "$DEBUG_MODE" \
-            --packages "${batch_packages[*]}" \
-            --local-repos "${LOCAL_REPOS[*]}" \
-            --processed-file "$PROCESSED_PACKAGES_FILE" \
-            --parallel "$PARALLEL" \
-            --temp-file "$temp_file" &
-
+        process_packages \
+            "$DEBUG_MODE" \
+            "${batch_packages[*]}" \
+            "${LOCAL_REPOS[*]}" \
+            "$PROCESSED_PACKAGES_FILE" \
+            "$PARALLEL" \
+            "$temp_file" &
         # Wait for background jobs to finish before starting a new batch
         wait_for_jobs
     fi
@@ -369,16 +368,29 @@ process_batch() {
 
 # Function to process a package batch
 process_packages() {
+    local DEBUG_MODE
     local PACKAGES
     local LOCAL_REPOS
+    local PROCESSED_PACKAGES_FILE
+    local PARALLEL
+    local TEMP_FILE
 
-    PACKAGES="$1"
-    LOCAL_REPOS="$2"
+    DEBUG_MODE=$1
+    PACKAGES=("$2")
+    LOCAL_REPOS=("$3")
+    PROCESSED_PACKAGES_FILE=$4
+    PARALLEL=$5
+    TEMP_FILE=$6
+
+    if [ ${#PACKAGES[@]} -eq 0 ]; then
+        echo "No packages to process."
+        return
+    fi
 
     ### Main processing section ###
 
-    IFS=' ' read -r -a packages <<<"$PACKAGES"
-    IFS=' ' read -r -a local_repos <<<"$LOCAL_REPOS"
+    IFS=' ' read -r -a packages <<<"${PACKAGES[@]}"
+    local_repos=("${LOCAL_REPOS[@]}")
 
     # Ensure a temporary file is set for the thread
     if [[ -z "$TEMP_FILE" ]]; then
