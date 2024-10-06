@@ -156,6 +156,7 @@ download_packages() {
         wait_for_jobs # Control the number of parallel jobs
     done
 }
+
 # Function to determine the status of a package
 get_package_status() {
     local repo_name="$1"
@@ -194,6 +195,7 @@ is_package_processed() {
     local pkg_key="$1"
     grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
 }
+
 # Function to locate RPM from local cache if available
 locate_local_rpm() {
     local package_name="$1"
