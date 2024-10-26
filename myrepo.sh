@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4o
-# Date: 2024-09-28
+# Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
+# Last Updated: 2023-10-26
 
 # MIT licensing
 # Purpose:
@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.75
+VERSION=2.77
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -19,30 +19,44 @@ echo "$0 Version $VERSION"
 : "${BATCH_SIZE:=10}"
 : "${PARALLEL:=2}"
 : "${DRY_RUN:=0}"
-: "${NO_SUDO}"
+: "${NO_SUDO:=0}"
 
-# Configuration
+# Default configuration values
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
-# Declare a file to keep track of processed packages
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
-[[ $DEBUG_MODE -ge 1 ]] && echo "PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"
-
-# Ensure that the files exist, then truncate them
-touch locally_found.lst myrepo.err process_package.log "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
-
-: >locally_found.lst
-: >myrepo.err
-: >process_package.log
-: >"$PROCESSED_PACKAGES_FILE"
-: >"$INSTALLED_PACKAGES_FILE"
-
-# Local repos updated to contain only the required ones
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
-# Parse options
+# Load configuration file if it exists (allowing comment lines)
+CONFIG_FILE="myrepo.cfg"
+if [[ -f "$CONFIG_FILE" ]]; then
+    echo "Loading configuration from $CONFIG_FILE"
+    while IFS='=' read -r key value; do
+        # Ignore empty lines and lines starting with #
+        if [[ -z "$key" || "$key" =~ ^\s*# ]]; then
+            continue
+        fi
+        key=$(echo "$key" | tr -d ' ')
+        value=$(echo "$value" | sed 's/^ *//;s/ *$//')
+        case "$key" in
+            LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
+            SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
+            LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
+            RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
+            DEBUG_MODE) DEBUG_MODE="$value" ;;
+            MAX_PACKAGES) MAX_PACKAGES="$value" ;;
+            BATCH_SIZE) BATCH_SIZE="$value" ;;
+            PARALLEL) PARALLEL="$value" ;;
+            DRY_RUN) DRY_RUN="$value" ;;
+            NO_SUDO) NO_SUDO="$value" ;;
+            *) echo "Unknown configuration option: $key" ;;
+        esac
+    done < <(grep -v '^\s*#' "$CONFIG_FILE")
+fi
+
+# Parse command-line options (overrides config file and defaults)
 while [[ "$1" =~ ^-- ]]; do
     case "$1" in
     --batch-size)
@@ -67,12 +81,34 @@ while [[ "$1" =~ ^-- ]]; do
         shift
         PARALLEL=$1
         ;;
+    --local-repo-path)
+        shift
+        LOCAL_REPO_PATH=$1
+        ;;
+    --shared-repo-path)
+        shift
+        SHARED_REPO_PATH=$1
+        ;;
+    --local-repos)
+        shift
+        IFS=',' read -r -a LOCAL_REPOS <<<"$1"
+        ;;
     --version)
         echo "myrepo.sh Version $VERSION"
         exit 0
         ;;
     --help)
-        echo "Usage: myrepo.sh [--debug-level LEVEL] [--max-packages NUM] [--batch-size NUM] [--parallel NUM] [--dry-run] [--no-sudo]"
+        echo "Usage: myrepo.sh [OPTIONS]"
+        echo "Options:"
+        echo "  --debug-level LEVEL       Set debug level (default: $DEBUG_MODE)"
+        echo "  --max-packages NUM        Maximum number of packages to process (default: $MAX_PACKAGES)"
+        echo "  --batch-size NUM          Number of packages per batch (default: $BATCH_SIZE)"
+        echo "  --parallel NUM            Number of parallel processes (default: $PARALLEL)"
+        echo "  --dry-run                 Perform a dry run without making changes"
+        echo "  --no-sudo                 Run without sudo privileges"
+        echo "  --local-repo-path PATH    Set local repository path (default: $LOCAL_REPO_PATH)"
+        echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
+        echo "  --local-repos REPOS       Comma-separated list of local repos (default: ${LOCAL_REPOS[*]})"
         exit 0
         ;;
     *)
@@ -82,6 +118,15 @@ while [[ "$1" =~ ^-- ]]; do
     esac
     shift
 done
+
+# Ensure that the files exist, then truncate them
+touch locally_found.lst myrepo.err process_package.log "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
+
+: >locally_found.lst
+: >myrepo.err
+: >process_package.log
+: >"$PROCESSED_PACKAGES_FILE"
+: >"$INSTALLED_PACKAGES_FILE"
 
 # Check if script is run as root
 if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
@@ -166,7 +211,7 @@ download_packages() {
         fi
 
         if [ -n "$repo_path" ]; then
-            if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
+            if [[ ! " ${LOCAL_REPOS[*]} " == *" ${repo_name} "* ]]; then
                 # Check if RPM is available locally
                 local rpm_path
                 rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
@@ -268,7 +313,7 @@ get_package_status() {
     fi
 }
 
-# Function to get the repository name leaved here for consistency
+# Function to get the repository name (left here for consistency)
 get_repo_name() {
     local package_repo=$1
     echo "$package_repo"
@@ -402,7 +447,7 @@ process_packages() {
     for pkg in "${packages[@]}"; do
         IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
 
-        PADDING_LENGTH=$((LONGEST_REPO_NAME > MIN_REPO_NAME_LENGTH ? LONGEST_REPO_NAME : MIN_REPO_NAME_LENGTH))
+        PADDING_LENGTH=22 # Set constant padding length
 
         pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
 
@@ -480,7 +525,10 @@ remove_existing_packages() {
     local package_release="$3"
     local repo_path="$4"
 
-    [ "$DEBUG_MODE" -ge 1 ] && echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_name" >&2
+    # Only display messages in debug mode
+    if ((DEBUG_MODE >= 1)); then
+        echo "$(align_repo_name "$repo_name"): Removing older versions of $package_name from $repo_name" >&2
+    fi
 
     # Enable nullglob so that the pattern expands to nothing if there are no matches
     shopt -s nullglob
@@ -498,9 +546,13 @@ remove_existing_packages() {
         # Compare versions
         if [[ "$file_version_release" < "$current_version_release" ]]; then
             if ((DRY_RUN)); then
-                echo -e "\e[34m$(align_repo_name "$repo_name"): $filename would be removed (dry-run)\e[0m"
+                if ((DEBUG_MODE >= 1)); then
+                    echo -e "\e[34m$(align_repo_name "$repo_name"): $filename would be removed (dry-run)\e[0m"
+                fi
             else
-                echo -e "\e[34m$(align_repo_name "$repo_name"): $filename removed\e[0m"
+                if ((DEBUG_MODE >= 1)); then
+                    echo -e "\e[34m$(align_repo_name "$repo_name"): $filename removed\e[0m"
+                fi
                 rm -f "$file"
             fi
         fi
@@ -540,6 +592,9 @@ wait_for_jobs() {
 }
 
 ### Main processing section ###
+
+# Set constant padding length for alignment
+PADDING_LENGTH=22
 
 # Fetch installed packages list with detailed information
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
@@ -662,7 +717,6 @@ for repo in "${!used_directories[@]}"; do
     if [[ -d "$repo_path" ]]; then
         # Run remove_uninstalled_packages in the background
         remove_uninstalled_packages "$repo_path" &
-        # wait_for_jobs
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
     fi
