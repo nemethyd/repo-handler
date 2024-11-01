@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.77
+VERSION=2.79
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -709,16 +709,34 @@ if ((${#batch_packages[@]} > 0)); then
 fi
 
 wait
-# Remove uninstalled packages from each repo in parallel
+
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
 for repo in "${!used_directories[@]}"; do
     repo_path="${used_directories[$repo]}"
 
+    # Check if the repository directory exists and contains any RPM files
     if [[ -d "$repo_path" ]]; then
-        # Run remove_uninstalled_packages in the background
+        # If no RPM files are found, skip this repository
+        if ! compgen -G "$repo_path/*.rpm" > /dev/null; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - No RPM files found in $repo_path, skipping removal process."
+            continue
+        fi
+        
+        # Run remove_uninstalled_packages if RPM files are present
         remove_uninstalled_packages "$repo_path" &
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
+    fi
+done
+
+# Periodically check the status of running background jobs
+while true; do
+    running_jobs=$(jobs -rp | wc -l)
+    if (( running_jobs > 0 )); then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Still removing uninstalled packages, ${running_jobs} jobs remaining..."
+        sleep 10  # Adjust the interval as needed to avoid excessive output
+    else
+        break
     fi
 done
 
