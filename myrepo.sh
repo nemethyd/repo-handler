@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.79
+VERSION=2.80
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -28,6 +28,9 @@ INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
+
+# Initialize temporary files array for cleanup
+TEMP_FILES=()
 
 # Load configuration file if it exists (allowing comment lines)
 CONFIG_FILE="myrepo.cfg"
@@ -156,9 +159,17 @@ align_repo_name() {
     printf "%-${PADDING_LENGTH}s" "$repo_name"
 }
 
-# Function to create a unique temporary file
+# Cleanup function to remove temporary files
+cleanup() {
+    rm -f "${TEMP_FILES[@]}"
+}
+
+# Function to create a unique temporary file and track it for cleanup
 create_temp_file() {
-    mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX
+    local tmp_file
+    tmp_file=$(mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX)
+    TEMP_FILES+=("$tmp_file")
+    echo "$tmp_file"
 }
 
 # Function to determine the repository source of a package based on available packages
@@ -365,7 +376,12 @@ is_package_in_local_sources() {
 # Function to check if the package has already been processed
 is_package_processed() {
     local pkg_key="$1"
-    grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"
+    while IFS= read -r line; do
+        if [[ "$line" == "$pkg_key" ]]; then
+            return 0
+        fi
+    done <"$PROCESSED_PACKAGES_FILE"
+    return 1
 }
 
 # Function to locate RPM from local cache if available
@@ -440,7 +456,7 @@ process_packages() {
     # Ensure a temporary file is set for the thread
     if [[ -z "$TEMP_FILE" ]]; then
         echo "Error: Temporary file not provided. Creating one." >&2
-        TEMP_FILE=$(mktemp)
+        TEMP_FILE=$(create_temp_file)
     fi
 
     # Handle the packages based on their status
@@ -592,6 +608,9 @@ wait_for_jobs() {
     done
 }
 
+# Trap EXIT signal to ensure cleanup is called
+trap cleanup EXIT
+
 ### Main processing section ###
 
 # Set constant padding length for alignment
@@ -648,7 +667,7 @@ for line in "${package_lines[@]}"; do
     pkg_key="${package_name}-${package_version_full}"
 
     # Skip if the package has already been processed
-    if grep -Fxq "$pkg_key" "$PROCESSED_PACKAGES_FILE"; then
+    if is_package_processed "$pkg_key"; then
         [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
         continue
     fi
@@ -722,7 +741,7 @@ for repo in "${!used_directories[@]}"; do
             echo "$(date '+%Y-%m-%d %H:%M:%S') - No RPM files found in $repo_path, skipping removal process."
             continue
         fi
-        
+
         # Run remove_uninstalled_packages if RPM files are present
         remove_uninstalled_packages "$repo_path" &
     else
