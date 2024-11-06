@@ -576,6 +576,7 @@ remove_uninstalled_packages() {
     find "$repo_path" -type f -name "*.rpm" -print0 |
         xargs -0 -P "$PARALLEL" -I {} bash -c 'process_rpm_file "$@"' _ {}
 }
+
 # Function to wait for background jobs to finish
 wait_for_jobs() {
     local current_jobs
