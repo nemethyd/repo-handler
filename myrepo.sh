@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Last Updated: 2023-10-26
+# Last Updated: 2023-11-06
 
 # MIT licensing
 # Purpose:
@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.80
+VERSION=2.82
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -20,6 +20,7 @@ echo "$0 Version $VERSION"
 : "${PARALLEL:=2}"
 : "${DRY_RUN:=0}"
 : "${NO_SUDO:=0}"
+: "${SYNC_ONLY:=0}"
 
 # Default configuration values
 LOCAL_REPO_PATH="/repo"
@@ -28,6 +29,9 @@ INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
 PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
+
+# Log directory
+LOG_DIR="/var/log/myrepo"
 
 # Initialize temporary files array for cleanup
 TEMP_FILES=()
@@ -54,6 +58,8 @@ if [[ -f "$CONFIG_FILE" ]]; then
             PARALLEL) PARALLEL="$value" ;;
             DRY_RUN) DRY_RUN="$value" ;;
             NO_SUDO) NO_SUDO="$value" ;;
+            LOG_DIR) LOG_DIR="$value" ;;
+            SYNC_ONLY) SYNC_ONLY="$value" ;;
             *) echo "Unknown configuration option: $key" ;;
         esac
     done < <(grep -v '^\s*#' "$CONFIG_FILE")
@@ -96,6 +102,13 @@ while [[ "$1" =~ ^-- ]]; do
         shift
         IFS=',' read -r -a LOCAL_REPOS <<<"$1"
         ;;
+    --log-dir)
+        shift
+        LOG_DIR=$1
+        ;;
+    --sync-only)
+        SYNC_ONLY=1
+        ;;
     --version)
         echo "myrepo.sh Version $VERSION"
         exit 0
@@ -112,6 +125,8 @@ while [[ "$1" =~ ^-- ]]; do
         echo "  --local-repo-path PATH    Set local repository path (default: $LOCAL_REPO_PATH)"
         echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
         echo "  --local-repos REPOS       Comma-separated list of local repos (default: ${LOCAL_REPOS[*]})"
+        echo "  --log-dir PATH            Set log directory (default: $LOG_DIR)"
+        echo "  --sync-only               Only perform createrepo and rsync steps"
         exit 0
         ;;
     *)
@@ -122,12 +137,41 @@ while [[ "$1" =~ ^-- ]]; do
     shift
 done
 
-# Ensure that the files exist, then truncate them
-touch locally_found.lst myrepo.err process_package.log "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
+# Ensure that the log directory exists and is writable
+if [[ ! -d "$LOG_DIR" ]]; then
+    mkdir -p "$LOG_DIR" || {
+        echo "Failed to create log directory: $LOG_DIR" >&2
+        exit 1
+    }
+fi
 
-: >locally_found.lst
-: >myrepo.err
-: >process_package.log
+# Ensure the log directory is writable by the user running the script
+if [[ ! -w "$LOG_DIR" ]]; then
+    echo "Log directory $LOG_DIR is not writable by the current user." >&2
+    echo "Attempting to set permissions..."
+
+    if [[ -z $NO_SUDO ]]; then
+        sudo chown "$USER" "$LOG_DIR" || {
+            echo "Failed to change ownership of $LOG_DIR to $USER" >&2
+            exit 1
+        }
+    else
+        echo "Cannot set permissions without sudo privileges. Exiting." >&2
+        exit 1
+    fi
+fi
+
+# Define log file paths
+LOCALLY_FOUND_FILE="$LOG_DIR/locally_found.lst"
+MYREPO_ERR_FILE="$LOG_DIR/myrepo.err"
+PROCESS_LOG_FILE="$LOG_DIR/process_package.log"
+
+# Ensure that the files exist, then truncate them
+touch "$LOCALLY_FOUND_FILE" "$MYREPO_ERR_FILE" "$PROCESS_LOG_FILE" "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
+
+: >"$LOCALLY_FOUND_FILE"
+: >"$MYREPO_ERR_FILE"
+: >"$PROCESS_LOG_FILE"
 : >"$PROCESSED_PACKAGES_FILE"
 : >"$INSTALLED_PACKAGES_FILE"
 
@@ -257,7 +301,7 @@ download_packages() {
                 fi
 
                 [[ DEBUG_MODE -ge 2 ]] && echo "$DNF_COMMAND"
-                if ! $DNF_COMMAND 1>>process_package.log 2>>myrepo.err; then
+                if ! $DNF_COMMAND 1>>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
                     log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
                     return 1
                 fi
@@ -274,9 +318,9 @@ download_repo_metadata() {
     # For enabled repositories
     for repo in "${ENABLED_REPOS[@]}"; do
         echo "Fetching metadata for $repo..."
-        available_repo_packages["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
+        available_repo_packages["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE")
         if [[ -z "${available_repo_packages[$repo]}" ]]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for $repo" >>myrepo.err
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for $repo" >>"$MYREPO_ERR_FILE"
         fi
     done
 
@@ -284,9 +328,9 @@ download_repo_metadata() {
     declare -gA repo_cache # Declare repo_cache globally to be used later
     for local_repo in "${LOCAL_REPOS[@]}"; do
         echo "Fetching metadata for local repo $local_repo..."
-        repo_cache["$local_repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$local_repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>myrepo.err)
+        repo_cache["$local_repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$local_repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE")
         if [[ -z "${repo_cache[$local_repo]}" ]]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for local repo $local_repo" >>myrepo.err
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching metadata for local repo $local_repo" >>"$MYREPO_ERR_FILE"
         fi
     done
 }
@@ -518,14 +562,14 @@ process_packages() {
 process_rpm_file() {
     local rpm_file="$1"
 
-    package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>myrepo.err)
-    package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>myrepo.err)
+    package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
+    package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
 
     if ! awk -F '|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
         if ((DRY_RUN)); then
             echo "$rpm_file would be removed."
         else
-            rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>myrepo.err
+            rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>"$MYREPO_ERR_FILE"
         fi
     else
         if ((DEBUG_MODE >= 1)); then
@@ -616,168 +660,179 @@ trap cleanup EXIT
 # Set constant padding length for alignment
 PADDING_LENGTH=22
 
-# Fetch installed packages list with detailed information
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
+if (( SYNC_ONLY == 0 )); then
+    # Fetch installed packages list with detailed information
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
 
-if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>myrepo.err; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching installed packages list." >>myrepo.err
-    exit 1
-fi
+    if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>"$MYREPO_ERR_FILE"; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Error fetching installed packages list." >>"$MYREPO_ERR_FILE"
+        exit 1
+    fi
 
-# Fetch the list of enabled repositories
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of enabled repositories..."
-mapfile -t ENABLED_REPOS < <(dnf repolist enabled | awk 'NR>1 {print $1}')
+    # Fetch the list of enabled repositories
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of enabled repositories..."
+    mapfile -t ENABLED_REPOS < <(dnf repolist enabled | awk 'NR>1 {print $1}')
 
-if [[ ${#ENABLED_REPOS[@]} -eq 0 ]]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - No enabled repositories found." >>myrepo.err
-    exit 1
-fi
+    if [[ ${#ENABLED_REPOS[@]} -eq 0 ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - No enabled repositories found." >>"$MYREPO_ERR_FILE"
+        exit 1
+    fi
 
-# Download repository metadata for enabled repos
-download_repo_metadata
+    # Download repository metadata for enabled repos
+    download_repo_metadata
 
-# Read the installed packages list
-mapfile -t package_lines <"$INSTALLED_PACKAGES_FILE"
+    # Read the installed packages list
+    mapfile -t package_lines <"$INSTALLED_PACKAGES_FILE"
 
-# Processing installed packages
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
-package_counter=0
-batch_packages=()
+    # Processing installed packages
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Processing installed packages..."
+    package_counter=0
+    batch_packages=()
 
-# Main loop processing the lines
-for line in "${package_lines[@]}"; do
-    # Expected format: name|epoch|version|release|arch|repoid
-    IFS='|' read -r package_name epoch_version package_version package_release package_arch package_repo <<<"$line"
+    # Main loop processing the lines
+    for line in "${package_lines[@]}"; do
+        # Expected format: name|epoch|version|release|arch|repoid
+        IFS='|' read -r package_name epoch_version package_version package_release package_arch package_repo <<<"$line"
 
-    # If the package repo is System, @System, or @commandline, find the corresponding repo
-    if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
-        package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
-        if [[ $DEBUG_MODE -ge 1 ]]; then
-            echo "Mapped $package_name to repo: $package_repo"
+        # If the package repo is System, @System, or @commandline, find the corresponding repo
+        if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
+            package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
+            if [[ $DEBUG_MODE -ge 1 ]]; then
+                echo "Mapped $package_name to repo: $package_repo"
+            fi
         fi
-    fi
 
-    # Handle the case where epoch is '0' or empty (skip it in the filename)
-    if [[ "$epoch_version" == "0" || -z "$epoch_version" ]]; then
-        package_version_full="$package_version-$package_release.$package_arch"
-    else
-        package_version_full="$epoch_version:$package_version-$package_release.$package_arch"
-    fi
-
-    pkg_key="${package_name}-${package_version_full}"
-
-    # Skip if the package has already been processed
-    if is_package_processed "$pkg_key"; then
-        [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
-        continue
-    fi
-
-    # Create a temporary file for this thread
-    temp_file=$(create_temp_file)
-
-    # Debugging: Print captured fields
-    if [[ $DEBUG_MODE -ge 2 ]]; then
-        echo "Captured: package_name=$package_name, epoch_version=$epoch_version, package_version=$package_version, package_release=$package_release, package_arch=$package_arch, package_repo=$package_repo" >&2
-    fi
-
-    # Determine repository source
-    if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
-        package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
-        if [[ $DEBUG_MODE -ge 1 ]]; then
-            echo "Determined repo for $package_name: $package_repo" >&2
+        # Handle the case where epoch is '0' or empty (skip it in the filename)
+        if [[ "$epoch_version" == "0" || -z "$epoch_version" ]]; then
+            package_version_full="$package_version-$package_release.$package_arch"
+        else
+            package_version_full="$epoch_version:$package_version-$package_release.$package_arch"
         fi
-    fi
 
-    # Skip if repository is invalid or commandline
-    if [[ "$package_repo" == "@commandline" || "$package_repo" == "Invalid" ]]; then
-        [[ $DEBUG_MODE -ge 1 ]] && echo "Skipping package $package_name as it is marked as $package_repo" >&2
-        continue
-    fi
+        pkg_key="${package_name}-${package_version_full}"
 
-    # Get repository path and name
-    repo_path=$(get_repo_path "$package_repo")
-    repo_name=$(get_repo_name "$package_repo")
-
-    if [[ -n "$repo_path" ]]; then
-        used_directories["$repo_name"]="$repo_path"
-        # Pass 7 fields: repo_name|package_name|epoch_version|package_version|package_release|package_arch|repo_path
-        batch_packages+=("$repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path")
-        # Debugging: Print the package being added
-        if [[ $DEBUG_MODE -ge 2 ]]; then
-            echo "Adding to batch: $repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path" >&2
-        fi
-    else
-        [[ $DEBUG_MODE -ge 1 ]] && echo "Package $package_name does not have a valid repository path" >&2
-        continue
-    fi
-
-    ((package_counter++))
-    if ((MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES)); then
-        break
-    fi
-
-    # If batch size reached, process the batch
-    if ((${#batch_packages[@]} >= BATCH_SIZE)); then
-        process_batch "${batch_packages[@]}"
-        batch_packages=()
-    fi
-done
-
-# Process any remaining packages in the last batch
-if ((${#batch_packages[@]} > 0)); then
-    process_batch "${batch_packages[@]}"
-fi
-
-wait
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
-for repo in "${!used_directories[@]}"; do
-    repo_path="${used_directories[$repo]}"
-
-    # Check if the repository directory exists and contains any RPM files
-    if [[ -d "$repo_path" ]]; then
-        # If no RPM files are found, skip this repository
-        if ! compgen -G "$repo_path/*.rpm" > /dev/null; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - No RPM files found in $repo_path, skipping removal process."
+        # Skip if the package has already been processed
+        if is_package_processed "$pkg_key"; then
+            [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
             continue
         fi
 
-        # Run remove_uninstalled_packages if RPM files are present
-        remove_uninstalled_packages "$repo_path" &
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
-    fi
-done
+        # Create a temporary file for this thread
+        temp_file=$(create_temp_file)
 
-# Periodically check the status of running background jobs
-while true; do
-    running_jobs=$(jobs -rp | wc -l)
-    if (( running_jobs > 0 )); then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Still removing uninstalled packages, ${running_jobs} jobs remaining..."
-        sleep 10  # Adjust the interval as needed to avoid excessive output
-    else
-        break
-    fi
-done
+        # Debugging: Print captured fields
+        if [[ $DEBUG_MODE -ge 2 ]]; then
+            echo "Captured: package_name=$package_name, epoch_version=$epoch_version, package_version=$package_version, package_release=$package_release, package_arch=$package_arch, package_repo=$package_repo" >&2
+        fi
 
-# Wait for all background jobs to finish
-wait
+        # Determine repository source
+        if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
+            package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
+            if [[ $DEBUG_MODE -ge 1 ]]; then
+                echo "Determined repo for $package_name: $package_repo" >&2
+            fi
+        fi
+
+        # Skip if repository is invalid or commandline
+        if [[ "$package_repo" == "@commandline" || "$package_repo" == "Invalid" ]]; then
+            [[ $DEBUG_MODE -ge 1 ]] && echo "Skipping package $package_name as it is marked as $package_repo" >&2
+            continue
+        fi
+
+        # Get repository path and name
+        repo_path=$(get_repo_path "$package_repo")
+        repo_name=$(get_repo_name "$package_repo")
+
+        if [[ -n "$repo_path" ]]; then
+            used_directories["$repo_name"]="$repo_path"
+            # Pass 7 fields: repo_name|package_name|epoch_version|package_version|package_release|package_arch|repo_path
+            batch_packages+=("$repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path")
+            # Debugging: Print the package being added
+            if [[ $DEBUG_MODE -ge 2 ]]; then
+                echo "Adding to batch: $repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path" >&2
+            fi
+        else
+            [[ $DEBUG_MODE -ge 1 ]] && echo "Package $package_name does not have a valid repository path" >&2
+            continue
+        fi
+
+        ((package_counter++))
+        if ((MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES)); then
+            break
+        fi
+
+        # If batch size reached, process the batch
+        if ((${#batch_packages[@]} >= BATCH_SIZE)); then
+            process_batch "${batch_packages[@]}"
+            batch_packages=()
+        fi
+    done
+
+    # Process any remaining packages in the last batch
+    if ((${#batch_packages[@]} > 0)); then
+        process_batch "${batch_packages[@]}"
+    fi
+
+    wait
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Removing uninstalled packages..."
+    for repo in "${!used_directories[@]}"; do
+        repo_path="${used_directories[$repo]}"
+
+        # Check if the repository directory exists and contains any RPM files
+        if [[ -d "$repo_path" ]]; then
+            # If no RPM files are found, skip this repository
+            if ! compgen -G "$repo_path/*.rpm" > /dev/null; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - No RPM files found in $repo_path, skipping removal process."
+                continue
+            fi
+
+            # Run remove_uninstalled_packages if RPM files are present
+            remove_uninstalled_packages "$repo_path" &
+        else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
+        fi
+    done
+
+    # Periodically check the status of running background jobs
+    while true; do
+        running_jobs=$(jobs -rp | wc -l)
+        if (( running_jobs > 0 )); then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Still removing uninstalled packages, ${running_jobs} jobs remaining..."
+            sleep 10  # Adjust the interval as needed to avoid excessive output
+        else
+            break
+        fi
+    done
+
+    # Wait for all background jobs to finish
+    wait
+fi  # End of SYNC_ONLY condition
 
 # Update and sync the repositories
 if [ "$MAX_PACKAGES" -eq 0 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
+
+    # If SYNC_ONLY is set, we need to determine which directories to update
+    if (( SYNC_ONLY == 1 )); then
+        # Find all repositories under LOCAL_REPO_PATH
+        while IFS= read -r -d '' dir; do
+            repo_name=$(basename "$dir")
+            used_directories["$repo_name"]="$dir/getPackage"
+        done < <(find "$LOCAL_REPO_PATH" -mindepth 1 -maxdepth 1 -type d -print0)
+    fi
+
     for repo in "${!used_directories[@]}"; do
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $repo metadata"
         package_path="${used_directories[$repo]}"
         repo_path=$(dirname "$package_path")
-        repo_name=$(dirname "$repo_path")
+        repo_name=$(basename "$repo_path")
 
         if ((DRY_RUN)); then
             echo "Dry Run: Would run 'createrepo --update $repo_path'"
         else
-            [[ $DEBUG_MODE -ge 1 ]] && echo "Creating $repo_name repository indexes"
-
-            if ! createrepo --update "$repo_path" >>process_package.log 2>>myrepo.err; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>myrepo.err
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Creating $repo_name repository indexes"
+            if ! createrepo --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - Error updating metadata for $repo" >>"$MYREPO_ERR_FILE"
             fi
         fi
     done
@@ -786,8 +841,8 @@ if [ "$MAX_PACKAGES" -eq 0 ]; then
     if ((DRY_RUN)); then
         echo "Dry Run: Would run 'rsync -av --delete $LOCAL_REPO_PATH/ $SHARED_REPO_PATH/'"
     else
-        if ! rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/" >>process_package.log 2>>myrepo.err; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error synchronizing repositories." >>myrepo.err
+        if ! rsync -av --delete "$LOCAL_REPO_PATH/" "$SHARED_REPO_PATH/" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Error synchronizing repositories." >>"$MYREPO_ERR_FILE"
         fi
     fi
 fi
