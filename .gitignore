@@ -2,3 +2,4 @@ locally_found.lst
 myrepo.err
 process_package.log
 .vscode/
+myrepo_debug.log

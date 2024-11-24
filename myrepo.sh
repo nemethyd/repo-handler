@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Last Updated: 2023-11-06
+# Last Updated: 2023-11-24
 
 # MIT licensing
 # Purpose:
@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.83
+VERSION=2.87
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -19,14 +19,12 @@ echo "$0 Version $VERSION"
 : "${BATCH_SIZE:=10}"
 : "${PARALLEL:=2}"
 : "${DRY_RUN:=0}"
-: "${NO_SUDO:=0}"
+: "${USER_MODE:=0}"
 : "${SYNC_ONLY:=0}"
 
 # Default configuration values
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-INSTALLED_PACKAGES_FILE="/tmp/installed_packages.lst"
-PROCESSED_PACKAGES_FILE="/tmp/processed_packages.share"
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
@@ -47,21 +45,21 @@ if [[ -f "$CONFIG_FILE" ]]; then
         fi
         key=$(echo "$key" | tr -d ' ')
         value=$(echo "$value" | sed 's/^ *//;s/ *$//; s/^["'\'']\|["'\'']$//g')
-  
+
         case "$key" in
-            LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
-            SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
-            LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
-            RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
-            DEBUG_MODE) DEBUG_MODE="$value" ;;
-            MAX_PACKAGES) MAX_PACKAGES="$value" ;;
-            BATCH_SIZE) BATCH_SIZE="$value" ;;
-            PARALLEL) PARALLEL="$value" ;;
-            DRY_RUN) DRY_RUN="$value" ;;
-            NO_SUDO) NO_SUDO="$value" ;;
-            LOG_DIR) LOG_DIR="$value" ;;
-            SYNC_ONLY) SYNC_ONLY="$value" ;;
-            *) echo "Unknown configuration option: $key" ;;
+        LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
+        SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
+        LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
+        RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
+        DEBUG_MODE) DEBUG_MODE="$value" ;;
+        MAX_PACKAGES) MAX_PACKAGES="$value" ;;
+        BATCH_SIZE) BATCH_SIZE="$value" ;;
+        PARALLEL) PARALLEL="$value" ;;
+        DRY_RUN) DRY_RUN="$value" ;;
+        USER_MODE) USER_MODE="$value" ;;
+        LOG_DIR) LOG_DIR="$value" ;;
+        SYNC_ONLY) SYNC_ONLY="$value" ;;
+        *) echo "Unknown configuration option: $key" ;;
         esac
     done < <(grep -v '^\s*#' "$CONFIG_FILE")
 fi
@@ -86,8 +84,8 @@ while [[ "$1" =~ ^-- ]]; do
         shift
         MAX_PACKAGES=$1
         ;;
-    --no-sudo)
-        NO_SUDO=1
+    --user-mode)
+        USER_MODE=1
         ;;
     --parallel)
         shift
@@ -124,7 +122,7 @@ while [[ "$1" =~ ^-- ]]; do
         echo "  --batch-size NUM          Number of packages per batch (default: $BATCH_SIZE)"
         echo "  --parallel NUM            Number of parallel processes (default: $PARALLEL)"
         echo "  --dry-run                 Perform a dry run without making changes"
-        echo "  --no-sudo                 Run without sudo privileges"
+        echo "  --user-mode                 Run without sudo privileges"
         echo "  --local-repo-path PATH    Set local repository path (default: $LOCAL_REPO_PATH)"
         echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
         echo "  --local-repos REPOS       Comma-separated list of local repos (default: ${LOCAL_REPOS[*]})"
@@ -140,6 +138,33 @@ while [[ "$1" =~ ^-- ]]; do
     shift
 done
 
+# Check if script is run as root
+if [[ -z $USER_MODE && $EUID -ne 0 ]]; then
+    echo "This script must be run as root or with sudo privileges." >&2
+    exit 1
+fi
+
+# Set the base directory for temporary files depending on USER_MODE
+if [[ $USER_MODE -eq 1 ]]; then
+    TMP_DIR="$HOME/tmp"
+    mkdir -p "$TMP_DIR" || {
+        echo "Failed to create temporary directory $TMP_DIR for user mode." >&2
+        exit 1
+    }
+else
+    TMP_DIR="/tmp"
+fi
+
+# Define temporary files paths
+INSTALLED_PACKAGES_FILE="$TMP_DIR/installed_packages.lst"
+PROCESSED_PACKAGES_FILE="$TMP_DIR/processed_packages.share"
+
+# Create the temporary files and ensure they have correct permissions
+touch "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE" || {
+    echo "Failed to create temporary files in $TMP_DIR." >&2
+    exit 1
+}
+
 # Ensure that the log directory exists and is writable
 if [[ ! -d "$LOG_DIR" ]]; then
     mkdir -p "$LOG_DIR" || {
@@ -153,15 +178,16 @@ if [[ ! -w "$LOG_DIR" ]]; then
     echo "Log directory $LOG_DIR is not writable by the current user." >&2
     echo "Attempting to set permissions..."
 
-    if [[ -z $NO_SUDO ]]; then
-        sudo chown "$USER" "$LOG_DIR" || {
+    if [[ $USER_MODE -eq 1 ]]; then
+        sudo chown -R "$USER" "$LOG_DIR" || {
             echo "Failed to change ownership of $LOG_DIR to $USER" >&2
             exit 1
         }
-    else
-        echo "Cannot set permissions without sudo privileges. Exiting." >&2
-        exit 1
     fi
+    sudo chmod u+w "$LOG_DIR" || {
+        echo "Failed to set write permissions on $LOG_DIR for the current user." >&2
+        exit 1
+    }
 fi
 
 # Define log file paths
@@ -169,20 +195,37 @@ LOCALLY_FOUND_FILE="$LOG_DIR/locally_found.lst"
 MYREPO_ERR_FILE="$LOG_DIR/myrepo.err"
 PROCESS_LOG_FILE="$LOG_DIR/process_package.log"
 
-# Ensure that the files exist, then truncate them
-touch "$LOCALLY_FOUND_FILE" "$MYREPO_ERR_FILE" "$PROCESS_LOG_FILE" "$PROCESSED_PACKAGES_FILE" "$INSTALLED_PACKAGES_FILE"
+# Ensure the log directory is writable by the user running the script
+if [[ ! -w "$LOG_DIR" ]]; then
+    echo "Log directory $LOG_DIR is not writable by the current user." >&2
+    echo "Attempting to set permissions..."
+
+    if [[ $USER_MODE -eq 0 ]]; then
+        sudo chown -R "$USER" "$LOG_DIR" || {
+            echo "Failed to change ownership of $LOG_DIR to $USER" >&2
+            exit 1
+        }
+    fi
+
+    # In both USER_MODE and non-USER_MODE, attempt to change permissions to allow writing
+    chmod u+w "$LOG_DIR" || {
+        echo "Failed to set write permissions on $LOG_DIR for the current user." >&2
+        exit 1
+    }
+fi
+
+# Ensure that the log files exist, then truncate them
+touch "$LOCALLY_FOUND_FILE" "$MYREPO_ERR_FILE" "$PROCESS_LOG_FILE" || {
+    echo "Failed to create log files in $LOG_DIR." >&2
+    exit 1
+}
+
 
 : >"$LOCALLY_FOUND_FILE"
 : >"$MYREPO_ERR_FILE"
 : >"$PROCESS_LOG_FILE"
 : >"$PROCESSED_PACKAGES_FILE"
 : >"$INSTALLED_PACKAGES_FILE"
-
-# Check if script is run as root
-if [[ -z $NO_SUDO && $EUID -ne 0 ]]; then
-    echo "This script must be run as root or with sudo privileges." >&2
-    exit 1
-fi
 
 # Calculate the parallel download factor by multiplying PARALLEL and BATCH_SIZE
 PARALLEL_DOWNLOADS=$((PARALLEL * BATCH_SIZE))
@@ -299,7 +342,7 @@ download_packages() {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
                 # Check if sudo is required and set the appropriate command prefix
                 DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
-                if [[ -z "$NO_SUDO" ]]; then
+                if [[ -z "$USER_MODE" ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
@@ -465,6 +508,7 @@ process_batch() {
         process_packages \
             "$DEBUG_MODE" \
             "${batch_packages[*]}" \
+            "${LOCAL_REPOS[*]}" \
             "$PROCESSED_PACKAGES_FILE" \
             "$PARALLEL" \
             "$temp_file" &
@@ -560,25 +604,51 @@ process_packages() {
     wait
 }
 
-# Function to remove an uninstalled or removed package
+# Function to process RPM files for uninstallation check
 process_rpm_file() {
     local rpm_file="$1"
 
+    # Debug line to check what rpm_file is being received
+    if [[ -z "$rpm_file" ]]; then
+        echo -e "\e[90mWarning: Received empty rpm_file argument.\e[0m" >&2
+        return 1
+    fi
+
+    # Extract repo name from the path
+    local repo_name
+    repo_name=$(basename "$(dirname "$(dirname "$rpm_file")")") # Extract the parent directory name of getPackage
+
+    # Extract package name, version, release, and arch
+    local package_name package_version package_release package_arch
     package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
+    package_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
+    package_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
     package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
 
+    # Validate extraction
+    if [[ -z "$package_name" || -z "$package_version" || -z "$package_release" || -z "$package_arch" ]]; then
+        echo -e "\e[90mWarning: Failed to extract package details from $rpm_file\e[0m" >&2
+        return 1
+    fi
+
+    # Output formatted with gray text
+    [[ $DEBUG_MODE -ge 1 ]] && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} checking\e[0m"
+
+    # Proceed with other operations
     if ! awk -F '|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
         if ((DRY_RUN)); then
-            echo "$rpm_file would be removed."
+            echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} would be removed.\e[0m"
         else
-            rm -f "$rpm_file" && echo "Successfully removed $rpm_file" || echo "Failed to remove $rpm_file" >>"$MYREPO_ERR_FILE"
+            rm -f "$rpm_file" && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} removed successfully\e[0m" || {
+                echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} removal failed\e[0m" >>"$MYREPO_ERR_FILE"
+                return 1
+            }
         fi
     else
-        if ((DEBUG_MODE >= 1)); then
-            echo "$rpm_file exists and is not being removed." >&2
-        fi
+        [[ $DEBUG_MODE -ge 1 ]] && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} exists and is not being removed.\e[0m" >&2
     fi
 }
+
 
 # Function to remove existing package files (ensures only older versions are removed)
 remove_existing_packages() {
@@ -632,12 +702,31 @@ remove_uninstalled_packages() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Checking for removed packages in: $repo_name"
 
-    # Find all RPM files for the repository and process them in parallel
-    export -f process_rpm_file # Export the function so that xargs can use it
+    # Find all RPM files for the repository and process them in parallel using a for loop
+    local rpm_files=()
+    while IFS= read -r -d $'\0' file; do
+        rpm_files+=("$file")
+    done < <(find "$repo_path" -type f -name "*.rpm" -print0)
 
-    find "$repo_path" -type f -name "*.rpm" -print0 |
-        xargs -0 -P "$PARALLEL" -n 1 {} bash -c 'process_rpm_file "$@"' _ {}
+    local num_jobs=0
+    for rpm_file in "${rpm_files[@]}"; do
+        {
+            [[ DEBUG_MODE -ge 2 ]] && echo "Processing file: $rpm_file"
+            process_rpm_file "$rpm_file"
+        } & # Run in the background
+        ((num_jobs++))
+
+        # Limit the number of parallel jobs
+        if [[ $num_jobs -ge $PARALLEL ]]; then
+            wait -n  # Wait for any of the background jobs to finish before proceeding
+            ((num_jobs--))
+        fi
+    done
+
+    # Wait for all background jobs to finish
+    wait
 }
+
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
@@ -662,7 +751,7 @@ trap cleanup EXIT
 # Set constant padding length for alignment
 PADDING_LENGTH=22
 
-if (( SYNC_ONLY == 0 )); then
+if ((SYNC_ONLY == 0)); then
     # Fetch installed packages list with detailed information
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching list of installed packages..."
 
@@ -784,13 +873,13 @@ if (( SYNC_ONLY == 0 )); then
         # Check if the repository directory exists and contains any RPM files
         if [[ -d "$repo_path" ]]; then
             # If no RPM files are found, skip this repository
-            if ! compgen -G "$repo_path/*.rpm" > /dev/null; then
+            if ! compgen -G "$repo_path/*.rpm" >/dev/null; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') - No RPM files found in $repo_path, skipping removal process."
                 continue
             fi
 
             # Run remove_uninstalled_packages if RPM files are present
-            remove_uninstalled_packages "$repo_path" &
+            remove_uninstalled_packages "$repo_path" 
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
         fi
@@ -799,9 +888,9 @@ if (( SYNC_ONLY == 0 )); then
     # Periodically check the status of running background jobs
     while true; do
         running_jobs=$(jobs -rp | wc -l)
-        if (( running_jobs > 0 )); then
+        if ((running_jobs > 0)); then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Still removing uninstalled packages, ${running_jobs} jobs remaining..."
-            sleep 10  # Adjust the interval as needed to avoid excessive output
+            sleep 10 # Adjust the interval as needed to avoid excessive output
         else
             break
         fi
@@ -809,14 +898,14 @@ if (( SYNC_ONLY == 0 )); then
 
     # Wait for all background jobs to finish
     wait
-fi  # End of SYNC_ONLY condition
+fi # End of SYNC_ONLY condition
 
 # Update and sync the repositories
 if [ "$MAX_PACKAGES" -eq 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating repository metadata..."
 
     # If SYNC_ONLY is set, we need to determine which directories to update
-    if (( SYNC_ONLY == 1 )); then
+    if ((SYNC_ONLY == 1)); then
         # Find all repositories under LOCAL_REPO_PATH
         while IFS= read -r -d '' dir; do
             repo_name=$(basename "$dir")
