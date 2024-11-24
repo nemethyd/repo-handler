@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.82
+VERSION=2.83
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -46,7 +46,8 @@ if [[ -f "$CONFIG_FILE" ]]; then
             continue
         fi
         key=$(echo "$key" | tr -d ' ')
-        value=$(echo "$value" | sed 's/^ *//;s/ *$//')
+        value=$(echo "$value" | sed 's/^ *//;s/ *$//; s/^["'\'']\|["'\'']$//g')
+  
         case "$key" in
             LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
             SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
@@ -64,6 +65,8 @@ if [[ -f "$CONFIG_FILE" ]]; then
         esac
     done < <(grep -v '^\s*#' "$CONFIG_FILE")
 fi
+
+[[ DEBUG_MODE -ge 1 ]] && echo "LOCAL_REPOS is set to:" "${LOCAL_REPOS[@]}"
 
 # Parse command-line options (overrides config file and defaults)
 while [[ "$1" =~ ^-- ]]; do
@@ -462,7 +465,6 @@ process_batch() {
         process_packages \
             "$DEBUG_MODE" \
             "${batch_packages[*]}" \
-            "${LOCAL_REPOS[*]}" \
             "$PROCESSED_PACKAGES_FILE" \
             "$PARALLEL" \
             "$temp_file" &
@@ -634,7 +636,7 @@ remove_uninstalled_packages() {
     export -f process_rpm_file # Export the function so that xargs can use it
 
     find "$repo_path" -type f -name "*.rpm" -print0 |
-        xargs -0 -P "$PARALLEL" -I {} bash -c 'process_rpm_file "$@"' _ {}
+        xargs -0 -P "$PARALLEL" -n 1 {} bash -c 'process_rpm_file "$@"' _ {}
 }
 
 # Function to wait for background jobs to finish
