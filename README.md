@@ -119,8 +119,8 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Enable dry run (1 = true, 0 = false)
 # DRY_RUN=0
 
-# Run without sudo privileges (1 = true, 0 = false)
-# NO_SUDO=0
+# Run under the non-root user environment (1 = true, 0 = false)
+# USER_MODE=0
 ```
 
 ### Priority of Settings
@@ -146,7 +146,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 - `--batch-size NUM`: Number of packages processed in each batch (default: `10`).
 - `--parallel NUM`: Number of parallel jobs (default: `2`).
 - `--dry-run`: Perform a dry run without making changes.
-- `--no-sudo`: Run without sudo privileges.
+- `--user-mode`: Run under non-root user.
 - `--local-repo-path PATH`: Set local repository path.
 - `--shared-repo-path PATH`: Set shared repository path.
 - `--local-repos REPOS`: Comma-separated list of local repositories.

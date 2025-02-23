@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.87
+VERSION=2.89
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -219,7 +219,6 @@ touch "$LOCALLY_FOUND_FILE" "$MYREPO_ERR_FILE" "$PROCESS_LOG_FILE" || {
     echo "Failed to create log files in $LOG_DIR." >&2
     exit 1
 }
-
 
 : >"$LOCALLY_FOUND_FILE"
 : >"$MYREPO_ERR_FILE"
@@ -619,11 +618,15 @@ process_rpm_file() {
     repo_name=$(basename "$(dirname "$(dirname "$rpm_file")")") # Extract the parent directory name of getPackage
 
     # Extract package name, version, release, and arch
-    local package_name package_version package_release package_arch
+    local package_name package_version package_release package_arch package_epoch
     package_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
     package_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
     package_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
     package_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
+    package_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>>"$MYREPO_ERR_FILE")
+    if [[ "$package_epoch" == "(none)" || -z "$package_epoch" ]]; then
+        package_epoch="0"
+    fi
 
     # Validate extraction
     if [[ -z "$package_name" || -z "$package_version" || -z "$package_release" || -z "$package_arch" ]]; then
@@ -635,20 +638,29 @@ process_rpm_file() {
     [[ $DEBUG_MODE -ge 1 ]] && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} checking\e[0m"
 
     # Proceed with other operations
-    if ! awk -F '|' -v name="$package_name" -v arch="$package_arch" '$1 == name && $5 == arch' "$INSTALLED_PACKAGES_FILE" >/dev/null; then
+    if ! awk -F '|' \
+        -v name="$package_name" \
+        -v epoch="$package_epoch" \
+        -v version="$package_version" \
+        -v release="$package_release" \
+        -v arch="$package_arch" \
+        '($1 == name && $2 == epoch && $3 == version && $4 == release && $5 == arch)' \
+        "$INSTALLED_PACKAGES_FILE" >/dev/null; then
         if ((DRY_RUN)); then
             echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} would be removed.\e[0m"
         else
-            rm -f "$rpm_file" && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} removed successfully\e[0m" || {
+            if rm -f "$rpm_file"; then
+                echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} removed successfully\e[0m"
+            else
                 echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} removal failed\e[0m" >>"$MYREPO_ERR_FILE"
                 return 1
-            }
+            fi
         fi
     else
         [[ $DEBUG_MODE -ge 1 ]] && echo -e "\e[90m${repo_name} : ${package_name}-${package_version}.${package_arch} exists and is not being removed.\e[0m" >&2
     fi
-}
 
+}
 
 # Function to remove existing package files (ensures only older versions are removed)
 remove_existing_packages() {
@@ -718,7 +730,7 @@ remove_uninstalled_packages() {
 
         # Limit the number of parallel jobs
         if [[ $num_jobs -ge $PARALLEL ]]; then
-            wait -n  # Wait for any of the background jobs to finish before proceeding
+            wait -n # Wait for any of the background jobs to finish before proceeding
             ((num_jobs--))
         fi
     done
@@ -726,7 +738,6 @@ remove_uninstalled_packages() {
     # Wait for all background jobs to finish
     wait
 }
-
 
 # Function to wait for background jobs to finish
 wait_for_jobs() {
@@ -879,7 +890,7 @@ if ((SYNC_ONLY == 0)); then
             fi
 
             # Run remove_uninstalled_packages if RPM files are present
-            remove_uninstalled_packages "$repo_path" 
+            remove_uninstalled_packages "$repo_path"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Repository path $repo_path does not exist, skipping."
         fi
