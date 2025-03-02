@@ -1,4 +1,3 @@
-
 # Repo Handler Script
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with AI support (ChatGPT-4)
@@ -13,6 +12,7 @@ The script helps:
 - **Automatic Cleanup**: Removes uninstalled or outdated packages from the repository, ensuring it only contains necessary packages.
 - **Synchronization**: Keeps the local repository in sync with a shared repository using `rsync`, allowing the local repository to remain fresh and current.
 - **Configuration Flexibility**: Allows customization through a configuration file `myrepo.cfg` and command-line arguments, providing flexibility and ease of use.
+- **Repository Exclusions**: Enables exclusion of certain repositories from being processed, useful for repositories that should not be mirrored.
 
 ![MyRepo Workflow](images/MyRepo.png)
 
@@ -25,42 +25,7 @@ The script helps:
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
 - **Debugging Options**: Includes a `DEBUG_MODE` for verbose output during script execution.
-
-## Components
-
-### **myrepo.sh**
-
-This is a standalone bash script that handles:
-
-- Fetching installed packages from the golden copy machine.
-- Managing the local repository by adding, updating, or removing packages.
-- Synchronizing the local repository with a shared repository.
-- Reading configuration from `myrepo.cfg` and command-line arguments.
-
-### **myrepo.cfg**
-
-A configuration file that allows you to override default settings in `myrepo.sh`. It contains all configurable options with their default values commented out. You can customize the script by uncommenting and modifying these values.
-
-## Installation
-
-### 1. Clone the Repository:
-
-```bash
-git clone https://github.com/nemethyd/repo-handler.git
-cd repo-handler
-```
-
-**Note**: Remember to replace `https://github.com/nemethyd/repo-handler.git` with the actual URL of your repository.
-
-### 2. Prepare Your Environment:
-
-- Ensure your local repository path (`LOCAL_REPO_PATH`) and shared repository path (`SHARED_REPO_PATH`) are correct.
-- These can be set in `myrepo.cfg` or via command-line arguments.
-
-### 3. Install Required Tools:
-
-- The script depends on `dnf`, `rpm`, `createrepo`, and `rsync`.
-- Ensure these utilities are available on your system.
+- **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
 ## Configuration
 
@@ -121,7 +86,20 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 
 # Run under the non-root user environment (1 = true, 0 = false)
 # USER_MODE=0
+
+# Define repositories that should be excluded from processing
+# Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
+EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 ```
+
+### Repository Exclusion Feature
+
+Some repositories may contain packages installed on the golden-copy machine but are **not intended to be mirrored**. The `EXCLUDED_REPOS` setting ensures that these repositories are:
+
+1. **Skipped during processing** (packages from these repositories will not be added to the local repo).
+2. **Removed from the local repository path if already present**.
+
+This feature is useful for temporary or special-purpose repositories, such as **Copr repositories**.
 
 ### Priority of Settings
 
@@ -139,67 +117,26 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh [options]
 ```
 
-#### Available Command-Line Options:
-
-- `--debug-level LEVEL`: Set the debug level (default: `0`).
-- `--max-packages NUM`: Maximum number of packages to process (default: `0` for no limit).
-- `--batch-size NUM`: Number of packages processed in each batch (default: `10`).
-- `--parallel NUM`: Number of parallel jobs (default: `2`).
-- `--dry-run`: Perform a dry run without making changes.
-- `--user-mode`: Run under non-root user.
-- `--local-repo-path PATH`: Set local repository path.
-- `--shared-repo-path PATH`: Set shared repository path.
-- `--local-repos REPOS`: Comma-separated list of local repositories.
-
 #### Example:
 
 ```bash
 ./myrepo.sh --debug-level 1 --batch-size 20 --local-repo-path /custom/repo
 ```
 
-### Output Messages
+### How It Works
 
-- **Aligned Repository Names**: Repository names in output messages are aligned to a constant width for better readability.
-- **Suppressed Messages**: In normal mode (when `DEBUG_MODE` is less than `1`), certain messages (like package removal during updates) are suppressed for clarity.
-
-## How It Works
-
-1. **Fetching Installed Packages**:
-
-   - The script fetches a list of installed packages from the system.
-
-2. **Determining Package Status**:
-
-   - For each package, the script determines whether it's new, needs an update, or already exists in the local repository.
-
-3. **Processing Packages**:
-
-   - **New Packages**: Downloaded and added to the local repository.
-   - **Updates**: Older versions are removed (messages about removal are shown only in debug mode), and the latest versions are added.
-   - **Existing Packages**: No action is taken.
-
-4. **Cleaning Up**:
-
-   - Uninstalled or removed packages are deleted from the local repository to keep it clean and efficient.
-
-5. **Updating Repository Metadata**:
-
-   - After processing, the script updates the repository metadata using `createrepo`.
-
-6. **Synchronization**:
-
-   - The local repository is synchronized with the shared repository using `rsync`.
-
-## Customization
-
-- **Repository Paths**: Can be set via `myrepo.cfg` or command-line options.
-- **Batch Size and Parallelism**: Adjust `BATCH_SIZE` and `PARALLEL` to optimize performance based on your system's capacity.
-- **Local Repositories**: Define your own local repositories using the `LOCAL_REPOS` configuration.
+1. **Fetching Installed Packages**
+2. **Determining Package Status**
+3. **Processing Packages**
+4. **Cleaning Up**
+5. **Updating Repository Metadata**
+6. **Synchronization**
 
 ## Tips
 
 - **Dry Run Mode**: Use the `--dry-run` option to simulate the script's actions without making any changes.
 - **Debugging**: Increase the `DEBUG_MODE` to get more detailed output, which can help in troubleshooting.
+- **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
 
 ## License
 
@@ -212,3 +149,4 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 ## Conclusion
 
 The `repo-handler` script provides a robust solution for managing local package repositories in isolated environments. By utilizing a configuration file and command-line options, it offers flexibility and ease of use, ensuring that your repositories are always up-to-date and contain only the necessary packages.
+
