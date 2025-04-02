@@ -25,6 +25,7 @@ The script helps:
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
 - **Debugging Options**: Includes a `DEBUG_MODE` for verbose output during script execution.
+- **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
 ## Configuration
@@ -83,6 +84,11 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 
 # Enable dry run (1 = true, 0 = false)
 # DRY_RUN=0
+# Enable dry run (1 = true, 0 = false)
+# DRY_RUN=0
+
+# Continue execution despite download errors (0 = halt on errors, 1 = continue despite errors)
+# CONTINUE_ON_ERROR=0
 
 # Run under the non-root user environment (1 = true, 0 = false)
 # USER_MODE=0

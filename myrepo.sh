@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Last Updated: 2025-03-02
+# Last Updated: 2025-04-01
 
 # MIT licensing
 # Purpose:
@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.92
+VERSION=2.94
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -19,7 +19,8 @@ echo "$0 Version $VERSION"
 : "${BATCH_SIZE:=10}"
 : "${PARALLEL:=2}"
 : "${DRY_RUN:=0}"
-: "${USER_MODE:=0}"
+: "${IS_USER_MODE:=0}"
+: "${CONTINUE_ON_ERROR:=0}"
 : "${SYNC_ONLY:=0}"
 
 # Default configuration values
@@ -58,12 +59,12 @@ function align_repo_name() {
 # Function to check if the script is run as root or with sudo privileges
 function check_user_mode() {
     # Check if script is run as root
-    if [[ -z $USER_MODE && $EUID -ne 0 ]]; then
+    if [[ -z $IS_USER_MODE && $EUID -ne 0 ]]; then
         echo "This script must be run as root or with sudo privileges." >&2
         exit 1
     fi
-    # Set the base directory for temporary files depending on USER_MODE
-    if [[ $USER_MODE -eq 1 ]]; then
+    # Set the base directory for temporary files depending on IS_USER_MODE
+    if [[ $IS_USER_MODE -eq 1 ]]; then
         TMP_DIR="$HOME/tmp"
         mkdir -p "$TMP_DIR" || {
             echo "Failed to create temporary directory $TMP_DIR for user mode." >&2
@@ -185,14 +186,16 @@ function download_packages() {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
                 # Check if sudo is required and set the appropriate command prefix
                 DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
-                if [[ -z "$USER_MODE" ]]; then
+		local download_failed=0
+		if [[ -z "$IS_USER_MODE" ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
                 [[ DEBUG_MODE -ge 2 ]] && echo "$DNF_COMMAND"
                 if ! $DNF_COMMAND 1>>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
-                    log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
-                    return 1
+			download_failed=1
+    			log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
+                  	((CONTINUE_ON_ERROR == 0)) && exit 1
                 fi
             } &
         fi
@@ -350,9 +353,10 @@ function load_config() {
             BATCH_SIZE) BATCH_SIZE="$value" ;;
             PARALLEL) PARALLEL="$value" ;;
             DRY_RUN) DRY_RUN="$value" ;;
-            USER_MODE) USER_MODE="$value" ;;
+            IS_USER_MODE) IS_USER_MODE="$value" ;;
             LOG_DIR) LOG_DIR="$value" ;;
             SYNC_ONLY) SYNC_ONLY="$value" ;;
+            CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
             *) echo "Unknown configuration option: $key" ;;
             esac
         done < <(grep -v '^\s*#' "$CONFIG_FILE")
@@ -411,7 +415,7 @@ function parse_args() {
             MAX_PACKAGES=$1
             ;;
         --user-mode)
-            USER_MODE=1
+            IS_USER_MODE=1
             ;;
         --parallel)
             shift
@@ -481,7 +485,7 @@ function prepare_log_files() {
         echo "Log directory $LOG_DIR is not writable by the current user." >&2
         echo "Attempting to set permissions..."
 
-        if [[ $USER_MODE -eq 1 ]]; then
+        if [[ $IS_USER_MODE -eq 1 ]]; then
             sudo chown -R "$USER" "$LOG_DIR" || {
                 echo "Failed to change ownership of $LOG_DIR to $USER" >&2
                 exit 1
@@ -503,14 +507,14 @@ function prepare_log_files() {
         echo "Log directory $LOG_DIR is not writable by the current user." >&2
         echo "Attempting to set permissions..."
 
-        if [[ $USER_MODE -eq 0 ]]; then
+        if [[ $IS_USER_MODE -eq 0 ]]; then
             sudo chown -R "$USER" "$LOG_DIR" || {
                 echo "Failed to change ownership of $LOG_DIR to $USER" >&2
                 exit 1
             }
         fi
 
-        # In both USER_MODE and non-USER_MODE, attempt to change permissions to allow writing
+        # In both IS_USER_MODE and non-IS_USER_MODE, attempt to change permissions to allow writing
         chmod u+w "$LOG_DIR" || {
             echo "Failed to set write permissions on $LOG_DIR for the current user." >&2
             exit 1
