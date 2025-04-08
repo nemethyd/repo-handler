@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.94
+VERSION=2.95
 echo "$0 Version $VERSION"
 
 # Default values for environment variables if not set
@@ -31,6 +31,9 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
 # Log directory
 LOG_DIR="/var/log/myrepo"
+
+# Ensure global TEMP_FILE creation
+TEMP_FILE=$(create_temp_file)
 
 # Initialize temporary files array for cleanup
 TEMP_FILES=()
@@ -186,14 +189,14 @@ function download_packages() {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
                 # Check if sudo is required and set the appropriate command prefix
                 DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
-		local download_failed=0
+
 		if [[ -z "$IS_USER_MODE" ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
                 [[ DEBUG_MODE -ge 2 ]] && echo "$DNF_COMMAND"
                 if ! $DNF_COMMAND 1>>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
-			download_failed=1
+
     			log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
                   	((CONTINUE_ON_ERROR == 0)) && exit 1
                 fi
@@ -545,8 +548,7 @@ function process_batch() {
             "${batch_packages[*]}" \
             "${LOCAL_REPOS[*]}" \
             "$PROCESSED_PACKAGES_FILE" \
-            "$PARALLEL" \
-            "$temp_file" &
+            "$PARALLEL" &
         # Wait for background jobs to finish before starting a new batch
         wait_for_jobs
     fi
@@ -559,19 +561,20 @@ function process_packages() {
     local LOCAL_REPOS
     local PROCESSED_PACKAGES_FILE
     local PARALLEL
-    local TEMP_FILE
 
     DEBUG_MODE=$1
     PACKAGES=("$2")
     LOCAL_REPOS=("$3")
     PROCESSED_PACKAGES_FILE=$4
     PARALLEL=$5
-    TEMP_FILE=$6
 
     if [ ${#PACKAGES[@]} -eq 0 ]; then
         echo "No packages to process."
         return
     fi
+
+    local TEMP_FILE
+    TEMP_FILE=$(create_temp_file)
 
     ### Main processing section ###
 
@@ -879,9 +882,6 @@ function traverse_local_repos() {
                 [[ $DEBUG_MODE -ge 1 ]] && echo "Package $pkg_key already processed, skipping."
                 continue
             fi
-
-            # Create a temporary file for this thread
-            temp_file=$(create_temp_file)
 
             # Debugging: Print captured fields
             if [[ $DEBUG_MODE -ge 2 ]]; then
