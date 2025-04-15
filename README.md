@@ -25,6 +25,7 @@ The script helps:
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
 - **Debugging Options**: Includes a `DEBUG_MODE` for verbose output during script execution.
+- **Log Level Control**: Allows setting the verbosity of log messages using the `LOG_LEVEL` option (e.g., `ERROR`, `WARN`, `INFO`, `DEBUG`).
 - **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
@@ -73,6 +74,9 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Set debug mode (0 = off, 1 = basic debug, 2 = verbose debug)
 # DEBUG_MODE=0
 
+# Set log level (ERROR, WARN, INFO, DEBUG)
+# LOG_LEVEL="INFO"
+
 # Set maximum number of packages to process (0 = no limit)
 # MAX_PACKAGES=0
 
@@ -82,8 +86,6 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Set the number of parallel processes
 # PARALLEL=2
 
-# Enable dry run (1 = true, 0 = false)
-# DRY_RUN=0
 # Enable dry run (1 = true, 0 = false)
 # DRY_RUN=0
 
@@ -96,6 +98,28 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Define repositories that should be excluded from processing
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
 EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
+```
+
+### Log Level Control
+
+The `LOG_LEVEL` option allows you to control the verbosity of log messages. Available levels are:
+
+- `ERROR`: Logs only critical errors.
+- `WARN`: Logs warnings and errors.
+- `INFO`: Logs informational messages, warnings, and errors (default).
+- `DEBUG`: Logs detailed debugging information, along with all other levels.
+
+To set the log level, modify the `LOG_LEVEL` option in `myrepo.cfg`:
+
+```bash
+# Set log level (ERROR, WARN, INFO, DEBUG)
+LOG_LEVEL="DEBUG"
+```
+
+Alternatively, you can override this setting using the `--log-level` command-line argument:
+
+```bash
+./myrepo.sh --log-level DEBUG
 ```
 
 ### Repository Exclusion Feature
@@ -142,6 +166,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 - **Dry Run Mode**: Use the `--dry-run` option to simulate the script's actions without making any changes.
 - **Debugging**: Increase the `DEBUG_MODE` to get more detailed output, which can help in troubleshooting.
+- **Log Level Control**: Adjust the `LOG_LEVEL` to control the verbosity of log messages.
 - **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
 
 ## License
