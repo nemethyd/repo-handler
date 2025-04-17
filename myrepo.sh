@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
-# Last Updated: 2025-04-01
+# Last Updated: 2025-04-17
 
 # MIT licensing
 # Purpose:
@@ -10,17 +10,18 @@
 # older package versions.
 
 # Script version
-VERSION=2.96
+VERSION=2.97
 
 # Default values for environment variables if not set
+: "${BATCH_SIZE:=10}"
+: "${CONTINUE_ON_ERROR:=0}"
 : "${DEBUG_MODE:=0}"
+: "${DRY_RUN:=0}"
+: "${FULL_REBUILD:=0}"
+: "${IS_USER_MODE:=0}"
 : "${LOG_LEVEL:=INFO}"
 : "${MAX_PACKAGES:=0}"
-: "${BATCH_SIZE:=10}"
 : "${PARALLEL:=2}"
-: "${DRY_RUN:=0}"
-: "${IS_USER_MODE:=0}"
-: "${CONTINUE_ON_ERROR:=0}"
 : "${SYNC_ONLY:=0}"
 
 # Default configuration values
@@ -31,6 +32,9 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
 # Log directory
 LOG_DIR="/var/log/myrepo"
+
+# create a temporary file for logging
+TEMP_FILE=$(mktemp /tmp/myrepo_main_$$.XXXXXX)
 
 # Initialize temporary files array for cleanup
 TEMP_FILES=()
@@ -88,8 +92,8 @@ function cleanup() {
     rm -f "${TEMP_FILES[@]}"
 }
 
+# Create the temporary files and ensure they have correct permissions
 function create_helper_files() {
-    # Create the temporary files and ensure they have correct permissions
     touch "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE" || {
         log "ERROR" "Failed to create temporary files in $TMP_DIR."
         exit 1
@@ -323,13 +327,7 @@ function is_package_in_local_sources() {
 
 # Function to check if the package has already been processed
 function is_package_processed() {
-    local pkg_key="$1"
-    while IFS= read -r line; do
-        if [[ "$line" == "$pkg_key" ]]; then
-            return 0
-        fi
-    done <"$PROCESSED_PACKAGES_FILE"
-    return 1
+    [[ "${PROCESSED_PACKAGE_MAP[$1]}" == 1 ]]
 }
 
 # Function to load configuration from the config file
@@ -354,21 +352,22 @@ function load_config() {
         value=$(echo "$value" | sed 's/^ *//;s/ *$//; s/^["'\'']\|["'\'']$//g')
 
         case "$key" in
-        LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
-        SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
-        LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
-        EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
-        RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
+        BATCH_SIZE) BATCH_SIZE="$value" ;;
+        CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
         DEBUG_MODE) DEBUG_MODE="$value" ;;
+        DRY_RUN) DRY_RUN="$value" ;;
+        EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
+        FULL_REBUILD) FULL_REBUILD="$value" ;;
+        IS_USER_MODE) IS_USER_MODE="$value" ;;
+        LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
+        LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
+        LOG_DIR) LOG_DIR="$value" ;;
         LOG_LEVEL) LOG_LEVEL="$value" ;;
         MAX_PACKAGES) MAX_PACKAGES="$value" ;;
-        BATCH_SIZE) BATCH_SIZE="$value" ;;
         PARALLEL) PARALLEL="$value" ;;
-        DRY_RUN) DRY_RUN="$value" ;;
-        IS_USER_MODE) IS_USER_MODE="$value" ;;
-        LOG_DIR) LOG_DIR="$value" ;;
+        RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
+        SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
         SYNC_ONLY) SYNC_ONLY="$value" ;;
-        CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
         *) log "ERROR" "Unknown configuration option: $key" ;;
         esac
     done < <(grep -v '^\s*#' "$CONFIG_FILE")
@@ -390,6 +389,16 @@ function locate_local_rpm() {
         echo "$rpm_path"
     else
         echo ""
+    fi
+}
+
+# Load once, at start‑up the processed packages into memory
+function load_processed_packages() {
+    if [[ -f "$PROCESSED_PACKAGES_FILE" ]]; then
+        while IFS= read -r line; do
+            PROCESSED_PACKAGE_MAP["$line"]=1
+        done < "$PROCESSED_PACKAGES_FILE"
+        log "DEBUG" "Loaded ${#PROCESSED_PACKAGE_MAP[@]} processed keys into RAM"
     fi
 }
 
@@ -437,6 +446,16 @@ function log_to_temp_file() {
     echo "$1" >>"$TEMP_FILE"
 }
 
+# Mark a package as processed
+function mark_processed() {
+    local key="$1"
+    PROCESSED_PACKAGE_MAP["$key"]=1
+    (
+        flock -x 200
+        echo "$key" >> "$PROCESSED_PACKAGES_FILE"
+    ) 200>>"$PROCESSED_PACKAGES_FILE"
+}
+
 ### Function: Parse command-line options ###
 function parse_args() {
     # Parse command-line options (overrides config file and defaults)
@@ -457,6 +476,21 @@ function parse_args() {
             shift
             IFS=',' read -r -a EXCLUDED_REPOS <<<"$1"
             ;;
+        --full-rebuild)
+            FULL_REBUILD=1
+            ;;
+        --local-repo-path)
+            shift
+            LOCAL_REPO_PATH=$1
+            ;;
+        --local-repos)
+            shift
+            IFS=',' read -r -a LOCAL_REPOS <<<"$1"
+            ;;
+        --log-dir)
+            shift
+            LOG_DIR=$1
+            ;;
         --max-packages)
             shift
             MAX_PACKAGES=$1
@@ -468,21 +502,9 @@ function parse_args() {
             shift
             PARALLEL=$1
             ;;
-        --local-repo-path)
-            shift
-            LOCAL_REPO_PATH=$1
-            ;;
         --shared-repo-path)
             shift
             SHARED_REPO_PATH=$1
-            ;;
-        --local-repos)
-            shift
-            IFS=',' read -r -a LOCAL_REPOS <<<"$1"
-            ;;
-        --log-dir)
-            shift
-            LOG_DIR=$1
             ;;
         --sync-only)
             SYNC_ONLY=1
@@ -494,18 +516,19 @@ function parse_args() {
         --help)
             echo "Usage: myrepo.sh [OPTIONS]"
             echo "Options:"
-            echo "  --debug-level LEVEL       Set debug level (default: $DEBUG_MODE)"
-            echo "  --exclude-repos REPOS    Comma-separated list of repos to exclude (default: none)"
-            echo "  --max-packages NUM        Maximum number of packages to process (default: $MAX_PACKAGES)"
             echo "  --batch-size NUM          Number of packages per batch (default: $BATCH_SIZE)"
-            echo "  --parallel NUM            Number of parallel processes (default: $PARALLEL)"
+            echo "  --debug-level LEVEL       Set debug level (default: $DEBUG_MODE)"
             echo "  --dry-run                 Perform a dry run without making changes"
-            echo "  --user-mode                 Run without sudo privileges"
+            echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
+            echo "  --full-rebuild            Perform a full rebuild of the repository"
             echo "  --local-repo-path PATH    Set local repository path (default: $LOCAL_REPO_PATH)"
-            echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
             echo "  --local-repos REPOS       Comma-separated list of local repos (default: ${LOCAL_REPOS[*]})"
             echo "  --log-dir PATH            Set log directory (default: $LOG_DIR)"
+            echo "  --max-packages NUM        Maximum number of packages to process (default: $MAX_PACKAGES)"
+            echo "  --parallel NUM            Number of parallel processes (default: $PARALLEL)"
+            echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
             echo "  --sync-only               Only perform createrepo and rsync steps"
+            echo "  --user-mode                 Run without sudo privileges"
             exit 0
             ;;
         *)
@@ -575,8 +598,14 @@ function prepare_log_files() {
     : >"$LOCALLY_FOUND_FILE"
     : >"$MYREPO_ERR_FILE"
     : >"$PROCESS_LOG_FILE"
-    : >"$PROCESSED_PACKAGES_FILE"
     : >"$INSTALLED_PACKAGES_FILE"
+
+    [[ -f "$PROCESSED_PACKAGES_FILE" ]] || touch "$PROCESSED_PACKAGES_FILE"
+
+    if [[ -n "$FULL_REBUILD" ]]; then
+      log "INFO" "Performing full rebuild: clearing processed‑package cache"
+      : >"$PROCESSED_PACKAGES_FILE"
+    fi
 }
 
 #Function for batch processing subprocess
@@ -656,11 +685,13 @@ function process_packages() {
         case $package_status in
         "EXISTS")
             log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists." "\e[32m" # Green
+            mark_processed "$pkg_key"
             ;;
         "NEW")
             if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
                 log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is new." "\e[33m" # Yellow
                 download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                mark_processed "$pkg_key"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch." "\e[33m" # Yellow
             fi
@@ -670,6 +701,7 @@ function process_packages() {
                 remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
                 log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is updated." "\e[34m" # Blue
                 download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                mark_processed "$pkg_key"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Skipping update for local package $package_name-$package_version-$package_release.$package_arch." "\e[34m" # Blue
             fi

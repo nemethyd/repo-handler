@@ -98,6 +98,13 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Define repositories that should be excluded from processing
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
 EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
+
+# myrepo.cfg – Configuration file for myrepo.sh
+...
+# Re‑scan everything on the next run (1 = true, 0 = false).
+# When set to 1 the processed‑package cache is cleared at start‑up.
+# FULL_REBUILD=0
+
 ```
 
 ### Log Level Control
@@ -146,6 +153,29 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ```bash
 ./myrepo.sh [options]
 ```
+
+## CLI Options
+
+| Option              | Argument                   | Default               | Purpose                                                         |
+|---------------------|--------------------------- |-----------------------|-----------------------------------------------------------------|
+| `--batch-size`      | *INT*                      | `10`                  | Number of packages processed in one batch.                      |
+| `--debug-level`     | *0‒2*                      | `0`                   | Extra runtime diagnostics (0 = off, 1 = basic, 2 = verbose).    |
+| `--dry-run`         | *(flag)*                   | *off*                 | Simulate all actions; make **no** changes on disk.              |
+| `--exclude-repos`   | *CSV*                      | *empty*               | Comma‑separated list of repo IDs that must **not** be mirrored. |
+| `--full-rebuild`    | *(flag)*                   | *off*                 | Clear the processed‑package cache and rescan **everything**.    |
+| `--local-repo-path` | *PATH*                     | `/repo`               | Root directory that holds the local mirrors.                    |
+| `--local-repos`     | *CSV*                      | `ol9_edge`            | Comma‑separated list of repos considered “local sources”.       |
+| `--log-dir`         | *PATH*                     | `/var/log/myrepo`     | Where to write `process_package.log`, `myrepo.err`, etc.        |
+| `--log-level`       | `ERROR\|WARN\|INFO\|DEBUG` | `INFO`                | Filter normal log messages by severity.                         |
+| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
+| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
+| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync’ed copy.             |
+| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup; only run `createrepo` + `rsync`.         |
+| `--user-mode`       | *(flag)*                   | *off*                 | Run without `sudo`; helper files go under `$HOME/tmp`.          |
+| `--version`         | —                          | —                     | Print script version and exit.                                  |
+| `--help`            | —                          | —                     | Display built‑in usage synopsis.                                |
+|---------------------|---------------------------|------------------------|-----------------------------------------------------------------|
+
 
 #### Example:
 
