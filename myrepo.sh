@@ -472,7 +472,7 @@ function log() {
     local full
     ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
     full="${ts} [${levels[$tgt_idx]}] $message"
-    echo "$full"          >> "$PROCESS_LOG_FILE"
+    echo "$full" >> "${PROCESS_LOG_FILE:-/dev/null}"
     [[ -n "$TEMP_FILE" ]] && echo "$full" >> "$TEMP_FILE"
 }
 
