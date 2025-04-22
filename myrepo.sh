@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Developed by: Dániel Némethy (nemethy@moderato.hu) with AI support model ChatGPT-4
+# Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models 
 # Last Updated: 2025-04-17
 
 # MIT licensing
@@ -10,7 +10,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.97
+VERSION=2.1.0
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -330,47 +330,87 @@ function is_package_processed() {
     [[ "${PROCESSED_PACKAGE_MAP[$1]}" == 1 ]]
 }
 
-# Function to load configuration from the config file
+# Function to load configuration from the config file, searching in standard locations
 function load_config() {
-    if [[ -z "$CONFIG_FILE" ]]; then
-        log "ERROR" "CONFIG_FILE variable is not set."
-        exit 1
-    fi
+    # Use the global CONFIG_FILE variable
+    local current_dir
+    local script_dir
+    local config_path_current
+    local config_path_script
+    local found_config_path=""
 
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "ERROR" "Configuration file $CONFIG_FILE not found."
-        exit 1
-    fi
+    current_dir=$(pwd)
+    # Get the directory where the script *actually* is, resolving symlinks for robustness
+    script_dir=$(cd "$(dirname "$(readlink -f "$0" || echo "$0")")" &>/dev/null && pwd)
 
-    log "INFO" "Loading configuration from $CONFIG_FILE"
-    while IFS='=' read -r key value; do
-        # Ignore empty lines and lines starting with #
-        if [[ -z "$key" || "$key" =~ ^\s*# ]]; then
-            continue
+    config_path_current="${current_dir}/${CONFIG_FILE}"
+    config_path_script="${script_dir}/${CONFIG_FILE}"
+
+    log "DEBUG" "Searching for config file '${CONFIG_FILE}'"
+    log "DEBUG" "Checking current directory: ${config_path_current}"
+
+    # --- Search Logic ---
+    # 1. Check Current Directory
+    if [[ -f "$config_path_current" ]]; then
+        log "INFO" "Found configuration file in current directory: ${config_path_current}"
+        found_config_path="$config_path_current"
+    else
+        # 2. Check Script Directory (only if different from current and not found above)
+        #    Use -ef to check if paths resolve to the same file/directory inode, robust way to compare paths
+        if ! [[ "$config_path_current" -ef "$config_path_script" ]]; then
+            log "DEBUG" "Checking script directory: ${config_path_script}"
+            if [[ -f "$config_path_script" ]]; then
+                log "INFO" "Found configuration file in script directory: ${config_path_script}"
+                found_config_path="$config_path_script"
+            fi
         fi
-        key=$(echo "$key" | tr -d ' ')
-        value=$(echo "$value" | sed 's/^ *//;s/ *$//; s/^["'\'']\|["'\'']$//g')
+    fi
 
-        case "$key" in
-        BATCH_SIZE) BATCH_SIZE="$value" ;;
-        CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
-        DEBUG_MODE) DEBUG_MODE="$value" ;;
-        DRY_RUN) DRY_RUN="$value" ;;
-        EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
-        FULL_REBUILD) FULL_REBUILD="$value" ;;
-        IS_USER_MODE) IS_USER_MODE="$value" ;;
-        LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
-        LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
-        LOG_DIR) LOG_DIR="$value" ;;
-        LOG_LEVEL) LOG_LEVEL="$value" ;;
-        MAX_PACKAGES) MAX_PACKAGES="$value" ;;
-        PARALLEL) PARALLEL="$value" ;;
-        RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
-        SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
-        SYNC_ONLY) SYNC_ONLY="$value" ;;
-        *) log "ERROR" "Unknown configuration option: $key" ;;
-        esac
-    done < <(grep -v '^\s*#' "$CONFIG_FILE")
+    # --- Load Configuration ---
+    if [[ -n "$found_config_path" ]]; then
+        log "INFO" "Loading configuration from ${found_config_path}"
+        # Use process substitution to feed the filtered file content to the loop
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do # Handle last line without newline correctly
+            # Ignore empty lines and lines starting with #
+            if [[ -z "$key" || "$key" =~ ^\s*# ]]; then
+                continue
+            fi
+
+            # Trim leading/trailing whitespace from key and value
+            key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Trim leading/trailing whitespace and remove surrounding quotes from value
+            value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//; s/^["'\'']\|["'\'']$//g')
+
+            # Skip if key became empty after trimming
+            if [[ -z "$key" ]]; then
+                continue
+            fi
+
+            log "DEBUG" "Config Override: Setting $key = $value"
+            case "$key" in
+            BATCH_SIZE) BATCH_SIZE="$value" ;;
+            CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
+            DEBUG_MODE) DEBUG_MODE="$value" ;;
+            DRY_RUN) DRY_RUN="$value" ;;
+            EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
+            FULL_REBUILD) FULL_REBUILD="$value" ;;
+            IS_USER_MODE) IS_USER_MODE="$value" ;;
+            LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
+            LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
+            LOG_DIR) LOG_DIR="$value" ;;
+            LOG_LEVEL) LOG_LEVEL="$value" ;;
+            MAX_PACKAGES) MAX_PACKAGES="$value" ;;
+            PARALLEL) PARALLEL="$value" ;;
+            RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
+            SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
+            SYNC_ONLY) SYNC_ONLY="$value" ;;
+            *) log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
+            esac
+        done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
+    else
+        log "INFO" "Configuration file '${CONFIG_FILE}' not found in current ('${current_dir}') or script ('${script_dir}') directory. Using defaults and command-line arguments."
+        # No exit here - defaults defined earlier will be used.
+    fi
 }
 
 # Function to locate RPM from local cache if available
@@ -402,42 +442,38 @@ function load_processed_packages() {
     fi
 }
 
-# Modify the log function to support independent color management and temporary file logging
+# --- compact / full dual‑output logger ---
 function log() {
     local level="$1"; shift
     local message="$1"; shift
-    local color="${1:-}" # Optional color parameter (default: no color)
+    local color="${1:-}"              # optional ANSI color for console
     local color_reset="\e[0m"
-    local levels=("ERROR" "WARN" "INFO" "DEBUG")
-    local current_idx=0 log_idx=0
 
-    # Determine the log level index
+    # mapping: level‑>index, level‑>1‑char
+    local levels=(ERROR WARN INFO DEBUG)
+    local abbrev=(E     W    I    D)
+    local lvl_idx=0 tgt_idx=0
     for i in "${!levels[@]}"; do
-        [[ "${levels[$i]}" == "$LOG_LEVEL" ]] && current_idx=$i
-        [[ "${levels[$i]}" == "$level" ]] && log_idx=$i
+        [[ ${levels[$i]} == "$LOG_LEVEL" ]] && lvl_idx=$i
+        [[ ${levels[$i]} == "$level"     ]] && tgt_idx=$i
     done
+    (( tgt_idx > lvl_idx )) && return     # below current LOG_LEVEL – do nothing
 
-    # Log the message if the level is allowed
-    if (( log_idx <= current_idx )); then
-        local timestamp
-        timestamp="[$(date '+%Y-%m-%d %H:%M:%S')]"
-        local formatted_message="${timestamp} [$level] $message"
-        
-        # Write to display with optional color
-        if [[ -n "$color" ]]; then
-            echo -e "${color}${formatted_message}${color_reset}"
-        else
-            echo "$formatted_message"
-        fi
-        
-        # Write to log file without color
-        echo "$formatted_message" >>"$PROCESS_LOG_FILE"
-
-        # If TEMP_FILE is set, write to the temporary file as well
-        if [[ -n "$TEMP_FILE" ]]; then
-            echo "$formatted_message" >>"$TEMP_FILE"
-        fi
+    # ---------- console (compact) ----------
+    local compact="[${abbrev[$tgt_idx]}] $message"
+    if [[ -n "$color" ]]; then
+        echo -e "${color}${compact}${color_reset}"
+    else
+        echo "$compact"
     fi
+
+    # ---------- full logs ----------
+    local ts
+    local full
+    ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
+    full="${ts} [${levels[$tgt_idx]}] $message"
+    echo "$full"          >> "$PROCESS_LOG_FILE"
+    [[ -n "$TEMP_FILE" ]] && echo "$full" >> "$TEMP_FILE"
 }
 
 # Function to write log to the specific temporary file
@@ -1082,13 +1118,19 @@ function update_and_sync_repos() {
         # Create persistent symlinks for repositories with non-Windows-compatible names
         for repo in "${!used_directories[@]}"; do
             original_path="${used_directories[$repo]}"
+            # Skip if original_path is empty
+            if [[ -z "$original_path" ]]; then
+                log "WARN" "Skipping symlink creation for '$repo' because path is empty"
+                continue
+            fi
+            
             sanitized_name=$(sanitize_repo_name "$repo")
             sanitized_path="$LOCAL_REPO_PATH/$sanitized_name"
 
             # Ensure symlink exists and points to the correct path
             if [[ "$sanitized_name" != "$repo" ]]; then
                 if [[ -e "$sanitized_path" && ! -L "$sanitized_path" ]]; then
-                    log "WARN" "$(align_repo_name "$repo"): $sanitized_path exists but is not a symlink, skipping." >&2
+                    log "WARN" "Symlink $sanitized_path exists but is not a symlink, skipping."
                 elif [[ ! -e "$sanitized_path" ]]; then
                     ln -s "$original_path" "$sanitized_path"
                 fi
@@ -1147,9 +1189,9 @@ fi
 ### Main processing section ###
 load_config
 parse_args "$@"
+check_user_mode
 prepare_log_files
 log "INFO" "Starting myrepo.sh Version $VERSION"
-check_user_mode
 create_helper_files
 load_processed_packages
 set_parallel_downloads

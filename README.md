@@ -154,6 +154,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh [options]
 ```
 
+
 ## CLI Options
 
 | Option              | Argument                   | Default               | Purpose                                                         |
@@ -174,7 +175,6 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | `--user-mode`       | *(flag)*                   | *off*                 | Run without `sudo`; helper files go under `$HOME/tmp`.          |
 | `--version`         | —                          | —                     | Print script version and exit.                                  |
 | `--help`            | —                          | —                     | Display built‑in usage synopsis.                                |
-|---------------------|---------------------------|------------------------|-----------------------------------------------------------------|
 
 
 #### Example:
