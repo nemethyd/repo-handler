@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models 
+# Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # Last Updated: 2025-04-17
 
 # MIT licensing
@@ -98,9 +98,9 @@ function create_helper_files() {
         log "ERROR" "Failed to create temporary files in $TMP_DIR."
         exit 1
     }
-       # Print debug information if DEBUG_MODE is enabled
+    # Print debug information if DEBUG_MODE is enabled
     if [ "${DEBUG_MODE:-0}" -gt 0 ]; then
-        log "DEBUG" "Created helper files: INSTALLED_PACKAGES_FILE=$INSTALLED_PACKAGES_FILE, PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"    
+        log "DEBUG" "Created helper files: INSTALLED_PACKAGES_FILE=$INSTALLED_PACKAGES_FILE, PROCESSED_PACKAGES_FILE=$PROCESSED_PACKAGES_FILE"
     fi
 }
 
@@ -193,15 +193,15 @@ function download_packages() {
                 # Check if sudo is required and set the appropriate command prefix
                 DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
 
-		if [[ -z "$IS_USER_MODE" ]]; then
+                if [[ -z "$IS_USER_MODE" ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
                 [[ DEBUG_MODE -ge 2 ]] && log "INFO" "Executing: $DNF_COMMAND"
                 if ! $DNF_COMMAND 1>>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
 
-    			log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
-                  	((CONTINUE_ON_ERROR == 0)) && exit 1
+                    log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
+                    ((CONTINUE_ON_ERROR == 0)) && exit 1
                 fi
             } &
         fi
@@ -437,27 +437,29 @@ function load_processed_packages() {
     if [[ -f "$PROCESSED_PACKAGES_FILE" ]]; then
         while IFS= read -r line; do
             PROCESSED_PACKAGE_MAP["$line"]=1
-        done < "$PROCESSED_PACKAGES_FILE"
+        done <"$PROCESSED_PACKAGES_FILE"
         log "DEBUG" "Loaded ${#PROCESSED_PACKAGE_MAP[@]} processed keys into RAM"
     fi
 }
 
 # --- compact / full dual‑output logger ---
 function log() {
-    local level="$1"; shift
-    local message="$1"; shift
-    local color="${1:-}"              # optional ANSI color for console
+    local level="$1"
+    shift
+    local message="$1"
+    shift
+    local color="${1:-}" # optional ANSI color for console
     local color_reset="\e[0m"
 
     # mapping: level‑>index, level‑>1‑char
     local levels=(ERROR WARN INFO DEBUG)
-    local abbrev=(E     W    I    D)
+    local abbrev=(E W I D)
     local lvl_idx=0 tgt_idx=0
     for i in "${!levels[@]}"; do
         [[ ${levels[$i]} == "$LOG_LEVEL" ]] && lvl_idx=$i
-        [[ ${levels[$i]} == "$level"     ]] && tgt_idx=$i
+        [[ ${levels[$i]} == "$level" ]] && tgt_idx=$i
     done
-    (( tgt_idx > lvl_idx )) && return     # below current LOG_LEVEL – do nothing
+    ((tgt_idx > lvl_idx)) && return # below current LOG_LEVEL – do nothing
 
     # ---------- console (compact) ----------
     local compact="[${abbrev[$tgt_idx]}] $message"
@@ -472,8 +474,8 @@ function log() {
     local full
     ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
     full="${ts} [${levels[$tgt_idx]}] $message"
-    echo "$full" >> "${PROCESS_LOG_FILE:-/dev/null}"
-    [[ -n "$TEMP_FILE" ]] && echo "$full" >> "$TEMP_FILE"
+    echo "$full" >>"${PROCESS_LOG_FILE:-/dev/null}"
+    [[ -n "$TEMP_FILE" ]] && echo "$full" >>"$TEMP_FILE"
 }
 
 # Function to write log to the specific temporary file
@@ -488,7 +490,7 @@ function mark_processed() {
     PROCESSED_PACKAGE_MAP["$key"]=1
     (
         flock -x 200
-        echo "$key" >> "$PROCESSED_PACKAGES_FILE"
+        echo "$key" >>"$PROCESSED_PACKAGES_FILE"
     ) 200>>"$PROCESSED_PACKAGES_FILE"
 }
 
@@ -639,8 +641,8 @@ function prepare_log_files() {
     [[ -f "$PROCESSED_PACKAGES_FILE" ]] || touch "$PROCESSED_PACKAGES_FILE"
 
     if [[ -n "$FULL_REBUILD" ]]; then
-      log "INFO" "Performing full rebuild: clearing processed‑package cache"
-      : >"$PROCESSED_PACKAGES_FILE"
+        log "INFO" "Performing full rebuild: clearing processed‑package cache"
+        : >"$PROCESSED_PACKAGES_FILE"
     fi
 }
 
@@ -779,7 +781,7 @@ function process_rpm_file() {
 
     # Validate extraction
     if [[ -z "$package_name" || -z "$package_version" || -z "$package_release" || -z "$package_arch" ]]; then
-        log "ERROR" "Failed to extract package details from $rpm_file"  "\e[90m" # Gray
+        log "ERROR" "Failed to extract package details from $rpm_file" "\e[90m" # Gray
         return 1
     fi
 
@@ -818,7 +820,7 @@ function remove_excluded_repos() {
 
         # Remove the actual repository directory if it exists
         if [[ -d "$repo_path" ]]; then
-            log "INFO" "Removing excluded repository: $repo_path" 
+            log "INFO" "Removing excluded repository: $repo_path"
             rm -rf "$repo_path"
         fi
 
@@ -878,38 +880,86 @@ function remove_existing_packages() {
     shopt -u nullglob
 }
 
-# Function to remove uninstalled or removed packages from the repo
+# Optimized function to remove uninstalled packages
 function remove_uninstalled_packages() {
     local repo_path="$1"
     local repo_name
-    repo_name=$(basename "$(dirname "$repo_path")") # Extract the parent directory name of getPackage
+    repo_name=$(basename "$(dirname "$repo_path")") # Extract parent directory name
 
-    log "INFO" "$(align_repo_name "$repo_name"): Checking for removed packages in $repo_path" "\e[90m" # Gray
+    log "INFO" "$(align_repo_name "$repo_name"): Checking for removed packages in $repo_path" "\e[90m"
 
-    # Find all RPM files for the repository and process them in parallel using a for loop
-    local rpm_files=()
-    while IFS= read -r -d $'\0' file; do
-        rpm_files+=("$file")
-    done < <(find "$repo_path" -type f -name "*.rpm" -print0)
-
-    local num_jobs=0
-    for rpm_file in "${rpm_files[@]}"; do
-        {
-            [[ DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Processing file: $rpm_file" 
-            process_rpm_file "$rpm_file"
-        } & # Run in the background
-        ((num_jobs++))
-
-        # Limit the number of parallel jobs
-        if [[ $num_jobs -ge $PARALLEL ]]; then
-            wait -n # Wait for any of the background jobs to finish before proceeding
-            ((num_jobs--))
-        fi
-    done
-
-    # Wait for all background jobs to finish
-    wait
+    # Create a lookup file for faster searching
+    local installed_pkgs_file
+    installed_pkgs_file=$(mktemp) || {
+        log "ERROR" "Failed to create temporary lookup file"
+        return 1
+    }
+    TEMP_FILES+=("$installed_pkgs_file")
+    
+    # Extract and sort all installed packages into a lookup file
+    if [[ -f "$INSTALLED_PACKAGES_FILE" ]]; then
+        awk -F '|' '{print $1"|"$2"|"$3"|"$4"|"$5}' "$INSTALLED_PACKAGES_FILE" | sort > "$installed_pkgs_file"
+    fi
+    
+    # Count total packages for better progress reporting
+    local total_rpms
+    total_rpms=$(find "$repo_path" -type f -name "*.rpm" | wc -l)
+    log "INFO" "Found $total_rpms RPM packages to check in $repo_path"
+    
+    # Create a temporary file to hold packages to remove
+    local remove_list
+    remove_list=$(mktemp)
+    TEMP_FILES+=("$remove_list")
+    
+    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, but that's intended here
+    find "$repo_path" -type f -name "*.rpm" -print0 | \
+    xargs -0 -r -P "$PARALLEL" -n 50 sh -c '
+        installed_file="$1"
+        remove_file="$2"
+        dry_run="$3"
+        shift 3
+        
+        for rpm_file in "$@"; do
+            # Get all metadata in a single rpm call
+            if ! rpm_data=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
+                echo "Error reading $rpm_file, skipping" >&2
+                continue
+            fi
+            
+            # Handle (none) epoch
+            rpm_data=${rpm_data//(none)/0}
+            
+            # Check if package is installed using grep (much faster than awk)
+            if ! grep -qF "$rpm_data" "$installed_file"; then
+                if [ "$dry_run" -eq 1 ]; then
+                    echo "Would remove: $rpm_file" >&2
+                else
+                    # Add to remove list instead of removing immediately
+                    echo "$rpm_file" >> "$remove_file"
+                fi
+            fi
+        done
+    ' _ "$installed_pkgs_file" "$remove_list" "$DRY_RUN"
+    
+    # Now remove files in bulk (much faster than one at a time)
+    if [[ -s "$remove_list" && "$DRY_RUN" -eq 0 ]]; then
+        local count
+        count=$(wc -l < "$remove_list")
+        log "INFO" "$(align_repo_name "$repo_name"): Removing $count uninstalled packages"
+        
+        # Remove in parallel but with controlled batches
+        xargs -a "$remove_list" -P "$PARALLEL" -n 20 rm -f
+        
+        log "INFO" "$(align_repo_name "$repo_name"): Removed $count packages"
+    elif [[ -s "$remove_list" && "$DRY_RUN" -eq 1 ]]; then
+        local count
+        count=$(wc -l < "$remove_list")
+        log "INFO" "$(align_repo_name "$repo_name"): Would remove $count uninstalled packages (dry run)"
+    else
+        log "INFO" "$(align_repo_name "$repo_name"): No packages to remove"
+    fi
 }
+
 
 # Function to sanitize repository names (replace invalid characters)
 function sanitize_repo_name() {
@@ -930,9 +980,9 @@ function set_parallel_downloads() {
 # Traverse all packages and place them in local repositories
 function traverse_local_repos() {
     if ((SYNC_ONLY == 0)); then
-        
+
         # Fetch installed packages list with detailed information
-        log "INFO" "Fetching list of installed packages..." 
+        log "INFO" "Fetching list of installed packages..."
 
         if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>"$MYREPO_ERR_FILE"; then
             log "ERROR" "Failed to fetch installed packages list."
@@ -1064,7 +1114,7 @@ function traverse_local_repos() {
                 # Run remove_uninstalled_packages if RPM files are present
                 remove_uninstalled_packages "$repo_path"
             else
-                log "INFO" "$(align_repo_name "$repo"): Repository path $repo_path does not exist, skipping."   
+                log "INFO" "$(align_repo_name "$repo"): Repository path $repo_path does not exist, skipping."
             fi
         done
 
@@ -1104,7 +1154,7 @@ function update_and_sync_repos() {
             repo_name=$(basename "$repo_path")
 
             if ((DRY_RUN)); then
-                log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo --update $repo_path'" 
+                log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo --update $repo_path'"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
                 if ! createrepo --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
@@ -1123,7 +1173,7 @@ function update_and_sync_repos() {
                 log "WARN" "Skipping symlink creation for '$repo' because path is empty"
                 continue
             fi
-            
+
             sanitized_name=$(sanitize_repo_name "$repo")
             sanitized_path="$LOCAL_REPO_PATH/$sanitized_name"
 
