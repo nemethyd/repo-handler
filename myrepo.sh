@@ -23,7 +23,7 @@ VERSION=2.1.5
 : "${IS_USER_MODE:=0}"
 : "${LOG_LEVEL:=INFO}"
 : "${MAX_PACKAGES:=0}"
-: "${PARALLEL:=2}"
+: "${PARALLEL:=4}"
 : "${SYNC_ONLY:=0}"
 
 # Default configuration values
@@ -59,7 +59,7 @@ TEMP_FILES=()
 CONFIG_FILE="myrepo.cfg"
 
 # Set constant padding length for alignment
-PADDING_LENGTH=22
+PADDING_LENGTH=26
 
 # Declare associative array for used_directories
 declare -A used_directories
@@ -311,7 +311,11 @@ function download_repo_metadata() {
                     if [[ -n "${repo_versions[$repo]}" ]]; then
                         echo "${repo_versions[$repo]}" > "$cache_dir/${repo}.version"
                     fi
-                    log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) [version: ${repo_versions[$repo]}]"
+                    if [[ -n "${repo_versions[$repo]}" ]]; then
+                        log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) [version: ${repo_versions[$repo]}]"
+                    else
+                        log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
+                    fi
                 else
                     log "ERROR" "Failed to fetch metadata for $repo"
                 fi
@@ -322,7 +326,11 @@ function download_repo_metadata() {
                 ((--running))
             fi
         else
-            log "DEBUG" "Using cached metadata for $repo [version: ${repo_versions[$repo]}]"
+            if [[ -n "${repo_versions[$repo]}" ]]; then
+                log "DEBUG" "Using cached metadata for $repo [version: ${repo_versions[$repo]}]"
+            else
+                log "DEBUG" "Using cached metadata for $repo"
+            fi
         fi
     done
     # Wait for all background jobs to finish
@@ -353,7 +361,7 @@ function get_package_status() {
     local found_exact=0
     local found_other=0
     shopt -s nullglob
-    for rpm_file in "$repo_path"/${package_name}-*.$package_arch.rpm; do
+    for rpm_file in "$repo_path"/"${package_name}"-*."$package_arch".rpm; do
         # Extract metadata from the RPM filename
         local rpm_epoch rpm_version rpm_release rpm_arch
         rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
@@ -1016,10 +1024,91 @@ function process_packages() {
         for repo_name in "${!exists_count[@]}"; do
             local count="${exists_count[$repo_name]}"
             if [[ $count -gt 0 ]]; then
+                # Extract package names and create dictionary-style range
+                local first_letters=""
+                if [[ -n "${exists_packages[$repo_name]}" ]]; then
+                    local packages="${exists_packages[$repo_name]}"
+                    local package_names=()
+                    
+                    # Split packages and extract package names (preserve case)
+                    IFS=', ' read -ra pkg_array <<< "$packages"
+                    for pkg in "${pkg_array[@]}"; do
+                        # Extract package name (before first hyphen)
+                        local pkg_name="${pkg%%-*}"
+                        package_names+=("$pkg_name")
+                    done
+                    
+                    # Sort package names and remove duplicates
+                    IFS=$'\n' package_names=($(printf '%s\n' "${package_names[@]}" | sort -u))
+                    
+                    # Create dictionary-style range display
+                    if [[ ${#package_names[@]} -eq 1 ]]; then
+                        # Single package: show just the name
+                        first_letters=" (${package_names[0]})"
+                    elif [[ ${#package_names[@]} -eq 2 ]]; then
+                        # Two packages: show both
+                        first_letters=" (${package_names[0]}, ${package_names[-1]})"
+                    else
+                        # Multiple packages: create dictionary-style range
+                        local first_pkg="${package_names[0]}"
+                        local last_pkg="${package_names[-1]}"
+                        
+                        # Find common prefix and first difference
+                        local min_len=${#first_pkg}
+                        [[ ${#last_pkg} -lt $min_len ]] && min_len=${#last_pkg}
+                        
+                        local common_prefix=""
+                        local diff_pos=0
+                        for ((i=0; i<min_len; i++)); do
+                            if [[ "${first_pkg:$i:1}" == "${last_pkg:$i:1}" ]]; then
+                                common_prefix+="${first_pkg:$i:1}"
+                                diff_pos=$((i+1))
+                            else
+                                break
+                            fi
+                        done
+                        
+                        # Create range showing up to first difference
+                        if [[ $diff_pos -eq 0 ]]; then
+                            # No common prefix, show first characters
+                            first_letters=" (${first_pkg:0:1}-${last_pkg:0:1})"
+                        elif [[ $diff_pos -ge ${#first_pkg} ]] && [[ $diff_pos -ge ${#last_pkg} ]]; then
+                            # One is prefix of other or identical - avoid redundant display
+                            if [[ "$first_pkg" == "$last_pkg" ]]; then
+                                first_letters=" ($first_pkg)"
+                            else
+                                first_letters=" (${first_pkg}-${last_pkg})"
+                            fi
+                        else
+                            # Show common prefix + first differing characters
+                            local first_range="${first_pkg:0:$((diff_pos+1))}"
+                            local last_range="${last_pkg:0:$((diff_pos+1))}"
+                            
+                            # Handle case where one string is shorter
+                            [[ $diff_pos -ge ${#first_pkg} ]] && first_range="$first_pkg"
+                            [[ $diff_pos -ge ${#last_pkg} ]] && last_range="$last_pkg"
+                            
+                            # Avoid showing identical ranges like (gnome-gnome)
+                            if [[ "$first_range" == "$last_range" ]]; then
+                                # If ranges are identical, show just the common part or full names
+                                if [[ ${#package_names[@]} -le 5 ]]; then
+                                    # For small lists, show first and last full names
+                                    first_letters=" (${first_pkg}-${last_pkg})"
+                                else
+                                    # For larger lists, show just the common prefix
+                                    first_letters=" (${common_prefix}*)"
+                                fi
+                            else
+                                first_letters=" ($first_range-$last_range)"
+                            fi
+                        fi
+                    fi
+                fi
+                
                 if [[ $count -eq 1 ]]; then
-                    log "INFO" "$(align_repo_name "$repo_name"): 1 package already exists." "\e[32m" # Green
+                    log "INFO" "$(align_repo_name "$repo_name"): 1 package already exists${first_letters}." "\e[32m" # Green
                 else
-                    log "INFO" "$(align_repo_name "$repo_name"): $count packages already exist." "\e[32m" # Green
+                    log "INFO" "$(align_repo_name "$repo_name"): $count packages already exist${first_letters}." "\e[32m" # Green
                 fi
                 # Optionally show package details in debug mode
                 if [[ $DEBUG_MODE -ge 1 ]]; then
@@ -1131,7 +1220,7 @@ function remove_existing_packages() {
     shopt -s nullglob
 
     # Find all RPM files for the exact package
-    for file in "$repo_path/${package_name}"-[0-9]*.rpm; do
+    for file in "$repo_path"/"${package_name}"-[0-9]*.rpm; do
         [ -e "$file" ] || continue
         local filename
         filename=$(basename "$file")
@@ -1165,7 +1254,7 @@ function remove_uninstalled_packages() {
     local repo_name
     repo_name=$(basename "$(dirname "$repo_path")") # Extract parent directory name
 
-    log "INFO" "$(align_repo_name "$repo_name"): Checking for removed packages in $repo_path" "\e[90m"
+    log "INFO" "$(align_repo_name "$repo_name"): Checking for removed packages" "\e[90m"
 
     # Create a lookup file for faster searching
     local installed_pkgs_file
@@ -1183,7 +1272,7 @@ function remove_uninstalled_packages() {
     # Count total packages for better progress reporting
     local total_rpms
     total_rpms=$(find "$repo_path" -type f -name "*.rpm" | wc -l)
-    log "INFO" "$(align_repo_name "$repo_name"): $total_rpms RPM packages checked" "\e[90m"
+    log "INFO" "$(align_repo_name "$repo_name"): Found $total_rpms RPM packages to check" "\e[90m"
     
     # Create a temporary file to hold packages to remove
     local remove_list
