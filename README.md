@@ -52,7 +52,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 
 3. **Save and Close the File**.
 
-### Available Configuration Options in `myrepo.cfg`:
+### Configuration Options
 
 ```bash
 # myrepo.cfg - Configuration file for myrepo.sh
@@ -137,6 +137,16 @@ Some repositories may contain packages installed on the golden-copy machine but 
 2. **Removed from the local repository path if already present**.
 
 This feature is useful for temporary or special-purpose repositories, such as **Copr repositories**.
+
+### Configuration: Parallel Metadata Fetching
+
+- **REPOQUERY_PARALLEL**: Number of parallel jobs for repository metadata fetching (dnf repoquery). Default: 4. Increase for faster metadata updates if you have many enabled repositories and sufficient CPU/network resources. Lower if you experience resource contention. Set in `myrepo.cfg` as:
+
+  ```
+  REPOQUERY_PARALLEL=4
+  ```
+
+This parameter only affects the parallelism of metadata fetching, not the main package download or processing parallelism (see `PARALLEL` and `BATCH_SIZE`).
 
 ### Priority of Settings
 

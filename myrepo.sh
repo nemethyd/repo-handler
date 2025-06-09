@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.3
+VERSION=2.1.4
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -43,6 +43,7 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
 : "${XARGS_BATCH_SIZE:=50}"
 : "${MAX_PARALLEL_DOWNLOADS:=20}"
+: "${REPOQUERY_PARALLEL:=4}"
 
 # Log directory
 LOG_DIR="/var/log/myrepo"
@@ -229,83 +230,74 @@ function download_packages() {
 
 # Function to download repository metadata and store in memory with intelligent caching
 function download_repo_metadata() {
-    local cache_valid=1
-    local cache_max_age=$((CACHE_MAX_AGE_HOURS * 3600))  # Convert hours to seconds
     local cache_dir="$HOME/.cache/myrepo"
     mkdir -p "$cache_dir"
-    
-    # Extend cache validity period based on time of day
+    local cache_max_age=$((CACHE_MAX_AGE_HOURS * 3600))  # Convert hours to seconds
     local hour
     hour=$(date +%H)
     if (( hour >= NIGHT_START_HOUR || hour <= NIGHT_END_HOUR )); then
-        cache_max_age=$((CACHE_MAX_AGE_HOURS_NIGHT * 3600))  # Convert night hours to seconds
+        cache_max_age=$((CACHE_MAX_AGE_HOURS_NIGHT * 3600))
     fi
-    
-    # Check if cache exists and is fresh
+
+    # Check if cache exists and is fresh for each repo
+    declare -A repo_needs_update
     for repo in "${ENABLED_REPOS[@]}"; do
-        local cache_file="$cache_dir/${repo}_metadata.cache"
+        local cache_file="$cache_dir/${repo}.cache"
         if [[ ! -f "$cache_file" || $(( $(date +%s) - $(stat -c %Y "$cache_file") )) -gt $cache_max_age ]]; then
-            cache_valid=0
-            break
+            repo_needs_update["$repo"]=1
+        else
+            repo_needs_update["$repo"]=0
         fi
     done
-    
-    # Add cache invalidation based on upstream changes
+
+    # Add cache invalidation based on upstream changes (global for now)
     if [[ -f "/var/cache/dnf/last_makecache.timestamp" ]]; then
-        local last_system_update
-        local cache_timestamp
-        last_system_update=$(stat -c %Y "/var/cache/dnf/last_makecache.timestamp" 2>/dev/null || echo 0)
-        cache_timestamp=$(stat -c %Y "$cache_dir/timestamp" 2>/dev/null || echo 0)
-        
-        if (( last_system_update > cache_timestamp )); then
-            cache_valid=0
-            log "INFO" "System repository metadata updated since last cache - refreshing"
-            touch "$cache_dir/timestamp"
-        fi
-    fi
-    
-    if [[ $cache_valid -eq 1 ]]; then
-        log "INFO" "Using cached repository metadata (less than $((cache_max_age/60)) minutes old)"
-        # Load cached data
+        local dnf_ts
+        dnf_ts=$(stat -c %Y /var/cache/dnf/last_makecache.timestamp)
         for repo in "${ENABLED_REPOS[@]}"; do
-            local cache_file="$cache_dir/${repo}_metadata.cache"
-            if [[ -f "$cache_file" ]]; then
-                available_repo_packages["$repo"]=$(cat "$cache_file")
-                log "DEBUG" "Loaded ${#available_repo_packages[$repo]} packages from cache for $repo"
+            local cache_file="$cache_dir/${repo}.cache"
+            if [[ -f "$cache_file" && $(stat -c %Y "$cache_file") -lt $dnf_ts ]]; then
+                repo_needs_update["$repo"]=1
             fi
         done
-        return 0
     fi
-    
-    # Regular metadata download with caching
-    log "INFO" "Downloading repository metadata..."
+
+    # Fetch metadata in parallel for repos that need update
+    local max_parallel=${REPOQUERY_PARALLEL}
+    local running=0
     for repo in "${ENABLED_REPOS[@]}"; do
         if [[ " ${EXCLUDED_REPOS[*]} " =~ $repo ]]; then
             continue
         fi
-        
-        log "INFO" "Fetching metadata for $repo..."
-        local repo_data
-        if repo_data=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE"); then
-            available_repo_packages["$repo"]="$repo_data"
-            
-            # Cache the results
-            local cache_file="$cache_dir/${repo}_metadata.cache"
-            echo "$repo_data" > "$cache_file"
-            log "DEBUG" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
-        else
-            log "WARN" "Failed to fetch metadata for repository: $repo"
-            # Keep existing cache if available
-            local cache_file="$cache_dir/${repo}_metadata.cache"
-            if [[ -f "$cache_file" ]]; then
-                log "INFO" "Using stale cache for $repo due to fetch failure"
-                available_repo_packages["$repo"]=$(cat "$cache_file")
+        if [[ ${repo_needs_update["$repo"]} -eq 1 ]]; then
+            log "INFO" "Fetching metadata for $repo in background..."
+            (
+                if repo_data=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE"); then
+                    echo "$repo_data" > "$cache_dir/${repo}.cache"
+                    log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
+                else
+                    log "ERROR" "Failed to fetch metadata for $repo"
+                fi
+            ) &
+            ((++running))
+            if (( running >= max_parallel )); then
+                wait -n 2>/dev/null || wait
+                ((--running))
             fi
+        else
+            log "DEBUG" "Using cached metadata for $repo"
         fi
     done
-    
-    # Update the timestamp file
-    touch "$cache_dir/timestamp"
+    # Wait for all background jobs to finish
+    wait
+    log "INFO" "All metadata fetch jobs finished."
+    # Load metadata into available_repo_packages
+    for repo in "${ENABLED_REPOS[@]}"; do
+        local cache_file="$cache_dir/${repo}.cache"
+        if [[ -f "$cache_file" ]]; then
+            available_repo_packages["$repo"]=$(cat "$cache_file")
+        fi
+    done
 }
 
 # Function to determine the status of a package
@@ -491,6 +483,7 @@ function load_config() {
             JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
             XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
+            REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
@@ -518,6 +511,9 @@ function validate_config() {
     fi
     if ! [[ "$CACHE_MAX_AGE_HOURS_NIGHT" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS_NIGHT < 1 )); then
         log "ERROR" "CACHE_MAX_AGE_HOURS_NIGHT must be a positive integer (got '$CACHE_MAX_AGE_HOURS_NIGHT')"; error=1
+    fi
+    if ! [[ "$REPOQUERY_PARALLEL" =~ ^[0-9]+$ ]] || (( REPOQUERY_PARALLEL < 1 )); then
+        log "ERROR" "REPOQUERY_PARALLEL must be a positive integer (got '$REPOQUERY_PARALLEL')"; error=1
     fi
     # Directory checks
     if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
