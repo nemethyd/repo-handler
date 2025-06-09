@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
-# Last Updated: 2025-04-17
+# AI flock: ChatGPT, Claude, Gemini
+# Last Updated: 2025-05-25
 
 # MIT licensing
 # Purpose:
@@ -10,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.0
+VERSION=2.1.2
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -29,6 +30,19 @@ LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 LOCAL_REPOS=("ol9_edge" "pgdg-common" "pgdg16")
 RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
+
+# Cache configuration defaults
+: "${CACHE_MAX_AGE_HOURS:=1}"
+: "${CACHE_MAX_AGE_HOURS_NIGHT:=4}"
+: "${NIGHT_START_HOUR:=22}"
+: "${NIGHT_END_HOUR:=6}"
+: "${CACHE_CLEANUP_DAYS:=7}"
+
+# Performance and timing defaults
+: "${JOB_STATUS_CHECK_INTERVAL:=10}"
+: "${JOB_WAIT_REPORT_INTERVAL:=60}"
+: "${XARGS_BATCH_SIZE:=50}"
+: "${MAX_PARALLEL_DOWNLOADS:=20}"
 
 # Log directory
 LOG_DIR="/var/log/myrepo"
@@ -53,6 +67,10 @@ declare -A available_repo_packages
 # Declare map for already processed packages
 # shellcheck disable=SC2034  # Variable used in functions, not a false positive
 declare -A PROCESSED_PACKAGE_MAP
+
+# Declare array for enabled repositories
+declare -A repo_cache
+
 
 ######################################
 ### Functions section in abc order ###
@@ -209,38 +227,85 @@ function download_packages() {
     done
 }
 
-# Function to download repository metadata and store in memory
+# Function to download repository metadata and store in memory with intelligent caching
 function download_repo_metadata() {
-    log "INFO" "Downloading repository metadata..."
-
-    # For enabled repositories
+    local cache_valid=1
+    local cache_max_age=$((CACHE_MAX_AGE_HOURS * 3600))  # Convert hours to seconds
+    local cache_dir="$HOME/.cache/myrepo"
+    mkdir -p "$cache_dir"
+    
+    # Extend cache validity period based on time of day
+    local hour
+    hour=$(date +%H)
+    if (( hour >= NIGHT_START_HOUR || hour <= NIGHT_END_HOUR )); then
+        cache_max_age=$((CACHE_MAX_AGE_HOURS_NIGHT * 3600))  # Convert night hours to seconds
+    fi
+    
+    # Check if cache exists and is fresh
     for repo in "${ENABLED_REPOS[@]}"; do
-        if [[ " ${EXCLUDED_REPOS[*]} " =~ ${repo} ]]; then
-            log "WARN" "Skipping metadata fetch for excluded repo: $repo"
+        local cache_file="$cache_dir/${repo}_metadata.cache"
+        if [[ ! -f "$cache_file" || $(( $(date +%s) - $(stat -c %Y "$cache_file") )) -gt $cache_max_age ]]; then
+            cache_valid=0
+            break
+        fi
+    done
+    
+    # Add cache invalidation based on upstream changes
+    if [[ -f "/var/cache/dnf/last_makecache.timestamp" ]]; then
+        local last_system_update
+        local cache_timestamp
+        last_system_update=$(stat -c %Y "/var/cache/dnf/last_makecache.timestamp" 2>/dev/null || echo 0)
+        cache_timestamp=$(stat -c %Y "$cache_dir/timestamp" 2>/dev/null || echo 0)
+        
+        if (( last_system_update > cache_timestamp )); then
+            cache_valid=0
+            log "INFO" "System repository metadata updated since last cache - refreshing"
+            touch "$cache_dir/timestamp"
+        fi
+    fi
+    
+    if [[ $cache_valid -eq 1 ]]; then
+        log "INFO" "Using cached repository metadata (less than $((cache_max_age/60)) minutes old)"
+        # Load cached data
+        for repo in "${ENABLED_REPOS[@]}"; do
+            local cache_file="$cache_dir/${repo}_metadata.cache"
+            if [[ -f "$cache_file" ]]; then
+                available_repo_packages["$repo"]=$(cat "$cache_file")
+                log "DEBUG" "Loaded ${#available_repo_packages[$repo]} packages from cache for $repo"
+            fi
+        done
+        return 0
+    fi
+    
+    # Regular metadata download with caching
+    log "INFO" "Downloading repository metadata..."
+    for repo in "${ENABLED_REPOS[@]}"; do
+        if [[ " ${EXCLUDED_REPOS[*]} " =~ $repo ]]; then
             continue
         fi
-
+        
         log "INFO" "Fetching metadata for $repo..."
-        available_repo_packages["$repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE")
-        if [[ -z "${available_repo_packages[$repo]}" ]]; then
-            log "ERROR" "Error fetching metadata for $repo"
+        local repo_data
+        if repo_data=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE"); then
+            available_repo_packages["$repo"]="$repo_data"
+            
+            # Cache the results
+            local cache_file="$cache_dir/${repo}_metadata.cache"
+            echo "$repo_data" > "$cache_file"
+            log "DEBUG" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
+        else
+            log "WARN" "Failed to fetch metadata for repository: $repo"
+            # Keep existing cache if available
+            local cache_file="$cache_dir/${repo}_metadata.cache"
+            if [[ -f "$cache_file" ]]; then
+                log "INFO" "Using stale cache for $repo due to fetch failure"
+                available_repo_packages["$repo"]=$(cat "$cache_file")
+            fi
         fi
     done
-
-    # For local repositories
-    declare -gA repo_cache # Declare repo_cache globally to be used later
-    for local_repo in "${LOCAL_REPOS[@]}"; do
-        if [[ " ${EXCLUDED_REPOS[*]} " =~ ${local_repo} ]]; then
-            log "WARN" "Skipping metadata fetch for excluded local repo: $local_repo"
-            continue
-        fi
-
-        log "INFO" "Fetching metadata for local repo $local_repo..."
-        repo_cache["$local_repo"]=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$local_repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE")
-        if [[ -z "${repo_cache[$local_repo]}" ]]; then
-            log "ERROR" "Error fetching metadata for local repo $local_repo"
-        fi
-    done
+    
+    # Update the timestamp file
+    touch "$cache_dir/timestamp"
 }
 
 # Function to determine the status of a package
@@ -404,6 +469,15 @@ function load_config() {
             RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
             SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
             SYNC_ONLY) SYNC_ONLY="$value" ;;
+            CACHE_MAX_AGE_HOURS) CACHE_MAX_AGE_HOURS="$value" ;;
+            CACHE_MAX_AGE_HOURS_NIGHT) CACHE_MAX_AGE_HOURS_NIGHT="$value" ;;
+            NIGHT_START_HOUR) NIGHT_START_HOUR="$value" ;;
+            NIGHT_END_HOUR) NIGHT_END_HOUR="$value" ;;
+            CACHE_CLEANUP_DAYS) CACHE_CLEANUP_DAYS="$value" ;;
+            JOB_STATUS_CHECK_INTERVAL) JOB_STATUS_CHECK_INTERVAL="$value" ;;
+            JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
+            XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;
+            MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
             *) log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
@@ -569,12 +643,62 @@ function parse_args() {
             echo "  --user-mode                 Run without sudo privileges"
             exit 0
             ;;
+        --clear-cache)
+            rm -rf "$HOME/.cache/myrepo"
+            log "INFO" "Cleared metadata cache"
+            exit 0
+            ;;
+        --cache-max-age)
+            shift
+            CACHE_MAX_AGE_HOURS=$1
+            ;;
         *)
             log "ERROR" "Unknown option: $1"
             exit 1
             ;;
         esac
         shift
+    done
+}
+
+
+# Then add this function before is_package_in_local_sources() is called
+function populate_repo_cache() {
+    log "INFO" "Populating repository cache for local package lookup..."
+    
+    # Initialize the repo_cache associative array
+    for repo in "${LOCAL_REPOS[@]}"; do
+        # Skip if the repository is excluded
+        if [[ " ${EXCLUDED_REPOS[*]} " == *" ${repo} "* ]]; then
+            continue
+        fi
+        
+        repo_path="$LOCAL_REPO_PATH/$repo/getPackage"
+        if [[ -d "$repo_path" ]]; then
+            # Create a temporary file to store package information
+            local tmp_file
+            tmp_file=$(mktemp)
+            TEMP_FILES+=("$tmp_file")
+            
+            # Find all RPMs and extract their metadata
+            # shellcheck disable=SC2016 # Variables are intentionally not expanded in parent shell
+            find "$repo_path" -type f -name "*.rpm" -print0 | \
+            xargs -0 -r -n 10 sh -c '
+                for rpm_file in "$@"; do
+                    if meta=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
+                        # Handle (none) epoch
+                        meta=${meta//(none)/0}
+                        echo "$meta"
+                    fi
+                done
+            ' _ >> "$tmp_file"
+            
+            # Store the cached data
+            repo_cache["$repo"]=$(cat "$tmp_file")
+        else
+            # If directory doesn't exist, initialize with empty string
+            repo_cache["$repo"]=""
+        fi
     done
 }
 
@@ -1212,18 +1336,55 @@ function update_and_sync_repos() {
     fi
 }
 
-# Function to wait for background jobs to finish
+# Function to clean old cache files
+function cleanup_metadata_cache() {
+    local cache_dir="$HOME/.cache/myrepo"
+    local max_age_days=7
+    
+    if [[ -d "$cache_dir" ]]; then
+        # Remove cache files older than max_age_days
+        find "$cache_dir" -name "*.cache" -type f -mtime +$max_age_days -delete 2>/dev/null
+        log "DEBUG" "Cleaned old metadata cache files (older than $max_age_days days)"
+    fi
+}
+
+# Improved function to wait for background jobs with timeout detection
 function wait_for_jobs() {
     local current_jobs
-
+    local previous_jobs=0
+    local wait_count=0
+    local report_interval=60  # Report potentially slow jobs after this many seconds
+    
     while true; do
-        current_jobs=$(jobs -rp | wc -l) # Assign the number of running jobs
-        if ((current_jobs >= PARALLEL)); then
-            log "INFO" "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}"
-            sleep 1
-        else
+        current_jobs=$(jobs -rp | wc -l)
+        
+        # Break out if below parallel limit
+        if ((current_jobs < PARALLEL)); then
             break
         fi
+        
+        # Check if job count is changing
+        if ((current_jobs == previous_jobs)); then
+            ((wait_count++))
+            
+            # After waiting, just report progress but don't kill
+            if ((wait_count % report_interval == 0)); then
+                log "INFO" "Some DNF operations are taking longer than expected (${wait_count}s). This is normal for large packages or slow repositories."
+                
+                # Optionally show what's running for debugging but don't kill anything
+                if ((DEBUG_MODE >= 1)); then
+                    log "DEBUG" "Current running jobs:"
+                    jobs -l | grep -i "dnf\|download"
+                fi
+            fi
+        else
+            # Reset counter if job count changes (progress is happening)
+            wait_count=0
+            previous_jobs=$current_jobs
+        fi
+        
+        log "INFO" "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}"
+        sleep 1
     done
 }
 
@@ -1244,10 +1405,13 @@ prepare_log_files
 log "INFO" "Starting myrepo.sh Version $VERSION"
 create_helper_files
 load_processed_packages
+populate_repo_cache
 set_parallel_downloads
 remove_excluded_repos
 traverse_local_repos
 update_and_sync_repos
 cleanup
+
+cleanup_metadata_cache
 
 log "INFO" "myrepo.sh Version $VERSION completed."
