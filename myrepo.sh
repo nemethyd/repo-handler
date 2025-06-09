@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.2
+VERSION=2.1.3
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -57,7 +57,7 @@ TEMP_FILES=()
 CONFIG_FILE="myrepo.cfg"
 
 # Set constant padding length for alignment
-#PADDING_LENGTH=22
+PADDING_LENGTH=22
 
 # Declare associative array for used_directories
 declare -A used_directories
@@ -397,6 +397,17 @@ function is_package_processed() {
 
 # Function to load configuration from the config file, searching in standard locations
 function load_config() {
+    # Check if this is a help/version request - if so, load config silently
+    local silent_mode=false
+    for arg in "$@"; do
+        case "$arg" in
+        --help|--version|--clear-cache)
+            silent_mode=true
+            break
+            ;;
+        esac
+    done
+
     # Use the global CONFIG_FILE variable
     local current_dir
     local script_dir
@@ -411,21 +422,23 @@ function load_config() {
     config_path_current="${current_dir}/${CONFIG_FILE}"
     config_path_script="${script_dir}/${CONFIG_FILE}"
 
-    log "DEBUG" "Searching for config file '${CONFIG_FILE}'"
-    log "DEBUG" "Checking current directory: ${config_path_current}"
+    if [[ "$silent_mode" == "false" ]]; then
+        log "DEBUG" "Searching for config file '${CONFIG_FILE}'"
+        log "DEBUG" "Checking current directory: ${config_path_current}"
+    fi
 
     # --- Search Logic ---
     # 1. Check Current Directory
     if [[ -f "$config_path_current" ]]; then
-        log "INFO" "Found configuration file in current directory: ${config_path_current}"
+        [[ "$silent_mode" == "false" ]] && log "INFO" "Found configuration file in current directory: ${config_path_current}"
         found_config_path="$config_path_current"
     else
         # 2. Check Script Directory (only if different from current and not found above)
         #    Use -ef to check if paths resolve to the same file/directory inode, robust way to compare paths
         if ! [[ "$config_path_current" -ef "$config_path_script" ]]; then
-            log "DEBUG" "Checking script directory: ${config_path_script}"
+            [[ "$silent_mode" == "false" ]] && log "DEBUG" "Checking script directory: ${config_path_script}"
             if [[ -f "$config_path_script" ]]; then
-                log "INFO" "Found configuration file in script directory: ${config_path_script}"
+                [[ "$silent_mode" == "false" ]] && log "INFO" "Found configuration file in script directory: ${config_path_script}"
                 found_config_path="$config_path_script"
             fi
         fi
@@ -433,7 +446,7 @@ function load_config() {
 
     # --- Load Configuration ---
     if [[ -n "$found_config_path" ]]; then
-        log "INFO" "Loading configuration from ${found_config_path}"
+        [[ "$silent_mode" == "false" ]] && log "INFO" "Loading configuration from ${found_config_path}"
         # Use process substitution to feed the filtered file content to the loop
         while IFS='=' read -r key value || [[ -n "$key" ]]; do # Handle last line without newline correctly
             # Ignore empty lines and lines starting with #
@@ -478,12 +491,64 @@ function load_config() {
             JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
             XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
-            *) log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
+            *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
     else
-        log "INFO" "Configuration file '${CONFIG_FILE}' not found in current ('${current_dir}') or script ('${script_dir}') directory. Using defaults and command-line arguments."
+        [[ "$silent_mode" == "false" ]] && log "INFO" "Configuration file '${CONFIG_FILE}' not found in current ('${current_dir}') or script ('${script_dir}') directory. Using defaults and command-line arguments."
         # No exit here - defaults defined earlier will be used.
+    fi
+}
+
+# Function to validate configuration and environment
+function validate_config() {
+    local error=0
+    # Numeric checks
+    if ! [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]] || (( BATCH_SIZE < 1 )); then
+        log "ERROR" "BATCH_SIZE must be a positive integer (got '$BATCH_SIZE')"; error=1
+    fi
+    if ! [[ "$PARALLEL" =~ ^[0-9]+$ ]] || (( PARALLEL < 1 )); then
+        log "ERROR" "PARALLEL must be a positive integer (got '$PARALLEL')"; error=1
+    fi
+    if ! [[ "$MAX_PACKAGES" =~ ^[0-9]+$ ]]; then
+        log "ERROR" "MAX_PACKAGES must be a non-negative integer (got '$MAX_PACKAGES')"; error=1
+    fi
+    if ! [[ "$CACHE_MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS < 1 )); then
+        log "ERROR" "CACHE_MAX_AGE_HOURS must be a positive integer (got '$CACHE_MAX_AGE_HOURS')"; error=1
+    fi
+    if ! [[ "$CACHE_MAX_AGE_HOURS_NIGHT" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS_NIGHT < 1 )); then
+        log "ERROR" "CACHE_MAX_AGE_HOURS_NIGHT must be a positive integer (got '$CACHE_MAX_AGE_HOURS_NIGHT')"; error=1
+    fi
+    # Directory checks
+    if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
+        log "ERROR" "LOCAL_REPO_PATH does not exist or is not a directory: $LOCAL_REPO_PATH"; error=1
+    fi
+    if [[ ! -d "$SHARED_REPO_PATH" ]]; then
+        log "WARN" "SHARED_REPO_PATH does not exist or is not a directory: $SHARED_REPO_PATH" # Not fatal
+    fi
+    if [[ ! -d "$RPMBUILD_PATH" ]]; then
+        log "WARN" "RPMBUILD_PATH does not exist or is not a directory: $RPMBUILD_PATH" # Not fatal
+    fi
+    if [[ ! -d "$LOG_DIR" ]]; then
+        log "WARN" "LOG_DIR does not exist or is not a directory: $LOG_DIR" # Will be created
+    fi
+    # Array checks
+    if [[ ${#LOCAL_REPOS[@]} -eq 0 ]]; then
+        log "ERROR" "LOCAL_REPOS is empty. At least one local repo must be specified."; error=1
+    fi
+    # Check that each local repo directory exists (warn only)
+    for repo in "${LOCAL_REPOS[@]}"; do
+        if [[ ! -d "$LOCAL_REPO_PATH/$repo" ]]; then
+            log "WARN" "Local repo directory missing: $LOCAL_REPO_PATH/$repo"
+        fi
+    done
+    # Log summary if debug
+    if [[ $DEBUG_MODE -ge 1 ]]; then
+        log "DEBUG" "Config summary: BATCH_SIZE=$BATCH_SIZE, PARALLEL=$PARALLEL, LOCAL_REPO_PATH=$LOCAL_REPO_PATH, LOCAL_REPOS=(${LOCAL_REPOS[*]}), LOG_DIR=$LOG_DIR"
+    fi
+    if (( error )); then
+        log "ERROR" "Configuration validation failed. Please fix the above errors."
+        exit 2
     fi
 }
 
@@ -628,24 +693,26 @@ function parse_args() {
         --help)
             echo "Usage: myrepo.sh [OPTIONS]"
             echo "Options:"
-            echo "  --batch-size NUM          Number of packages per batch (default: $BATCH_SIZE)"
-            echo "  --debug-level LEVEL       Set debug level (default: $DEBUG_MODE)"
+            echo "  --batch-size NUM          Number of packages per batch (default: 10)"
+            echo "  --debug-level LEVEL       Set debug level (default: 0)"
             echo "  --dry-run                 Perform a dry run without making changes"
             echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
             echo "  --full-rebuild            Perform a full rebuild of the repository"
-            echo "  --local-repo-path PATH    Set local repository path (default: $LOCAL_REPO_PATH)"
-            echo "  --local-repos REPOS       Comma-separated list of local repos (default: ${LOCAL_REPOS[*]})"
-            echo "  --log-dir PATH            Set log directory (default: $LOG_DIR)"
-            echo "  --max-packages NUM        Maximum number of packages to process (default: $MAX_PACKAGES)"
-            echo "  --parallel NUM            Number of parallel processes (default: $PARALLEL)"
-            echo "  --shared-repo-path PATH   Set shared repository path (default: $SHARED_REPO_PATH)"
+            echo "  --local-repo-path PATH    Set local repository path (default: /repo)"
+            echo "  --local-repos REPOS       Comma-separated list of local repos (default: ol9_edge,pgdg-common,pgdg16)"
+            echo "  --log-dir PATH            Set log directory (default: /var/log/myrepo)"
+            echo "  --max-packages NUM        Maximum number of packages to process (default: 0)"
+            echo "  --parallel NUM            Number of parallel processes (default: 2)"
+            echo "  --shared-repo-path PATH   Set shared repository path (default: /mnt/hgfs/ForVMware/ol9_repos)"
             echo "  --sync-only               Only perform createrepo and rsync steps"
-            echo "  --user-mode                 Run without sudo privileges"
+            echo "  --user-mode               Run without sudo privileges"
+            echo "  --version                 Print script version and exit"
+            echo "  --help                    Display this help message and exit"
             exit 0
             ;;
         --clear-cache)
             rm -rf "$HOME/.cache/myrepo"
-            log "INFO" "Cleared metadata cache"
+            echo "Cleared metadata cache"
             exit 0
             ;;
         --cache-max-age)
@@ -1398,8 +1465,9 @@ fi
 ' EXIT
 
 ### Main processing section ###
-load_config
+load_config "$@"
 parse_args "$@"
+validate_config
 check_user_mode
 prepare_log_files
 log "INFO" "Starting myrepo.sh Version $VERSION"
