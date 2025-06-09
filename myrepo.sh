@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.4
+VERSION=2.1.5
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -19,6 +19,7 @@ VERSION=2.1.4
 : "${DEBUG_MODE:=0}"
 : "${DRY_RUN:=0}"
 : "${FULL_REBUILD:=0}"
+: "${GROUP_OUTPUT:=0}"
 : "${IS_USER_MODE:=0}"
 : "${LOG_LEVEL:=INFO}"
 : "${MAX_PACKAGES:=0}"
@@ -517,6 +518,7 @@ function load_config() {
             DRY_RUN) DRY_RUN="$value" ;;
             EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
             FULL_REBUILD) FULL_REBUILD="$value" ;;
+            GROUP_OUTPUT) GROUP_OUTPUT="$value" ;;
             IS_USER_MODE) IS_USER_MODE="$value" ;;
             LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
             LOCAL_REPOS) IFS=',' read -r -a LOCAL_REPOS <<<"$value" ;;
@@ -705,6 +707,9 @@ function parse_args() {
         --full-rebuild)
             FULL_REBUILD=1
             ;;
+        --group-output)
+            GROUP_OUTPUT=1
+            ;;
         --local-repo-path)
             shift
             LOCAL_REPO_PATH=$1
@@ -747,6 +752,7 @@ function parse_args() {
             echo "  --dry-run                 Perform a dry run without making changes"
             echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
             echo "  --full-rebuild            Perform a full rebuild of the repository"
+            echo "  --group-output            Group consecutive EXISTS package outputs by repository"
             echo "  --local-repo-path PATH    Set local repository path (default: /repo)"
             echo "  --local-repos REPOS       Comma-separated list of local repos (default: ol9_edge,pgdg-common,pgdg16)"
             echo "  --log-dir PATH            Set log directory (default: /var/log/myrepo)"
@@ -925,6 +931,10 @@ function process_packages() {
     local TEMP_FILE
     TEMP_FILE=$(create_temp_file)
 
+    # Initialize arrays for grouping EXISTS results (when GROUP_OUTPUT=1)
+    declare -A exists_count
+    declare -A exists_packages
+
     ### Main processing section ###
 
     IFS=' ' read -r -a packages <<<"${PACKAGES[@]}"
@@ -962,7 +972,18 @@ function process_packages() {
 
         case $package_status in
         "EXISTS")
-            log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists." "\e[32m" # Green
+            if [[ $GROUP_OUTPUT -eq 1 ]]; then
+                # Collect for batch summary
+                ((exists_count["$repo_name"]++))
+                if [[ -z "${exists_packages[$repo_name]}" ]]; then
+                    exists_packages["$repo_name"]="$package_name-$package_version-$package_release.$package_arch"
+                else
+                    exists_packages["$repo_name"]="${exists_packages[$repo_name]}, $package_name-$package_version-$package_release.$package_arch"
+                fi
+            else
+                # Default behavior: log immediately
+                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists." "\e[32m" # Green
+            fi
             mark_processed "$pkg_key"
             ;;
         "NEW")
@@ -989,6 +1010,24 @@ function process_packages() {
             ;;
         esac
     done
+
+    # Print batch summary for EXISTS packages when GROUP_OUTPUT=1
+    if [[ $GROUP_OUTPUT -eq 1 ]]; then
+        for repo_name in "${!exists_count[@]}"; do
+            local count="${exists_count[$repo_name]}"
+            if [[ $count -gt 0 ]]; then
+                if [[ $count -eq 1 ]]; then
+                    log "INFO" "$(align_repo_name "$repo_name"): 1 package already exists." "\e[32m" # Green
+                else
+                    log "INFO" "$(align_repo_name "$repo_name"): $count packages already exist." "\e[32m" # Green
+                fi
+                # Optionally show package details in debug mode
+                if [[ $DEBUG_MODE -ge 1 ]]; then
+                    log "DEBUG" "$(align_repo_name "$repo_name"): EXISTS packages: ${exists_packages[$repo_name]}" "\e[90m" # Gray
+                fi
+            fi
+        done
+    fi
 
     # Wait for all background jobs to complete before finishing the script
     wait
