@@ -228,7 +228,7 @@ function download_packages() {
     done
 }
 
-# Function to download repository metadata and store in memory with intelligent caching
+# Function to download repository metadata and store in memory with intelligent caching (version-based)
 function download_repo_metadata() {
     local cache_dir="$HOME/.cache/myrepo"
     mkdir -p "$cache_dir"
@@ -239,28 +239,60 @@ function download_repo_metadata() {
         cache_max_age=$((CACHE_MAX_AGE_HOURS_NIGHT * 3600))
     fi
 
-    # Check if cache exists and is fresh for each repo
     declare -A repo_needs_update
+    declare -A repo_versions
+
+    # Helper: get repomd.xml URL for a repo
+    function get_repomd_url() {
+        local repo="$1"
+        local baseurl
+        baseurl=$(dnf config-manager --dump "$repo" 2>/dev/null | awk -F= '/^baseurl/ {print $2; exit}')
+        # Remove trailing slashes
+        baseurl="${baseurl%%/}"
+        echo "$baseurl/repodata/repomd.xml"
+    }
+
+    # Helper: get repomd.xml checksum or timestamp
+    function get_repomd_version() {
+        local url="$1"
+        local version=""
+        # Try to fetch and parse repomd.xml
+        if curl -s --max-time 10 "$url" >"$cache_dir/repomd.xml.tmp"; then
+            # Try to extract <revision> (timestamp) or <checksum>
+            version=$(awk -F'[<>]' '/<revision>/ {print $3; exit}' "$cache_dir/repomd.xml.tmp")
+            if [[ -z "$version" ]]; then
+                version=$(awk -F'[<>]' '/<checksum/ {getline; print $1; exit}' "$cache_dir/repomd.xml.tmp")
+            fi
+        fi
+        rm -f "$cache_dir/repomd.xml.tmp"
+        echo "$version"
+    }
+
     for repo in "${ENABLED_REPOS[@]}"; do
         local cache_file="$cache_dir/${repo}.cache"
-        if [[ ! -f "$cache_file" || $(( $(date +%s) - $(stat -c %Y "$cache_file") )) -gt $cache_max_age ]]; then
-            repo_needs_update["$repo"]=1
+        local version_file="$cache_dir/${repo}.version"
+        local repomd_url
+        repomd_url=$(get_repomd_url "$repo")
+        local upstream_version
+        upstream_version=$(get_repomd_version "$repomd_url")
+        repo_versions["$repo"]="$upstream_version"
+        local cached_version=""
+        [[ -f "$version_file" ]] && cached_version=$(cat "$version_file")
+        if [[ -z "$upstream_version" ]]; then
+            # Fallback: time-based aging
+            if [[ ! -f "$cache_file" || $(( $(date +%s) - $(stat -c %Y "$cache_file") )) -gt $cache_max_age ]]; then
+                repo_needs_update["$repo"]=1
+            else
+                repo_needs_update["$repo"]=0
+            fi
         else
-            repo_needs_update["$repo"]=0
+            if [[ ! -f "$cache_file" || "$upstream_version" != "$cached_version" ]]; then
+                repo_needs_update["$repo"]=1
+            else
+                repo_needs_update["$repo"]=0
+            fi
         fi
     done
-
-    # Add cache invalidation based on upstream changes (global for now)
-    if [[ -f "/var/cache/dnf/last_makecache.timestamp" ]]; then
-        local dnf_ts
-        dnf_ts=$(stat -c %Y /var/cache/dnf/last_makecache.timestamp)
-        for repo in "${ENABLED_REPOS[@]}"; do
-            local cache_file="$cache_dir/${repo}.cache"
-            if [[ -f "$cache_file" && $(stat -c %Y "$cache_file") -lt $dnf_ts ]]; then
-                repo_needs_update["$repo"]=1
-            fi
-        done
-    fi
 
     # Fetch metadata in parallel for repos that need update
     local max_parallel=${REPOQUERY_PARALLEL}
@@ -274,7 +306,11 @@ function download_repo_metadata() {
             (
                 if repo_data=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE"); then
                     echo "$repo_data" > "$cache_dir/${repo}.cache"
-                    log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
+                    # Save version if available
+                    if [[ -n "${repo_versions[$repo]}" ]]; then
+                        echo "${repo_versions[$repo]}" > "$cache_dir/${repo}.version"
+                    fi
+                    log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) [version: ${repo_versions[$repo]}]"
                 else
                     log "ERROR" "Failed to fetch metadata for $repo"
                 fi
@@ -285,7 +321,7 @@ function download_repo_metadata() {
                 ((--running))
             fi
         else
-            log "DEBUG" "Using cached metadata for $repo"
+            log "DEBUG" "Using cached metadata for $repo [version: ${repo_versions[$repo]}]"
         fi
     done
     # Wait for all background jobs to finish
@@ -312,21 +348,38 @@ function get_package_status() {
 
     [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Checking package status: repo=$repo_name name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch path=$repo_path"
 
-    local package_pattern="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-
-    if compgen -G "$package_pattern" >/dev/null; then
-        echo "EXISTS"
-        return
-    elif [[ -n "$epoch" ]]; then
-        local package_pattern_with_epoch="${repo_path}/${package_name}-${epoch}:${package_version}-${package_release}.${package_arch}.rpm"
-        if compgen -G "$package_pattern_with_epoch" >/dev/null; then
-            echo "EXISTS"
-            return
+    # Find all matching RPMs for this package name and arch in the repo_path
+    local found_exact=0
+    local found_other=0
+    shopt -s nullglob
+    for rpm_file in "$repo_path"/${package_name}-*.$package_arch.rpm; do
+        # Extract metadata from the RPM filename
+        local rpm_epoch rpm_version rpm_release rpm_arch
+        rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
+        rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>/dev/null)
+        rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>/dev/null)
+        rpm_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>/dev/null)
+        [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
+        # Compare all fields for exact match
+        if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
+           && "$epoch" == "$rpm_epoch" \
+           && "$package_version" == "$rpm_version" \
+           && "$package_release" == "$rpm_release" \
+           && "$package_arch" == "$rpm_arch" ]]; then
+            found_exact=1
+            break
+        else
+            # If name and arch match, but version/release/epoch differ, mark as other
+            if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
+               && "$package_arch" == "$rpm_arch" ]]; then
+                found_other=1
+            fi
         fi
-    fi
-
-    # Check if there are any packages with this name in the repo_path
-    if compgen -G "${repo_path}/${package_name}-*.rpm" >/dev/null; then
+    done
+    shopt -u nullglob
+    if ((found_exact)); then
+        echo "EXISTS"
+    elif ((found_other)); then
         echo "UPDATE"
     else
         echo "NEW"
@@ -1091,7 +1144,7 @@ function remove_uninstalled_packages() {
     # Count total packages for better progress reporting
     local total_rpms
     total_rpms=$(find "$repo_path" -type f -name "*.rpm" | wc -l)
-    log "INFO" "Found $total_rpms RPM packages to check in $repo_path"
+    log "INFO" "$(align_repo_name "$repo_name"): $total_rpms RPM packages checked" "\e[90m"
     
     # Create a temporary file to hold packages to remove
     local remove_list
@@ -1104,46 +1157,50 @@ function remove_uninstalled_packages() {
         installed_file="$1"
         remove_file="$2"
         dry_run="$3"
-        shift 3
-        
+        debug_mode="$4"
+        shift 4
         for rpm_file in "$@"; do
             # Get all metadata in a single rpm call
             if ! rpm_data=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
                 echo "Error reading $rpm_file, skipping" >&2
                 continue
             fi
-            
-            # Handle (none) epoch
             rpm_data=${rpm_data//(none)/0}
-            
-            # Check if package is installed using grep (much faster than awk)
             if ! grep -qF "$rpm_data" "$installed_file"; then
                 if [ "$dry_run" -eq 1 ]; then
-                    echo "Would remove: $rpm_file" >&2
+                    echo "$rpm_file" >> "$remove_file.dryrun"
                 else
-                    # Add to remove list instead of removing immediately
                     echo "$rpm_file" >> "$remove_file"
                 fi
             fi
         done
-    ' _ "$installed_pkgs_file" "$remove_list" "$DRY_RUN"
+    ' _ "$installed_pkgs_file" "$remove_list" "$DRY_RUN" "$DEBUG_MODE"
     
-    # Now remove files in bulk (much faster than one at a time)
+    local removed_count=0
+    local dryrun_count=0
     if [[ -s "$remove_list" && "$DRY_RUN" -eq 0 ]]; then
-        local count
-        count=$(wc -l < "$remove_list")
-        log "INFO" "$(align_repo_name "$repo_name"): Removing $count uninstalled packages"
-        
-        # Remove in parallel but with controlled batches
+        removed_count=$(wc -l < "$remove_list")
+        if ((DEBUG_MODE >= 1)); then
+            while IFS= read -r pkg; do
+                log "DEBUG" "$(align_repo_name "$repo_name"): Removed $(basename "$pkg")" "\e[31m"
+            done < "$remove_list"
+        fi
         xargs -a "$remove_list" -P "$PARALLEL" -n 20 rm -f
-        
-        log "INFO" "$(align_repo_name "$repo_name"): Removed $count packages"
-    elif [[ -s "$remove_list" && "$DRY_RUN" -eq 1 ]]; then
-        local count
-        count=$(wc -l < "$remove_list")
-        log "INFO" "$(align_repo_name "$repo_name"): Would remove $count uninstalled packages (dry run)"
+        log "INFO" "$(align_repo_name "$repo_name"): $removed_count uninstalled packages removed successfully." "\e[32m"
+    elif [[ -f "$remove_list.dryrun" && "$DRY_RUN" -eq 1 ]]; then
+        dryrun_count=$(wc -l < "$remove_list.dryrun")
+        if ((dryrun_count > 0)); then
+            if ((DEBUG_MODE >= 1)); then
+                while IFS= read -r pkg; do
+                    log "DEBUG" "$(align_repo_name "$repo_name"): Would remove $(basename "$pkg") (dry-run)" "\e[33m"
+                done < "$remove_list.dryrun"
+            fi
+            log "INFO" "$(align_repo_name "$repo_name"): $dryrun_count uninstalled packages would be removed (dry-run)." "\e[33m"
+        else
+            log "INFO" "$(align_repo_name "$repo_name"): No uninstalled packages to remove." "\e[32m"
+        fi
     else
-        log "INFO" "$(align_repo_name "$repo_name"): No packages to remove"
+        log "INFO" "$(align_repo_name "$repo_name"): No uninstalled packages to remove." "\e[32m"
     fi
 }
 
@@ -1203,120 +1260,83 @@ function traverse_local_repos() {
             IFS='|' read -r package_name epoch_version package_version package_release package_arch package_repo <<<"$line"
 
             # Skip if the package is in the excluded list
-            if [[ " ${EXCLUDED_REPOS[*]} " == *" ${package_repo} "* ]]; then
+            if [[ "${EXCLUDED_REPOS[*]}" == *" ${package_repo} "* ]]; then
                 log "INFO" "Skipping package $package_name from excluded repository: $package_repo"
                 continue
             fi
-
-            # If the package repo is System, @System, or @commandline, find the corresponding repo
             if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
                 package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
                 if [[ $DEBUG_MODE -ge 1 ]]; then
                     log "DEBUG" "Determined repo for $package_name: $package_repo"
                 fi
             fi
-
-            # Handle the case where epoch is '0' or empty (skip it in the filename)
             if [[ "$epoch_version" == "0" || -z "$epoch_version" ]]; then
                 package_version_full="$package_version-$package_release.$package_arch"
             else
                 package_version_full="$epoch_version:$package_version-$package_release.$package_arch"
             fi
-
             pkg_key="${package_name}-${package_version_full}"
-
-            # Skip if the package has already been processed
             if is_package_processed "$pkg_key"; then
-                [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Package $pkg_key already processed, skipping."
                 continue
             fi
-
-            # Debugging: Print captured fields
             if [[ $DEBUG_MODE -ge 2 ]]; then
                 log "DEBUG" "Captured: package_name=$package_name, epoch_version=$epoch_version, package_version=$package_version, package_release=$package_release, package_arch=$package_arch, package_repo=$package_repo" >&2
             fi
-
-            # Determine repository source
             if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
                 package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
                 if [[ $DEBUG_MODE -ge 1 ]]; then
                     log "DEBUG" "Determined repo for $package_name: $package_repo" >&2
                 fi
             fi
-
-            # Skip if repository is invalid or commandline
             if [[ "$package_repo" == "@commandline" || "$package_repo" == "Invalid" ]]; then
-                [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Skipping package $package_name as it is marked as $package_repo" >&2
                 continue
             fi
-
-            # Get repository path and name
             repo_path=$(get_repo_path "$package_repo")
             repo_name=$(get_repo_name "$package_repo")
-
             if [[ -n "$repo_path" ]]; then
                 used_directories["$repo_name"]="$repo_path"
-                # Pass 7 fields: repo_name|package_name|epoch_version|package_version|package_release|package_arch|repo_path
                 batch_packages+=("$repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path")
-                # Debugging: Print the package being added
                 if [[ $DEBUG_MODE -ge 2 ]]; then
                     log "DEBUG" "Adding to batch: $repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path" >&2
                 fi
             else
-                [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Skipping package $package_name as it has no valid repository path" >&2
                 continue
             fi
-
             ((package_counter++))
             if ((MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES)); then
                 break
             fi
-
-            # If batch size reached, process the batch
             if ((${#batch_packages[@]} >= BATCH_SIZE)); then
                 process_batch "${batch_packages[@]}"
                 batch_packages=()
             fi
         done
-
-        # Process any remaining packages in the last batch
         if ((${#batch_packages[@]} > 0)); then
             process_batch "${batch_packages[@]}"
         fi
-
         wait
-
         log "INFO" "Removing uninstalled packages..."
         for repo in "${!used_directories[@]}"; do
             repo_path="${used_directories[$repo]}"
-
-            # Check if the repository directory exists and contains any RPM files
             if [[ -d "$repo_path" ]]; then
-                # If no RPM files are found, skip this repository
                 if ! compgen -G "$repo_path/*.rpm" >/dev/null; then
                     log "INFO" "$(align_repo_name "$repo"): No RPM files found in $repo_path, skipping removal process."
                     continue
                 fi
-
-                # Run remove_uninstalled_packages if RPM files are present
                 remove_uninstalled_packages "$repo_path"
             else
                 log "INFO" "$(align_repo_name "$repo"): Repository path $repo_path does not exist, skipping."
             fi
         done
-
-        # Periodically check the status of running background jobs
         while true; do
             running_jobs=$(jobs -rp | wc -l)
             if ((running_jobs > 0)); then
-                log "INFO" "$(align_repo_name "$repo"): Still removing uninstalled packages, ${running_jobs} jobs remaining..."
-                sleep 10 # Adjust the interval as needed to avoid excessive output
+                log "INFO" "Still removing uninstalled packages, ${running_jobs} jobs remaining..."
+                sleep 10
             else
                 break
             fi
         done
-
-        # Wait for all background jobs to finish
         wait
     fi # End of SYNC_ONLY condition
 }
