@@ -11,8 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.6
-
+VERSION=2.1.7
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
@@ -1498,10 +1497,10 @@ function update_and_sync_repos() {
             repo_name=$(basename "$repo_path")
 
             if ((DRY_RUN)); then
-                log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo --update $repo_path'"
+                log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
-                if ! createrepo --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                if ! createrepo_c --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
                     log "ERROR" "$(align_repo_name "$repo_name"): Error updating metadata for $repo_path"
                 fi
             fi
