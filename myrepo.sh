@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.5
+VERSION=2.1.6
 
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
@@ -1027,19 +1027,21 @@ function process_packages() {
                 # Extract package names and create dictionary-style range
                 local first_letters=""
                 if [[ -n "${exists_packages[$repo_name]}" ]]; then
-                    local packages="${exists_packages[$repo_name]}"
+                    local packages_string="${exists_packages[$repo_name]}"
                     local package_names=()
                     
                     # Split packages and extract package names (preserve case)
-                    IFS=', ' read -ra pkg_array <<< "$packages"
+                    IFS=', ' read -ra pkg_array <<< "$packages_string"
                     for pkg in "${pkg_array[@]}"; do
                         # Extract package name (before first hyphen)
                         local pkg_name="${pkg%%-*}"
                         package_names+=("$pkg_name")
                     done
                     
-                    # Sort package names and remove duplicates
-                    IFS=$'\n' package_names=($(printf '%s\n' "${package_names[@]}" | sort -u))
+                    # Sort package names and remove duplicates using mapfile
+                    local sorted_names
+                    mapfile -t sorted_names < <(printf '%s\n' "${package_names[@]}" | sort -u)
+                    package_names=("${sorted_names[@]}")
                     
                     # Create dictionary-style range display
                     if [[ ${#package_names[@]} -eq 1 ]]; then
@@ -1446,6 +1448,13 @@ function traverse_local_repos() {
         log "INFO" "Removing uninstalled packages..."
         for repo in "${!used_directories[@]}"; do
             repo_path="${used_directories[$repo]}"
+            
+            # Skip removal for repositories listed in LOCAL_REPOS
+            if [[ " ${LOCAL_REPOS[*]} " == *" ${repo} "* ]]; then
+                log "INFO" "$(align_repo_name "$repo"): Skipping uninstalled package removal for local repository" "\e[33m"
+                continue
+            fi
+            
             if [[ -d "$repo_path" ]]; then
                 if ! compgen -G "$repo_path/*.rpm" >/dev/null; then
                     log "INFO" "$(align_repo_name "$repo"): No RPM files found in $repo_path, skipping removal process."
