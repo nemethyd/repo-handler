@@ -39,10 +39,9 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${CACHE_CLEANUP_DAYS:=7}"
 
 # Performance and timing defaults
-: "${JOB_STATUS_CHECK_INTERVAL:=10}"
+# Removed unused variables from experimental batch processing:
+# JOB_STATUS_CHECK_INTERVAL, XARGS_BATCH_SIZE, MAX_PARALLEL_DOWNLOADS
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
-: "${XARGS_BATCH_SIZE:=50}"
-: "${MAX_PARALLEL_DOWNLOADS:=20}"
 : "${REPOQUERY_PARALLEL:=4}"
 
 # Log directory
@@ -51,25 +50,19 @@ LOG_DIR="/var/log/myrepo"
 # create a temporary file for logging
 TEMP_FILE=$(mktemp /tmp/myrepo_main_$$.XXXXXX)
 
-# Initialize temporary files array for cleanup
 TEMP_FILES=()
 
-# Load configuration file if it exists (allowing comment lines)
 CONFIG_FILE="myrepo.cfg"
 
-# Set constant padding length for alignment
 PADDING_LENGTH=26
 
-# Declare associative array for used_directories
+# Declare associative arrays
 declare -A used_directories
-# Declare associative array for available packages in enabled repos
 declare -A available_repo_packages
 
-# Declare map for already processed packages
 # shellcheck disable=SC2034  # Variable used in functions, not a false positive
 declare -A PROCESSED_PACKAGE_MAP
 
-# Declare array for enabled repositories
 declare -A repo_cache
 
 
@@ -77,13 +70,11 @@ declare -A repo_cache
 ### Functions section in abc order ###
 ######################################
 
-# Function to align the output by padding the repo_name
 function align_repo_name() {
     local repo_name="$1"
     printf "%-${PADDING_LENGTH}s" "$repo_name"
 }
 
-# Function to check if the script is run as root or with sudo privileges
 function check_user_mode() {
     # Check if script is run as root
     if [[ -z $IS_USER_MODE && $EUID -ne 0 ]]; then
@@ -100,7 +91,6 @@ function check_user_mode() {
     else
         TMP_DIR="/tmp"
     fi
-    # Define temporary files paths
     INSTALLED_PACKAGES_FILE="$TMP_DIR/installed_packages.lst"
     PROCESSED_PACKAGES_FILE="$TMP_DIR/processed_packages.share"
 }
@@ -109,6 +99,17 @@ function check_user_mode() {
 function cleanup() {
     rm -f "$TEMP_FILE" "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE"
     rm -f "${TEMP_FILES[@]}"
+}
+
+function cleanup_metadata_cache() {
+    local cache_dir="$HOME/.cache/myrepo"
+    local max_age_days=7
+    
+    if [[ -d "$cache_dir" ]]; then
+        # Remove cache files older than max_age_days
+        find "$cache_dir" -name "*.cache" -type f -mtime +$max_age_days -delete 2>/dev/null
+        log "DEBUG" "Cleaned old metadata cache files (older than $max_age_days days)"
+    fi
 }
 
 # Create the temporary files and ensure they have correct permissions
@@ -123,7 +124,6 @@ function create_helper_files() {
     fi
 }
 
-# Function to create a unique temporary file and track it for cleanup
 function create_temp_file() {
     local tmp_file
     tmp_file=$(mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX)
@@ -131,7 +131,6 @@ function create_temp_file() {
     echo "$tmp_file"
 }
 
-# Function to determine the repository source of a package based on available packages
 function determine_repo_source() {
     local package_name=$1
     local epoch_version=$2
@@ -210,7 +209,7 @@ function download_packages() {
             {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
                 # Check if sudo is required and set the appropriate command prefix
-                DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
+                DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL_DOWNLOADS download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
 
                 if [[ -z "$IS_USER_MODE" ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
@@ -228,7 +227,7 @@ function download_packages() {
     done
 }
 
-# Function to download repository metadata and store in memory with intelligent caching (version-based)
+# Intelligent caching system with version-based metadata management
 function download_repo_metadata() {
     local cache_dir="$HOME/.cache/myrepo"
     mkdir -p "$cache_dir"
@@ -344,7 +343,6 @@ function download_repo_metadata() {
     done
 }
 
-# Function to determine the status of a package
 function get_package_status() {
     local repo_name="$1"
     local package_name="$2"
@@ -361,7 +359,6 @@ function get_package_status() {
     local found_other=0
     shopt -s nullglob
     for rpm_file in "$repo_path"/"${package_name}"-*."$package_arch".rpm; do
-        # Extract metadata from the RPM filename
         local rpm_epoch rpm_version rpm_release rpm_arch
         rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
         rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>/dev/null)
@@ -394,13 +391,12 @@ function get_package_status() {
     fi
 }
 
-# Function to get the repository name (left here for consistency)
+# Left here for consistency
 function get_repo_name() {
     local package_repo=$1
     echo "$package_repo"
 }
 
-# Function to get the repository path
 function get_repo_path() {
     local package_repo=$1
     if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "Invalid" ]]; then
@@ -412,7 +408,6 @@ function get_repo_path() {
     echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
 }
 
-# Function to check if a package exists in local sources
 function is_package_in_local_sources() {
     local package_name=$1
     local epoch_version=$2
@@ -443,12 +438,11 @@ function is_package_in_local_sources() {
     echo "no"
 }
 
-# Function to check if the package has already been processed
 function is_package_processed() {
     [[ "${PROCESSED_PACKAGE_MAP[$1]}" == 1 ]]
 }
 
-# Function to load configuration from the config file, searching in standard locations
+# Load configuration from file, searching standard locations
 function load_config() {
     # Check if this is a help/version request - if so, load config silently
     local silent_mode=false
@@ -518,6 +512,7 @@ function load_config() {
             fi
 
             log "DEBUG" "Config Override: Setting $key = $value"
+            # shellcheck disable=SC2034  # Some variables kept for backward compatibility
             case "$key" in
             BATCH_SIZE) BATCH_SIZE="$value" ;;
             CONTINUE_ON_ERROR) CONTINUE_ON_ERROR="$value" ;;
@@ -541,10 +536,10 @@ function load_config() {
             NIGHT_START_HOUR) NIGHT_START_HOUR="$value" ;;
             NIGHT_END_HOUR) NIGHT_END_HOUR="$value" ;;
             CACHE_CLEANUP_DAYS) CACHE_CLEANUP_DAYS="$value" ;;
-            JOB_STATUS_CHECK_INTERVAL) JOB_STATUS_CHECK_INTERVAL="$value" ;;
+            JOB_STATUS_CHECK_INTERVAL) JOB_STATUS_CHECK_INTERVAL="$value" ;;  # Backward compatibility
             JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
-            XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;
-            MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
+            XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;  # Backward compatibility
+            MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;  # Backward compatibility
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
@@ -555,62 +550,16 @@ function load_config() {
     fi
 }
 
-# Function to validate configuration and environment
-function validate_config() {
-    local error=0
-    # Numeric checks
-    if ! [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]] || (( BATCH_SIZE < 1 )); then
-        log "ERROR" "BATCH_SIZE must be a positive integer (got '$BATCH_SIZE')"; error=1
-    fi
-    if ! [[ "$PARALLEL" =~ ^[0-9]+$ ]] || (( PARALLEL < 1 )); then
-        log "ERROR" "PARALLEL must be a positive integer (got '$PARALLEL')"; error=1
-    fi
-    if ! [[ "$MAX_PACKAGES" =~ ^[0-9]+$ ]]; then
-        log "ERROR" "MAX_PACKAGES must be a non-negative integer (got '$MAX_PACKAGES')"; error=1
-    fi
-    if ! [[ "$CACHE_MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS < 1 )); then
-        log "ERROR" "CACHE_MAX_AGE_HOURS must be a positive integer (got '$CACHE_MAX_AGE_HOURS')"; error=1
-    fi
-    if ! [[ "$CACHE_MAX_AGE_HOURS_NIGHT" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS_NIGHT < 1 )); then
-        log "ERROR" "CACHE_MAX_AGE_HOURS_NIGHT must be a positive integer (got '$CACHE_MAX_AGE_HOURS_NIGHT')"; error=1
-    fi
-    if ! [[ "$REPOQUERY_PARALLEL" =~ ^[0-9]+$ ]] || (( REPOQUERY_PARALLEL < 1 )); then
-        log "ERROR" "REPOQUERY_PARALLEL must be a positive integer (got '$REPOQUERY_PARALLEL')"; error=1
-    fi
-    # Directory checks
-    if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
-        log "ERROR" "LOCAL_REPO_PATH does not exist or is not a directory: $LOCAL_REPO_PATH"; error=1
-    fi
-    if [[ ! -d "$SHARED_REPO_PATH" ]]; then
-        log "WARN" "SHARED_REPO_PATH does not exist or is not a directory: $SHARED_REPO_PATH" # Not fatal
-    fi
-    if [[ ! -d "$RPMBUILD_PATH" ]]; then
-        log "WARN" "RPMBUILD_PATH does not exist or is not a directory: $RPMBUILD_PATH" # Not fatal
-    fi
-    if [[ ! -d "$LOG_DIR" ]]; then
-        log "WARN" "LOG_DIR does not exist or is not a directory: $LOG_DIR" # Will be created
-    fi
-    # Array checks
-    if [[ ${#LOCAL_REPOS[@]} -eq 0 ]]; then
-        log "ERROR" "LOCAL_REPOS is empty. At least one local repo must be specified."; error=1
-    fi
-    # Check that each local repo directory exists (warn only)
-    for repo in "${LOCAL_REPOS[@]}"; do
-        if [[ ! -d "$LOCAL_REPO_PATH/$repo" ]]; then
-            log "WARN" "Local repo directory missing: $LOCAL_REPO_PATH/$repo"
-        fi
-    done
-    # Log summary if debug
-    if [[ $DEBUG_MODE -ge 1 ]]; then
-        log "DEBUG" "Config summary: BATCH_SIZE=$BATCH_SIZE, PARALLEL=$PARALLEL, LOCAL_REPO_PATH=$LOCAL_REPO_PATH, LOCAL_REPOS=(${LOCAL_REPOS[*]}), LOG_DIR=$LOG_DIR"
-    fi
-    if (( error )); then
-        log "ERROR" "Configuration validation failed. Please fix the above errors."
-        exit 2
+# Load once, at start‑up the processed packages into memory
+function load_processed_packages() {
+    if [[ -f "$PROCESSED_PACKAGES_FILE" ]]; then
+        while IFS= read -r line; do
+            PROCESSED_PACKAGE_MAP["$line"]=1
+        done <"$PROCESSED_PACKAGES_FILE"
+        log "DEBUG" "Loaded ${#PROCESSED_PACKAGE_MAP[@]} processed keys into RAM"
     fi
 }
 
-# Function to locate RPM from local cache if available
 function locate_local_rpm() {
     local package_name="$1"
     local package_version="$2"
@@ -626,16 +575,6 @@ function locate_local_rpm() {
         echo "$rpm_path"
     else
         echo ""
-    fi
-}
-
-# Load once, at start‑up the processed packages into memory
-function load_processed_packages() {
-    if [[ -f "$PROCESSED_PACKAGES_FILE" ]]; then
-        while IFS= read -r line; do
-            PROCESSED_PACKAGE_MAP["$line"]=1
-        done <"$PROCESSED_PACKAGES_FILE"
-        log "DEBUG" "Loaded ${#PROCESSED_PACKAGE_MAP[@]} processed keys into RAM"
     fi
 }
 
@@ -675,7 +614,6 @@ function log() {
     [[ -n "$TEMP_FILE" ]] && echo "$full" >>"$TEMP_FILE"
 }
 
-# Function to write log to the specific temporary file
 function log_to_temp_file() {
     [[ DEBUG_MODE -ge 1 ]] && echo "$1"
     echo "$1" >>"$TEMP_FILE"
@@ -831,7 +769,6 @@ function populate_repo_cache() {
     done
 }
 
-# Function to prepare log files and directories
 function prepare_log_files() {
     # Ensure that the log directory exists and is writable
     mkdir -p "$LOG_DIR" || {
@@ -916,7 +853,6 @@ function process_batch() {
     fi
 }
 
-# Function to process a package batch
 function process_packages() {
     local DEBUG_MODE
     local PACKAGES
@@ -1123,7 +1059,6 @@ function process_packages() {
     wait
 }
 
-# Function to process RPM files for uninstallation check
 function process_rpm_file() {
     local rpm_file="$1"
 
@@ -1133,7 +1068,6 @@ function process_rpm_file() {
         return 1
     fi
 
-    # Extract repo name from the path
     local repo_name
     repo_name=$(basename "$(dirname "$(dirname "$rpm_file")")") # Extract the parent directory name of getPackage
 
@@ -1182,7 +1116,6 @@ function process_rpm_file() {
 
 }
 
-# Function to remove excluded repositories from the local repository path
 function remove_excluded_repos() {
     for repo in "${EXCLUDED_REPOS[@]}"; do
         repo_path="$LOCAL_REPO_PATH/$repo"
@@ -1205,7 +1138,7 @@ function remove_excluded_repos() {
     done
 }
 
-# Function to remove existing package files (ensures only older versions are removed)
+# Remove existing package files (ensures only older versions are removed)
 function remove_existing_packages() {
     local package_name="$1"
     local package_version="$2"
@@ -1334,13 +1267,11 @@ function remove_uninstalled_packages() {
 }
 
 
-# Function to sanitize repository names (replace invalid characters)
 function sanitize_repo_name() {
     local repo_name="$1"
     echo "${repo_name//[^a-zA-Z0-9._-]/_}"
 }
 
-# Function to set the number of parallel downloads
 function set_parallel_downloads() {
     # Calculate the parallel download factor by multiplying PARALLEL and BATCH_SIZE
     PARALLEL_DOWNLOADS=$((PARALLEL * BATCH_SIZE))
@@ -1555,15 +1486,58 @@ function update_and_sync_repos() {
     fi
 }
 
-# Function to clean old cache files
-function cleanup_metadata_cache() {
-    local cache_dir="$HOME/.cache/myrepo"
-    local max_age_days=7
-    
-    if [[ -d "$cache_dir" ]]; then
-        # Remove cache files older than max_age_days
-        find "$cache_dir" -name "*.cache" -type f -mtime +$max_age_days -delete 2>/dev/null
-        log "DEBUG" "Cleaned old metadata cache files (older than $max_age_days days)"
+# Function to validate configuration and environment
+function validate_config() {
+    local error=0
+    # Numeric checks
+    if ! [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]] || (( BATCH_SIZE < 1 )); then
+        log "ERROR" "BATCH_SIZE must be a positive integer (got '$BATCH_SIZE')"; error=1
+    fi
+    if ! [[ "$PARALLEL" =~ ^[0-9]+$ ]] || (( PARALLEL < 1 )); then
+        log "ERROR" "PARALLEL must be a positive integer (got '$PARALLEL')"; error=1
+    fi
+    if ! [[ "$MAX_PACKAGES" =~ ^[0-9]+$ ]]; then
+        log "ERROR" "MAX_PACKAGES must be a non-negative integer (got '$MAX_PACKAGES')"; error=1
+    fi
+    if ! [[ "$CACHE_MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS < 1 )); then
+        log "ERROR" "CACHE_MAX_AGE_HOURS must be a positive integer (got '$CACHE_MAX_AGE_HOURS')"; error=1
+    fi
+    if ! [[ "$CACHE_MAX_AGE_HOURS_NIGHT" =~ ^[0-9]+$ ]] || (( CACHE_MAX_AGE_HOURS_NIGHT < 1 )); then
+        log "ERROR" "CACHE_MAX_AGE_HOURS_NIGHT must be a positive integer (got '$CACHE_MAX_AGE_HOURS_NIGHT')"; error=1
+    fi
+    if ! [[ "$REPOQUERY_PARALLEL" =~ ^[0-9]+$ ]] || (( REPOQUERY_PARALLEL < 1 )); then
+        log "ERROR" "REPOQUERY_PARALLEL must be a positive integer (got '$REPOQUERY_PARALLEL')"; error=1
+    fi
+    # Directory checks
+    if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
+        log "ERROR" "LOCAL_REPO_PATH does not exist or is not a directory: $LOCAL_REPO_PATH"; error=1
+    fi
+    if [[ ! -d "$SHARED_REPO_PATH" ]]; then
+        log "WARN" "SHARED_REPO_PATH does not exist or is not a directory: $SHARED_REPO_PATH" # Not fatal
+    fi
+    if [[ ! -d "$RPMBUILD_PATH" ]]; then
+        log "WARN" "RPMBUILD_PATH does not exist or is not a directory: $RPMBUILD_PATH" # Not fatal
+    fi
+    if [[ ! -d "$LOG_DIR" ]]; then
+        log "WARN" "LOG_DIR does not exist or is not a directory: $LOG_DIR" # Will be created
+    fi
+    # Array checks
+    if [[ ${#LOCAL_REPOS[@]} -eq 0 ]]; then
+        log "ERROR" "LOCAL_REPOS is empty. At least one local repo must be specified."; error=1
+    fi
+    # Check that each local repo directory exists (warn only)
+    for repo in "${LOCAL_REPOS[@]}"; do
+        if [[ ! -d "$LOCAL_REPO_PATH/$repo" ]]; then
+            log "WARN" "Local repo directory missing: $LOCAL_REPO_PATH/$repo"
+        fi
+    done
+    # Log summary if debug
+    if [[ $DEBUG_MODE -ge 1 ]]; then
+        log "DEBUG" "Config summary: BATCH_SIZE=$BATCH_SIZE, PARALLEL=$PARALLEL, LOCAL_REPO_PATH=$LOCAL_REPO_PATH, LOCAL_REPOS=(${LOCAL_REPOS[*]}), LOG_DIR=$LOG_DIR"
+    fi
+    if (( error )); then
+        log "ERROR" "Configuration validation failed. Please fix the above errors."
+        exit 2
     fi
 }
 
@@ -1630,8 +1604,7 @@ set_parallel_downloads
 remove_excluded_repos
 traverse_local_repos
 update_and_sync_repos
-cleanup
-
 cleanup_metadata_cache
+cleanup
 
 log "INFO" "myrepo.sh Version $VERSION completed."
