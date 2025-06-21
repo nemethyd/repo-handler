@@ -25,6 +25,9 @@ VERSION=2.1.10
 : "${PARALLEL:=4}"
 : "${SYNC_ONLY:=0}"
 
+# Repository filtering (empty means process all enabled repos)
+FILTER_REPOS=()
+
 # Default configuration values
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
@@ -61,6 +64,7 @@ TABLE_NEW_WIDTH=6                 # New packages column width
 TABLE_UPDATE_WIDTH=6              # Update packages column width  
 TABLE_EXISTS_WIDTH=6              # Existing packages column width
 TABLE_SKIPPED_WIDTH=7             # Skipped packages column width
+TABLE_MODULE_WIDTH=8              # Module packages column width
 TABLE_STATUS_WIDTH=8              # Status column width
 
 # Declare associative arrays
@@ -77,6 +81,11 @@ declare -A stats_new_count
 declare -A stats_update_count  
 declare -A stats_exists_count
 declare -A stats_skipped_count
+declare -A stats_module_count   # Track module packages per repo
+
+# Module package tracking arrays
+declare -A module_packages      # repo_name -> list of module packages
+declare -A module_info          # module_key -> "name:stream:version:context:arch"
 
 
 ######################################
@@ -168,6 +177,41 @@ function determine_repo_source() {
     done
 
     echo "Invalid" # Default to Invalid if no matching repo is found
+}
+
+function detect_module_info() {
+    local package_name="$1"
+    local package_release="$2"
+    local package_arch="$3"
+    
+    # Check if package release contains module pattern: .module+
+    if [[ "$package_release" =~ \.module\+([^+]+)\+([^+]+)\+([^.]+) ]]; then
+        # Extract module components including platform
+        local platform="${BASH_REMATCH[1]}"    # e.g., "el8.6.0"
+        local version="${BASH_REMATCH[2]}"     # e.g., "90614"
+        local context="${BASH_REMATCH[3]}"     # e.g., "f11b29ab"
+        
+        # Extract module name and stream from package name and version
+        # For nodejs-18.20.8-1.module+..., extract nodejs:18
+        local module_name stream
+        if [[ "$package_name" =~ ^([^-]+) ]]; then
+            module_name="${BASH_REMATCH[1]}"
+            # Extract major version as stream (e.g., 18 from 18.20.8)
+            if [[ "$package_release" =~ ([0-9]+)\. ]]; then
+                stream="${BASH_REMATCH[1]}"
+            else
+                stream="default"
+            fi
+        else
+            return 1  # Not a recognizable module pattern
+        fi
+        
+        # Return module info as colon-separated string: name:stream:platform:version:context:arch
+        echo "${module_name}:${stream}:${platform}:${version}:${context}:${package_arch}"
+        return 0
+    fi
+    
+    return 1  # Not a module package
 }
 
 # Download packages with parallel downloads or use local cached RPMs
@@ -359,44 +403,27 @@ function download_repo_metadata() {
 }
 
 function draw_table_border() {
-    local border_type="${1:-top}" # top, middle, bottom
+    # Box drawing characters (always use top border style)
+    local left="┌" middle="┬" right="┐" horizontal="─"
     
-    # Double-line outer border with mixed connectors (exactly as tested)
-    case "$border_type" in
-        "top")
-            local left="╔" middle="╤" right="╗" horizontal="═"
-            ;;
-        "middle")
-            local left="╟" middle="┼" right="╢" horizontal="─"
-            ;;
-        "bottom")
-            local left="╚" middle="╧" right="╝" horizontal="═"
-            ;;
-    esac
-    
-    # Build horizontal line strings directly using sed (avoids tr Unicode issues)
-    local repo_line
-    local new_line
-    local update_line  
-    local exists_line
-    local skipped_line
-    local status_line
-    
-    # Match the exact content width including padding spaces
-    repo_line=$(printf "%*s" $((TABLE_REPO_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    new_line=$(printf "%*s" $((TABLE_NEW_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    update_line=$(printf "%*s" $((TABLE_UPDATE_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    exists_line=$(printf "%*s" $((TABLE_EXISTS_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    skipped_line=$(printf "%*s" $((TABLE_SKIPPED_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    status_line=$(printf "%*s" $((TABLE_STATUS_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
-    
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n" \
-        "$left" "$repo_line" "$middle" "$new_line" "$middle" "$update_line" "$middle" "$exists_line" "$middle" "$skipped_line" "$middle" "$status_line" "$right"
+    printf "%s" "$left"
+    printf "%*s" $TABLE_REPO_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_STATUS_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s\n" "$right"
 }
 
 function draw_table_header() {
-    printf "║ %-${TABLE_REPO_WIDTH}s │ %-${TABLE_NEW_WIDTH}s │ %-${TABLE_UPDATE_WIDTH}s │ %-${TABLE_EXISTS_WIDTH}s │ %-${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
-        "Repository" "New" "Update" "Exists" "Skipped" "Status"
+    printf "║ %-${TABLE_REPO_WIDTH}s │ %-${TABLE_NEW_WIDTH}s │ %-${TABLE_UPDATE_WIDTH}s │ %-${TABLE_EXISTS_WIDTH}s │ %-${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_MODULE_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
+        "Repository" "New" "Update" "Exists" "Skipped" "Module" "Status"
 }
 
 function draw_table_row() {
@@ -405,7 +432,8 @@ function draw_table_row() {
     local update="$3"
     local exists="$4"
     local skipped="$5"
-    local status="$6"
+    local module="$6"
+    local status="$7"
     
     # Truncate repository name if it's longer than the allocated width
     local truncated_repo="$repo"
@@ -413,12 +441,12 @@ function draw_table_row() {
         truncated_repo="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
     fi
     
-    printf "║ %-${TABLE_REPO_WIDTH}s │ %${TABLE_NEW_WIDTH}s │ %${TABLE_UPDATE_WIDTH}s │ %${TABLE_EXISTS_WIDTH}s │ %${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
-        "$truncated_repo" "$new" "$update" "$exists" "$skipped" "$status"
+    printf "║ %-${TABLE_REPO_WIDTH}s │ %${TABLE_NEW_WIDTH}s │ %${TABLE_UPDATE_WIDTH}s │ %${TABLE_EXISTS_WIDTH}s │ %${TABLE_SKIPPED_WIDTH}s │ %${TABLE_MODULE_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
+        "$truncated_repo" "$new" "$update" "$exists" "$skipped" "$module" "$status"
 }
 
 function generate_summary_table() {
-    local total_new=0 total_update=0 total_exists=0 total_skipped=0
+    local total_new=0 total_update=0 total_exists=0 total_skipped=0 total_module=0
     
     # Calculate totals - check if arrays exist first
     if [[ ${#stats_new_count[@]} -gt 0 ]]; then
@@ -441,31 +469,77 @@ function generate_summary_table() {
             ((total_skipped += stats_skipped_count[$repo]))
         done
     fi
+    if [[ ${#stats_module_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_module_count[@]}"; do
+            ((total_module += stats_module_count[$repo]))
+        done
+    fi
     
     # Collect all unique repo names and sort them
     local all_repos=()
-    for repo in "${!stats_new_count[@]}" "${!stats_update_count[@]}" "${!stats_exists_count[@]}" "${!stats_skipped_count[@]}"; do
-        if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
-            all_repos+=("$repo")
-        fi
-    done
+    
+    # Only iterate over arrays that have content
+    if [[ ${#stats_new_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_new_count[@]}"; do
+            if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+                all_repos+=("$repo")
+            fi
+        done
+    fi
+    if [[ ${#stats_update_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_update_count[@]}"; do
+            if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+                all_repos+=("$repo")
+            fi
+        done
+    fi
+    if [[ ${#stats_exists_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_exists_count[@]}"; do
+            if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+                all_repos+=("$repo")
+            fi
+        done
+    fi
+    if [[ ${#stats_skipped_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_skipped_count[@]}"; do
+            if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+                all_repos+=("$repo")
+            fi
+        done
+    fi
+    if [[ ${#stats_module_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_module_count[@]}"; do
+            if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+                all_repos+=("$repo")
+            fi
+        done
+    fi
     
     # Sort repositories alphabetically
     mapfile -t all_repos < <(printf '%s\n' "${all_repos[@]}" | sort)
+    
+    # Debug: show what repositories were collected
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Collected repositories for summary: ${all_repos[*]}"
     
     # Print summary table
     echo
     log "INFO" "Package Processing Summary:"
     echo
-    draw_table_border "top"
+    draw_table_border
     draw_table_header
     draw_table_border "middle"
     
     for repo in "${all_repos[@]}"; do
+        # Skip empty repository names
+        if [[ -z "$repo" ]]; then
+            continue
+        fi
+        
         local new_count=${stats_new_count[$repo]:-0}
         local update_count=${stats_update_count[$repo]:-0}  
         local exists_count=${stats_exists_count[$repo]:-0}
         local skipped_count=${stats_skipped_count[$repo]:-0}
+        local module_count=${stats_module_count[$repo]:-0}
         local total_repo=$((new_count + update_count + exists_count + skipped_count))
         
         # Determine status based on activity
@@ -482,12 +556,12 @@ function generate_summary_table() {
         
         # Only show repos that had some activity
         if ((total_repo > 0)); then
-            draw_table_row "$repo" "$new_count" "$update_count" "$exists_count" "$skipped_count" "$status"
+            draw_table_row "$repo" "$new_count" "$update_count" "$exists_count" "$skipped_count" "$module_count" "$status"
         fi
     done
     
     draw_table_border "middle"
-    draw_table_row "TOTAL" "$total_new" "$total_update" "$total_exists" "$total_skipped" "Summary"
+    draw_table_row "TOTAL" "$total_new" "$total_update" "$total_exists" "$total_skipped" "$total_module" "Summary"
     draw_table_border "bottom"
     echo
 }
@@ -668,6 +742,7 @@ function load_config() {
             DEBUG_MODE) DEBUG_MODE="$value" ;;
             DRY_RUN) DRY_RUN="$value" ;;
             EXCLUDED_REPOS) IFS=',' read -r -a EXCLUDED_REPOS <<<"$value" ;;
+            FILTER_REPOS) IFS=',' read -r -a FILTER_REPOS <<<"$value" ;;
             FULL_REBUILD) FULL_REBUILD="$value" ;;
             GROUP_OUTPUT) GROUP_OUTPUT="$value" ;;
             IS_USER_MODE) IS_USER_MODE="$value" ;;
@@ -787,7 +862,7 @@ function parse_args() {
             shift
             BATCH_SIZE=$1
             ;;
-        --debug-level)
+        --debug)
             shift
             DEBUG_MODE=$1
             ;;
@@ -820,6 +895,10 @@ function parse_args() {
             shift
             MAX_PACKAGES=$1
             ;;
+        --repos)
+            shift
+            IFS=',' read -r -a FILTER_REPOS <<<"$1"
+            ;;
         --user-mode)
             IS_USER_MODE=1
             ;;
@@ -842,7 +921,7 @@ function parse_args() {
             echo "Usage: myrepo.sh [OPTIONS]"
             echo "Options:"
             echo "  --batch-size NUM          Number of packages per batch (default: 10)"
-            echo "  --debug-level LEVEL       Set debug level (default: 0)"
+            echo "  --debug LEVEL             Set debug level (default: 0)"
             echo "  --dry-run                 Perform a dry run without making changes"
             echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
             echo "  --full-rebuild            Perform a full rebuild of the repository"
@@ -851,6 +930,7 @@ function parse_args() {
             echo "  --local-repos REPOS       Comma-separated list of local repos (default: ol9_edge,pgdg-common,pgdg16)"
             echo "  --log-dir PATH            Set log directory (default: /var/log/myrepo)"
             echo "  --max-packages NUM        Maximum number of packages to process (default: 0)"
+            echo "  --repos REPOS             Comma-separated list of repos to process (default: all enabled)"
             echo "  --parallel NUM            Number of parallel processes (default: 2)"
             echo "  --shared-repo-path PATH   Set shared repository path (default: /mnt/hgfs/ForVMware/ol9_repos)"
             echo "  --sync-only               Only perform createrepo and rsync steps"
@@ -1044,6 +1124,25 @@ function process_packages() {
         PADDING_LENGTH=22 # Set constant padding length
 
         pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+        
+        # Detect and store module information if this is a module package
+        if module_info_string=$(detect_module_info "$package_name" "$package_release" "$package_arch"); then
+            # Store module info: module_key -> "name:stream:platform:version:context:arch"
+            # shellcheck disable=SC2034  # module_info array used globally for module metadata storage
+            module_info["$pkg_key"]="$module_info_string"
+            
+            # Add package to module packages list for this repo
+            if [[ -z "${module_packages[$repo_name]}" ]]; then
+                module_packages["$repo_name"]="$pkg_key"
+            else
+                module_packages["$repo_name"]+=" $pkg_key"
+            fi
+            
+            # Track module statistics
+            ((stats_module_count["$repo_name"]++))
+            
+            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Detected module package: $pkg_key -> $module_info_string"
+        fi
 
         # Skip if already processed
         if is_package_processed "$pkg_key"; then
@@ -1463,8 +1562,33 @@ function traverse_local_repos() {
         # Download repository metadata for enabled repos
         download_repo_metadata
 
+        # Validate repository filtering if specified
+        if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+            log "INFO" "Validating specified repositories..."
+            local invalid_repos=()
+            for repo in "${FILTER_REPOS[@]}"; do
+                if [[ ! " ${ENABLED_REPOS[*]} " =~ \ ${repo}\  ]]; then
+                    invalid_repos+=("$repo")
+                fi
+            done
+            
+            if [[ ${#invalid_repos[@]} -gt 0 ]]; then
+                log "ERROR" "The following repositories are not enabled or do not exist: ${invalid_repos[*]}"
+                log "INFO" "Available enabled repositories: ${ENABLED_REPOS[*]}"
+                exit 1
+            fi
+            log "INFO" "All specified repositories are valid and enabled."
+        fi
+
         # Read the installed packages list
         mapfile -t package_lines <"$INSTALLED_PACKAGES_FILE"
+
+        # Show repository filtering status
+        if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+            log "INFO" "Repository filtering enabled. Processing only: ${FILTER_REPOS[*]}"
+        else
+            log "INFO" "Processing packages from all enabled repositories"
+        fi
 
         # Processing installed packages
         log "INFO" "Processing installed packages..."
@@ -1481,6 +1605,13 @@ function traverse_local_repos() {
                 log "INFO" "Skipping package $package_name from excluded repository: $package_repo"
                 continue
             fi
+            
+            # Skip if repository filtering is enabled and this repo is not in the filter list
+            if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${package_repo}\  ]]; then
+                [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Skipping package $package_name from non-filtered repository: $package_repo"
+                continue
+            fi
+            
             if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
                 package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
                 if [[ $DEBUG_MODE -ge 1 ]]; then
@@ -1609,10 +1740,16 @@ function update_and_sync_repos() {
 
             if ((DRY_RUN)); then
                 log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
+                # Check if module.yaml would be generated
+                generate_module_yaml "$repo_name" "$repo_path"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
                 if ! createrepo_c --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
                     log "ERROR" "$(align_repo_name "$repo_name"): Error updating metadata for $repo_path"
+                else
+                    log "INFO" "$(align_repo_name "$repo_name"): Metadata updated successfully"
+                    # Generate module.yaml if module packages were detected for this repository
+                    generate_module_yaml "$repo_name" "$repo_path"
                 fi
             fi
         done
@@ -1791,3 +1928,129 @@ cleanup
 generate_summary_table
 
 log "INFO" "myrepo.sh Version $VERSION completed."
+
+# Generate module.yaml file for a repository based on detected module packages
+function generate_module_yaml() {
+    local repo_name="$1"
+    local repo_path="$2"
+    
+    # Check if we have any module packages for this repository
+    if [[ -z "${module_packages[$repo_name]}" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "No module packages found for $repo_name, skipping module.yaml generation"
+        return 0
+    fi
+    
+    local module_yaml_file="$repo_path/module.yaml"
+    local temp_yaml
+    temp_yaml=$(mktemp)
+    TEMP_FILES+=("$temp_yaml")
+    
+    log "INFO" "$(align_repo_name "$repo_name"): Generating module.yaml with ${stats_module_count[$repo_name]:-0} module packages"
+    
+    # Start building the module.yaml content
+    cat > "$temp_yaml" << 'EOF'
+---
+document: modulemd
+version: 2
+data:
+  name: auto-generated
+  stream: default
+  version: 1
+  context: auto
+  summary: Auto-generated module metadata
+  description: >
+    This module was automatically generated from detected module packages.
+  license:
+    module:
+      - MIT
+  dependencies:
+    - buildrequires:
+        platform: []
+      requires:
+        platform: []
+  profiles:
+    default:
+      rpms: []
+  artifacts:
+    rpms:
+EOF
+    
+    # Add each module package to the artifacts section
+    local pkg_list="${module_packages[$repo_name]}"
+    for pkg_key in $pkg_list; do
+        # Get the module info for this package
+        local module_info_string="${module_info[$pkg_key]}"
+        if [[ -n "$module_info_string" ]]; then
+            # Parse module info: name:stream:platform:version:context:arch
+            IFS ':' read -r mod_name mod_stream mod_platform mod_version mod_context mod_arch <<< "$module_info_string"
+            
+            # Add to artifacts list (using the package key which is name-version-release.arch format)
+            echo "      - $pkg_key" >> "$temp_yaml"
+            
+            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Added to module.yaml: $pkg_key (module: $mod_name:$mod_stream)"
+        fi
+    done
+    
+    # Move the temporary file to the final location
+    if ((DRY_RUN)); then
+        log "INFO" "$(align_repo_name "$repo_name"): Would create module.yaml with $(wc -l < "$temp_yaml") lines (dry-run)"
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Module.yaml content preview:" && head -20 "$temp_yaml" | sed 's/^/  /'
+    else
+        if mv "$temp_yaml" "$module_yaml_file"; then
+            log "INFO" "$(align_repo_name "$repo_name"): Created module.yaml with $(wc -l < "$module_yaml_file") lines"
+            
+            # Update repository metadata with the new module.yaml
+            if update_module_metadata "$repo_name" "$repo_path" "$module_yaml_file"; then
+                log "INFO" "$(align_repo_name "$repo_name"): Module metadata updated successfully"
+            else
+                log "ERROR" "$(align_repo_name "$repo_name"): Failed to update module metadata"
+                return 1
+            fi
+        else
+            log "ERROR" "$(align_repo_name "$repo_name"): Failed to create module.yaml file"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+function update_module_metadata() {
+    local repo_name="$1"
+    local repo_path="$2"
+    local module_yaml_file="$3"
+    
+    # Path to the repodata directory
+    local repodata_dir="$(dirname "$repo_path")/repodata"
+    
+    if [[ ! -d "$repodata_dir" ]]; then
+        log "WARN" "$(align_repo_name "$repo_name"): No repodata directory found at $repodata_dir"
+        return 1
+    fi
+    
+    # Remove any existing module metadata first
+    if find "$repodata_dir" -name "*modules*" -type f -delete 2>/dev/null; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Removed existing module metadata"
+    fi
+    
+    # Add the new module metadata using modifyrepo_c (preferred) or modifyrepo
+    local modifyrepo_cmd
+    if command -v modifyrepo_c >/dev/null 2>&1; then
+        modifyrepo_cmd="modifyrepo_c"
+    elif command -v modifyrepo >/dev/null 2>&1; then
+        modifyrepo_cmd="modifyrepo"
+    else
+        log "ERROR" "$(align_repo_name "$repo_name"): Neither modifyrepo_c nor modifyrepo found"
+        return 1
+    fi
+    
+    [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Using $modifyrepo_cmd to update module metadata"
+    
+    # Add the module.yaml to repository metadata
+    if $modifyrepo_cmd --mdtype=modules "$module_yaml_file" "$repodata_dir" 2>>"$MYREPO_ERR_FILE"; then
+        return 0
+    else
+        log "ERROR" "$(align_repo_name "$repo_name"): $modifyrepo_cmd failed to update module metadata"
+        return 1
+    fi
+}

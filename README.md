@@ -4,7 +4,9 @@
 
 ## Overview
 
-The `repo-handler` project provides a bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
+The `repo-handler` project provides a bash script designed to| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
+| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |
+| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync'ed copy.             |anage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
 
 The script helps:
 
@@ -170,7 +172,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | Option              | Argument                   | Default               | Purpose                                                         |
 |---------------------|--------------------------- |-----------------------|-----------------------------------------------------------------|
 | `--batch-size`      | *INT*                      | `10`                  | Number of packages processed in one batch.                      |
-| `--debug-level`     | *0‒2*                      | `0`                   | Extra runtime diagnostics (0 = off, 1 = basic, 2 = verbose).    |
+| `--debug`           | *0‒2*                      | `0`                   | Extra runtime diagnostics (0 = off, 1 = basic, 2 = verbose).    |
 | `--dry-run`         | *(flag)*                   | *off*                 | Simulate all actions; make **no** changes on disk.              |
 | `--exclude-repos`   | *CSV*                      | *empty*               | Comma‑separated list of repo IDs that must **not** be mirrored. |
 | `--full-rebuild`    | *(flag)*                   | *off*                 | Clear the processed‑package cache and rescan **everything**.    |
@@ -190,7 +192,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 #### Example:
 
 ```bash
-./myrepo.sh --debug-level 1 --batch-size 20 --local-repo-path /custom/repo
+./myrepo.sh --debug 1 --batch-size 20 --repos ol9_edge,pgdg16 --local-repo-path /custom/repo
 ```
 
 ### How It Works
