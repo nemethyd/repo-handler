@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.10
+VERSION=2.1.11
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
@@ -299,6 +299,14 @@ function download_repo_metadata() {
 
     declare -A repo_needs_update
     declare -A repo_versions
+    
+    # Determine which repositories to process
+    local repos_to_process=()
+    if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+        repos_to_process=("${FILTER_REPOS[@]}")
+    else
+        repos_to_process=("${ENABLED_REPOS[@]}")
+    fi
 
     # Helper: get repomd.xml URL for a repo
     function get_repomd_url() {
@@ -326,7 +334,7 @@ function download_repo_metadata() {
         echo "$version"
     }
 
-    for repo in "${ENABLED_REPOS[@]}"; do
+    for repo in "${repos_to_process[@]}"; do
         local cache_file="$cache_dir/${repo}.cache"
         local version_file="$cache_dir/${repo}.version"
         local repomd_url
@@ -355,10 +363,7 @@ function download_repo_metadata() {
     # Fetch metadata in parallel for repos that need update
     local max_parallel=${REPOQUERY_PARALLEL}
     local running=0
-    for repo in "${ENABLED_REPOS[@]}"; do
-        if [[ " ${EXCLUDED_REPOS[*]} " =~ $repo ]]; then
-            continue
-        fi
+    for repo in "${repos_to_process[@]}"; do
         if [[ ${repo_needs_update["$repo"]} -eq 1 ]]; then
             log "INFO" "Fetching metadata for $repo in background..."
             (
@@ -394,7 +399,7 @@ function download_repo_metadata() {
     wait
     log "INFO" "All metadata fetch jobs finished."
     # Load metadata into available_repo_packages
-    for repo in "${ENABLED_REPOS[@]}"; do
+    for repo in "${repos_to_process[@]}"; do
         local cache_file="$cache_dir/${repo}.cache"
         if [[ -f "$cache_file" ]]; then
             available_repo_packages["$repo"]=$(cat "$cache_file")
@@ -402,31 +407,67 @@ function download_repo_metadata() {
     done
 }
 
-function draw_table_border() {
-    # Box drawing characters (always use top border style)
-    local left="┌" middle="┬" right="┐" horizontal="─"
+# Flexible table border drawing function that accepts border type
+function draw_table_border_flex() {
+    local border_type="${1:-top}"  # top, middle, bottom
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_NEW_WIDTH" "$TABLE_UPDATE_WIDTH" "$TABLE_EXISTS_WIDTH" "$TABLE_SKIPPED_WIDTH" "$TABLE_MODULE_WIDTH" "$TABLE_STATUS_WIDTH")
+    
+    # Define border characters based on type (double outer, single inner)
+    local left middle right horizontal
+    case "$border_type" in
+        "top")
+            left="╔" middle="╤" right="╗" horizontal="═"
+            ;;
+        "middle")
+            left="╟" middle="┼" right="╢" horizontal="─"
+            ;;
+        "bottom")
+            left="╚" middle="╧" right="╝" horizontal="═"
+            ;;
+        *)
+            left="╟" middle="┼" right="╢" horizontal="─"
+            ;;
+    esac
     
     printf "%s" "$left"
-    printf "%*s" $TABLE_REPO_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_STATUS_WIDTH "" | tr ' ' "$horizontal"
+    for i in "${!column_widths[@]}"; do
+        # Create horizontal line by repeating the character
+        # Add 2 extra characters for padding (space before and after content)
+        local total_width=$((column_widths[i] + 2))
+        local line=""
+        for ((j=0; j<total_width; j++)); do
+            line+="$horizontal"
+        done
+        printf "%s" "$line"
+        if [[ $i -lt $((${#column_widths[@]} - 1)) ]]; then
+            printf "%s" "$middle"
+        fi
+    done
     printf "%s\n" "$right"
 }
 
-function draw_table_header() {
-    printf "║ %-${TABLE_REPO_WIDTH}s │ %-${TABLE_NEW_WIDTH}s │ %-${TABLE_UPDATE_WIDTH}s │ %-${TABLE_EXISTS_WIDTH}s │ %-${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_MODULE_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
-        "Repository" "New" "Update" "Exists" "Skipped" "Module" "Status"
+# Flexible table header drawing function
+function draw_table_header_flex() {
+    local headers=("Repository" "New" "Update" "Exists" "Skipped" "Module" "Status")
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_NEW_WIDTH" "$TABLE_UPDATE_WIDTH" "$TABLE_EXISTS_WIDTH" "$TABLE_SKIPPED_WIDTH" "$TABLE_MODULE_WIDTH" "$TABLE_STATUS_WIDTH")
+    local alignments=("left" "right" "right" "right" "right" "right" "left")  # left or right
+    
+    printf "║"
+    for i in "${!headers[@]}"; do
+        if [[ "${alignments[i]}" == "right" ]]; then
+            printf " %*s " "${column_widths[i]}" "${headers[i]}"
+        else
+            printf " %-*s " "${column_widths[i]}" "${headers[i]}"
+        fi
+        if [[ $i -lt $((${#headers[@]} - 1)) ]]; then
+            printf "│"
+        fi
+    done
+    printf "║\n"
 }
 
-function draw_table_row() {
+# Flexible table row drawing function
+function draw_table_row_flex() {
     local repo="$1"
     local new="$2"
     local update="$3"
@@ -435,14 +476,27 @@ function draw_table_row() {
     local module="$6"
     local status="$7"
     
+    local values=("$repo" "$new" "$update" "$exists" "$skipped" "$module" "$status")
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_NEW_WIDTH" "$TABLE_UPDATE_WIDTH" "$TABLE_EXISTS_WIDTH" "$TABLE_SKIPPED_WIDTH" "$TABLE_MODULE_WIDTH" "$TABLE_STATUS_WIDTH")
+    local alignments=("left" "right" "right" "right" "right" "right" "left")  # left or right
+    
     # Truncate repository name if it's longer than the allocated width
-    local truncated_repo="$repo"
     if [[ ${#repo} -gt $TABLE_REPO_WIDTH ]]; then
-        truncated_repo="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
+        values[0]="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
     fi
     
-    printf "║ %-${TABLE_REPO_WIDTH}s │ %${TABLE_NEW_WIDTH}s │ %${TABLE_UPDATE_WIDTH}s │ %${TABLE_EXISTS_WIDTH}s │ %${TABLE_SKIPPED_WIDTH}s │ %${TABLE_MODULE_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
-        "$truncated_repo" "$new" "$update" "$exists" "$skipped" "$module" "$status"
+    printf "║"
+    for i in "${!values[@]}"; do
+        if [[ "${alignments[i]}" == "right" ]]; then
+            printf " %*s " "${column_widths[i]}" "${values[i]}"
+        else
+            printf " %-*s " "${column_widths[i]}" "${values[i]}"
+        fi
+        if [[ $i -lt $((${#values[@]} - 1)) ]]; then
+            printf "│"
+        fi
+    done
+    printf "║\n"
 }
 
 function generate_summary_table() {
@@ -525,9 +579,9 @@ function generate_summary_table() {
     echo
     log "INFO" "Package Processing Summary:"
     echo
-    draw_table_border
-    draw_table_header
-    draw_table_border "middle"
+    draw_table_border_flex "top"
+    draw_table_header_flex
+    draw_table_border_flex "middle"
     
     for repo in "${all_repos[@]}"; do
         # Skip empty repository names
@@ -556,14 +610,103 @@ function generate_summary_table() {
         
         # Only show repos that had some activity
         if ((total_repo > 0)); then
-            draw_table_row "$repo" "$new_count" "$update_count" "$exists_count" "$skipped_count" "$module_count" "$status"
+            draw_table_row_flex "$repo" "$new_count" "$update_count" "$exists_count" "$skipped_count" "$module_count" "$status"
         fi
     done
     
-    draw_table_border "middle"
-    draw_table_row "TOTAL" "$total_new" "$total_update" "$total_exists" "$total_skipped" "$total_module" "Summary"
-    draw_table_border "bottom"
+    draw_table_border_flex "middle"
+    draw_table_row_flex "TOTAL" "$total_new" "$total_update" "$total_exists" "$total_skipped" "$total_module" "Summary"
+    draw_table_border_flex "bottom"
     echo
+}
+
+# Generate module.yaml file for a repository based on detected module packages
+function generate_module_yaml() {
+    local repo_name="$1"
+    local repo_path="$2"
+    
+    # Check if we have any module packages for this repository
+    if [[ -z "${module_packages[$repo_name]}" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "No module packages found for $repo_name, skipping module.yaml generation"
+        return 0
+    fi
+    
+    local module_yaml_file="$repo_path/module.yaml"
+    local temp_yaml
+    temp_yaml=$(mktemp)
+    TEMP_FILES+=("$temp_yaml")
+    
+    log "INFO" "$(align_repo_name "$repo_name"): Generating module.yaml with ${stats_module_count[$repo_name]:-0} module packages"
+    
+    # Start building the module.yaml content
+    cat > "$temp_yaml" << 'EOF'
+---
+document: modulemd
+version: 2
+data:
+  name: auto-generated
+  stream: default
+  version: 1
+  context: auto
+  summary: Auto-generated module metadata
+  description: >
+    This module was automatically generated from detected module packages.
+  license:
+    module:
+      - MIT
+  dependencies:
+    - buildrequires:
+        platform: []
+      requires:
+        platform: []
+  profiles:
+    default:
+      rpms: []
+  artifacts:
+    rpms:
+EOF
+    
+    # Add each module package to the artifacts section
+    local pkg_list="${module_packages[$repo_name]}"
+    for pkg_key in $pkg_list; do
+        # Initialize module variables
+        local mod_name="" mod_stream="" _mod_platform="" _mod_version="" _mod_context="" _mod_arch=""
+        
+        # Get the module info for this package
+        local module_info_string="${module_info[$pkg_key]}"
+        if [[ -n "$module_info_string" ]]; then
+            # Parse module info: name:stream:platform:version:context:arch
+            IFS ':' read -r mod_name mod_stream _mod_platform _mod_version _mod_context _mod_arch <<< "$module_info_string"
+            
+            # Add to artifacts list (using the package key which is name-version-release.arch format)
+            echo "      - $pkg_key" >> "$temp_yaml"
+            
+            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Added to module.yaml: $pkg_key (module: $mod_name:$mod_stream)"
+        fi
+    done
+    
+    # Move the temporary file to the final location
+    if ((DRY_RUN)); then
+        log "INFO" "$(align_repo_name "$repo_name"): Would create module.yaml with $(wc -l < "$temp_yaml") lines (dry-run)"
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Module.yaml content preview:" && head -20 "$temp_yaml" | sed 's/^/  /'
+    else
+        if mv "$temp_yaml" "$module_yaml_file"; then
+            log "INFO" "$(align_repo_name "$repo_name"): Created module.yaml with $(wc -l < "$module_yaml_file") lines"
+            
+            # Update repository metadata with the new module.yaml
+            if update_module_metadata "$repo_name" "$repo_path" "$module_yaml_file"; then
+                log "INFO" "$(align_repo_name "$repo_name"): Module metadata updated successfully"
+            else
+                log "ERROR" "$(align_repo_name "$repo_name"): Failed to update module metadata"
+                return 1
+            fi
+        else
+            log "ERROR" "$(align_repo_name "$repo_name"): Failed to create module.yaml file"
+            return 1
+        fi
+    fi
+    
+    return 0
 }
 
 function get_package_status() {
@@ -1600,9 +1743,17 @@ function traverse_local_repos() {
             # Expected format: name|epoch|version|release|arch|repoid
             IFS='|' read -r package_name epoch_version package_version package_release package_arch package_repo <<<"$line"
 
+            # Determine actual repository for @System packages first
+            if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
+                package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
+                if [[ $DEBUG_MODE -ge 1 ]]; then
+                    log "DEBUG" "Determined repo for $package_name: $package_repo"
+                fi
+            fi
+            
             # Skip if the package is in the excluded list
             if [[ "${EXCLUDED_REPOS[*]}" == *" ${package_repo} "* ]]; then
-                log "INFO" "Skipping package $package_name from excluded repository: $package_repo"
+                [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Skipping package $package_name from excluded repository: $package_repo"
                 continue
             fi
             
@@ -1610,13 +1761,6 @@ function traverse_local_repos() {
             if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${package_repo}\  ]]; then
                 [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Skipping package $package_name from non-filtered repository: $package_repo"
                 continue
-            fi
-            
-            if [[ "$package_repo" == "System" || "$package_repo" == "@System" || "$package_repo" == "@commandline" ]]; then
-                package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
-                if [[ $DEBUG_MODE -ge 1 ]]; then
-                    log "DEBUG" "Determined repo for $package_name: $package_repo"
-                fi
             fi
             if [[ "$epoch_version" == "0" || -z "$epoch_version" ]]; then
                 package_version_full="$package_version-$package_release.$package_arch"
@@ -1629,12 +1773,6 @@ function traverse_local_repos() {
             fi
             if [[ $DEBUG_MODE -ge 2 ]]; then
                 log "DEBUG" "Captured: package_name=$package_name, epoch_version=$epoch_version, package_version=$package_version, package_release=$package_release, package_arch=$package_arch, package_repo=$package_repo" >&2
-            fi
-            if [[ "$package_repo" == "System" || "$package_repo" == "@System" ]]; then
-                package_repo=$(determine_repo_source "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch")
-                if [[ $DEBUG_MODE -ge 1 ]]; then
-                    log "DEBUG" "Determined repo for $package_name: $package_repo" >&2
-                fi
             fi
             if [[ "$package_repo" == "@commandline" || "$package_repo" == "Invalid" ]]; then
                 continue
@@ -1726,11 +1864,22 @@ function update_and_sync_repos() {
 
         # If SYNC_ONLY is set, we need to determine which directories to update
         if ((SYNC_ONLY == 1)); then
-            # Find all repositories under LOCAL_REPO_PATH
-            while IFS= read -r -d '' dir; do
-                repo_name=$(basename "$dir")
-                used_directories["$repo_name"]="$dir/getPackage"
-            done < <(find "$LOCAL_REPO_PATH" -mindepth 1 -maxdepth 1 -type d -print0)
+            # Determine which repositories to process
+            if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+                # Use filtered repositories
+                for repo_name in "${FILTER_REPOS[@]}"; do
+                    local repo_dir="$LOCAL_REPO_PATH/$repo_name"
+                    if [[ -d "$repo_dir" ]]; then
+                        used_directories["$repo_name"]="$repo_dir/getPackage"
+                    fi
+                done
+            else
+                # Find all repositories under LOCAL_REPO_PATH
+                while IFS= read -r -d '' dir; do
+                    repo_name=$(basename "$dir")
+                    used_directories["$repo_name"]="$dir/getPackage"
+                done < <(find "$LOCAL_REPO_PATH" -mindepth 1 -maxdepth 1 -type d -print0)
+            fi
         fi
 
         for repo in "${!used_directories[@]}"; do
@@ -1780,8 +1929,27 @@ function update_and_sync_repos() {
 
         log "INFO" "Synchronizing repositories..."
 
-        for repo in "$LOCAL_REPO_PATH"/*; do
-            repo_name=$(basename "$repo")
+        # Determine which repositories to sync
+        local repos_to_sync=()
+        if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+            repos_to_sync=("${FILTER_REPOS[@]}")
+        else
+            # Get all repository directories
+            for repo in "$LOCAL_REPO_PATH"/*; do
+                if [[ -d "$repo" ]]; then
+                    repos_to_sync+=("$(basename "$repo")")
+                fi
+            done
+        fi
+
+        for repo_name in "${repos_to_sync[@]}"; do
+            local repo="$LOCAL_REPO_PATH/$repo_name"
+            
+            # Skip if repository directory doesn't exist
+            if [[ ! -d "$repo" ]]; then
+                log "WARN" "$(align_repo_name "$repo_name"): Repository directory does not exist: $repo"
+                continue
+            fi
 
             # Skip repositories with non-standard characters
             if [[ "$repo_name" =~ [^a-zA-Z0-9._-] ]]; then
@@ -1800,6 +1968,48 @@ function update_and_sync_repos() {
                 fi
             fi
         done
+    fi
+}
+
+function update_module_metadata() {
+    local repo_name="$1"
+    local repo_path="$2"
+    local module_yaml_file="$3"
+    
+    # Path to the repodata directory
+    local repodata_dir
+    repodata_dir="$(dirname "$repo_path")/repodata"
+    
+    if [[ ! -d "$repodata_dir" ]]; then
+        log "WARN" "$(align_repo_name "$repo_name"): No repodata directory found at $repodata_dir"
+        return 1
+    fi
+    
+    # Remove any existing module metadata first
+    if find "$repodata_dir" -name "*modules*" -type f -delete 2>/dev/null; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Removed existing module metadata"
+    fi
+    
+    # Add the new module metadata using modifyrepo_c (preferred) or modifyrepo
+    local modifyrepo_cmd
+    if command -v modifyrepo_c >/dev/null 2>&1; then
+        modifyrepo_cmd="modifyrepo_c"
+    elif command -v modifyrepo >/dev/null 2>&1; then
+        modifyrepo_cmd="modifyrepo"
+    else
+        log "ERROR" "$(align_repo_name "$repo_name"): Neither modifyrepo_c nor modifyrepo found"
+        return 1
+    fi
+    
+    [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Using $modifyrepo_cmd to update module metadata"
+    
+    # Add the module.yaml to repository metadata
+    if $modifyrepo_cmd --mdtype=modules "$module_yaml_file" "$repodata_dir" \
+        2>>"$MYREPO_ERR_FILE"; then
+        return 0
+    else
+        log "ERROR" "$(align_repo_name "$repo_name"): $modifyrepo_cmd failed to update module metadata"
+        return 1
     fi
 }
 
@@ -1928,129 +2138,3 @@ cleanup
 generate_summary_table
 
 log "INFO" "myrepo.sh Version $VERSION completed."
-
-# Generate module.yaml file for a repository based on detected module packages
-function generate_module_yaml() {
-    local repo_name="$1"
-    local repo_path="$2"
-    
-    # Check if we have any module packages for this repository
-    if [[ -z "${module_packages[$repo_name]}" ]]; then
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "No module packages found for $repo_name, skipping module.yaml generation"
-        return 0
-    fi
-    
-    local module_yaml_file="$repo_path/module.yaml"
-    local temp_yaml
-    temp_yaml=$(mktemp)
-    TEMP_FILES+=("$temp_yaml")
-    
-    log "INFO" "$(align_repo_name "$repo_name"): Generating module.yaml with ${stats_module_count[$repo_name]:-0} module packages"
-    
-    # Start building the module.yaml content
-    cat > "$temp_yaml" << 'EOF'
----
-document: modulemd
-version: 2
-data:
-  name: auto-generated
-  stream: default
-  version: 1
-  context: auto
-  summary: Auto-generated module metadata
-  description: >
-    This module was automatically generated from detected module packages.
-  license:
-    module:
-      - MIT
-  dependencies:
-    - buildrequires:
-        platform: []
-      requires:
-        platform: []
-  profiles:
-    default:
-      rpms: []
-  artifacts:
-    rpms:
-EOF
-    
-    # Add each module package to the artifacts section
-    local pkg_list="${module_packages[$repo_name]}"
-    for pkg_key in $pkg_list; do
-        # Get the module info for this package
-        local module_info_string="${module_info[$pkg_key]}"
-        if [[ -n "$module_info_string" ]]; then
-            # Parse module info: name:stream:platform:version:context:arch
-            IFS ':' read -r mod_name mod_stream mod_platform mod_version mod_context mod_arch <<< "$module_info_string"
-            
-            # Add to artifacts list (using the package key which is name-version-release.arch format)
-            echo "      - $pkg_key" >> "$temp_yaml"
-            
-            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Added to module.yaml: $pkg_key (module: $mod_name:$mod_stream)"
-        fi
-    done
-    
-    # Move the temporary file to the final location
-    if ((DRY_RUN)); then
-        log "INFO" "$(align_repo_name "$repo_name"): Would create module.yaml with $(wc -l < "$temp_yaml") lines (dry-run)"
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Module.yaml content preview:" && head -20 "$temp_yaml" | sed 's/^/  /'
-    else
-        if mv "$temp_yaml" "$module_yaml_file"; then
-            log "INFO" "$(align_repo_name "$repo_name"): Created module.yaml with $(wc -l < "$module_yaml_file") lines"
-            
-            # Update repository metadata with the new module.yaml
-            if update_module_metadata "$repo_name" "$repo_path" "$module_yaml_file"; then
-                log "INFO" "$(align_repo_name "$repo_name"): Module metadata updated successfully"
-            else
-                log "ERROR" "$(align_repo_name "$repo_name"): Failed to update module metadata"
-                return 1
-            fi
-        else
-            log "ERROR" "$(align_repo_name "$repo_name"): Failed to create module.yaml file"
-            return 1
-        fi
-    fi
-    
-    return 0
-}
-
-function update_module_metadata() {
-    local repo_name="$1"
-    local repo_path="$2"
-    local module_yaml_file="$3"
-    
-    # Path to the repodata directory
-    local repodata_dir="$(dirname "$repo_path")/repodata"
-    
-    if [[ ! -d "$repodata_dir" ]]; then
-        log "WARN" "$(align_repo_name "$repo_name"): No repodata directory found at $repodata_dir"
-        return 1
-    fi
-    
-    # Remove any existing module metadata first
-    if find "$repodata_dir" -name "*modules*" -type f -delete 2>/dev/null; then
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Removed existing module metadata"
-    fi
-    
-    # Add the new module metadata using modifyrepo_c (preferred) or modifyrepo
-    local modifyrepo_cmd
-    if command -v modifyrepo_c >/dev/null 2>&1; then
-        modifyrepo_cmd="modifyrepo_c"
-    elif command -v modifyrepo >/dev/null 2>&1; then
-        modifyrepo_cmd="modifyrepo"
-    else
-        log "ERROR" "$(align_repo_name "$repo_name"): Neither modifyrepo_c nor modifyrepo found"
-        return 1
-    fi
-    
-    [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Using $modifyrepo_cmd to update module metadata"
-    
-    # Add the module.yaml to repository metadata
-    if $modifyrepo_cmd --mdtype=modules "$module_yaml_file" "$repodata_dir" 2>>"$MYREPO_ERR_FILE"; then
-        return 0
-    else
-        log "ERROR" "$(align_repo_name "$repo_name"): $modifyrepo_cmd failed to update module metadata"
-        return 1
-    fi
-}
