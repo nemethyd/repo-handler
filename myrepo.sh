@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.9
+VERSION=2.1.10
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
@@ -57,8 +57,11 @@ CONFIG_FILE="myrepo.cfg"
 # Summary table formatting constants
 PADDING_LENGTH=26
 TABLE_REPO_WIDTH=$PADDING_LENGTH  # Repository name column width
-TABLE_COUNT_WIDTH=8               # Numeric count column width  
-TABLE_STATUS_WIDTH=12             # Status column width
+TABLE_NEW_WIDTH=6                 # New packages column width
+TABLE_UPDATE_WIDTH=6              # Update packages column width  
+TABLE_EXISTS_WIDTH=6              # Existing packages column width
+TABLE_SKIPPED_WIDTH=7             # Skipped packages column width
+TABLE_STATUS_WIDTH=8              # Status column width
 
 # Declare associative arrays
 declare -A used_directories
@@ -358,59 +361,60 @@ function download_repo_metadata() {
 function draw_table_border() {
     local border_type="${1:-top}" # top, middle, bottom
     
-    # Box drawing characters
+    # Double-line outer border with mixed connectors (exactly as tested)
     case "$border_type" in
         "top")
-            local left="┌" middle="┬" right="┐" horizontal="─"
+            local left="╔" middle="╤" right="╗" horizontal="═"
             ;;
         "middle")
-            local left="├" middle="┼" right="┤" horizontal="─"
+            local left="╟" middle="┼" right="╢" horizontal="─"
             ;;
         "bottom")
-            local left="└" middle="┴" right="┘" horizontal="─"
+            local left="╚" middle="╧" right="╝" horizontal="═"
             ;;
     esac
     
-    printf "%s" "$left"
-    printf "%*s" $TABLE_REPO_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s" "$middle"
-    printf "%*s" $TABLE_STATUS_WIDTH "" | tr ' ' "$horizontal"
-    printf "%s\n" "$right"
+    # Build horizontal line strings directly using sed (avoids tr Unicode issues)
+    local repo_line
+    local new_line
+    local update_line  
+    local exists_line
+    local skipped_line
+    local status_line
+    
+    # Match the exact content width including padding spaces
+    repo_line=$(printf "%*s" $((TABLE_REPO_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    new_line=$(printf "%*s" $((TABLE_NEW_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    update_line=$(printf "%*s" $((TABLE_UPDATE_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    exists_line=$(printf "%*s" $((TABLE_EXISTS_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    skipped_line=$(printf "%*s" $((TABLE_SKIPPED_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    status_line=$(printf "%*s" $((TABLE_STATUS_WIDTH + 2)) "" | sed "s/ /$horizontal/g")
+    
+    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n" \
+        "$left" "$repo_line" "$middle" "$new_line" "$middle" "$update_line" "$middle" "$exists_line" "$middle" "$skipped_line" "$middle" "$status_line" "$right"
 }
 
 function draw_table_header() {
-    printf "│ %-*s │ %*s │ %*s │ %*s │ %*s │ %-*s │\n" \
-        $TABLE_REPO_WIDTH "Repository" \
-        $TABLE_COUNT_WIDTH "New" \
-        $TABLE_COUNT_WIDTH "Update" \
-        $TABLE_COUNT_WIDTH "Exists" \
-        $TABLE_COUNT_WIDTH "Skipped" \
-        $TABLE_STATUS_WIDTH "Status"
+    printf "║ %-${TABLE_REPO_WIDTH}s │ %-${TABLE_NEW_WIDTH}s │ %-${TABLE_UPDATE_WIDTH}s │ %-${TABLE_EXISTS_WIDTH}s │ %-${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
+        "Repository" "New" "Update" "Exists" "Skipped" "Status"
 }
 
 function draw_table_row() {
-    local repo_name="$1"
-    local new_count="$2"
-    local update_count="$3"
-    local exists_count="$4"
-    local skipped_count="$5"
+    local repo="$1"
+    local new="$2"
+    local update="$3"
+    local exists="$4"
+    local skipped="$5"
     local status="$6"
     
-    printf "│ %-*s │ %*s │ %*s │ %*s │ %*s │ %-*s │\n" \
-        $TABLE_REPO_WIDTH "$repo_name" \
-        $TABLE_COUNT_WIDTH "$new_count" \
-        $TABLE_COUNT_WIDTH "$update_count" \
-        $TABLE_COUNT_WIDTH "$exists_count" \
-        $TABLE_COUNT_WIDTH "$skipped_count" \
-        $TABLE_STATUS_WIDTH "$status"
+    # Truncate repository name if it's longer than the allocated width
+    local truncated_repo="$repo"
+    if [[ ${#repo} -gt $TABLE_REPO_WIDTH ]]; then
+        truncated_repo="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
+    fi
+    
+    printf "║ %-${TABLE_REPO_WIDTH}s │ %${TABLE_NEW_WIDTH}s │ %${TABLE_UPDATE_WIDTH}s │ %${TABLE_EXISTS_WIDTH}s │ %${TABLE_SKIPPED_WIDTH}s │ %-${TABLE_STATUS_WIDTH}s ║\n" \
+        "$truncated_repo" "$new" "$update" "$exists" "$skipped" "$status"
 }
 
 function generate_summary_table() {
@@ -469,7 +473,7 @@ function generate_summary_table() {
         if ((new_count > 0 || update_count > 0)); then
             status="Modified"
         elif ((exists_count > 0)); then
-            status="Unchanged"
+            status="Clean"
         elif ((skipped_count > 0)); then
             status="Skipped"
         else
