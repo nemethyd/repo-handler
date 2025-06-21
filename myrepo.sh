@@ -28,6 +28,9 @@ VERSION=2.1.12
 # Repository filtering (empty means process all enabled repos)
 FILTER_REPOS=()
 
+# Package name filtering (empty means process all packages)
+NAME_FILTER=""
+
 # Default configuration values
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
@@ -46,6 +49,9 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 # JOB_STATUS_CHECK_INTERVAL, XARGS_BATCH_SIZE, MAX_PARALLEL_DOWNLOADS
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
 : "${REPOQUERY_PARALLEL:=4}"
+
+# Debug mode default
+: "${DEBUG_MODE:=0}"
 
 # Log directory
 LOG_DIR="/var/log/myrepo"
@@ -183,11 +189,12 @@ function detect_module_info() {
     local package_name="$1"
     local package_release="$2"
     local package_arch="$3"
+    local package_version="$4"  # Add package version parameter
     
     # Check if package release contains module pattern: .module+
     if [[ "$package_release" =~ \.module\+([^+]+)\+([^+]+)\+([^.]+) ]]; then
         # Extract module components including platform
-        local platform="${BASH_REMATCH[1]}"    # e.g., "el8.6.0"
+        local platform="${BASH_REMATCH[1]}"    # e.g., "el9.6.0"
         local version="${BASH_REMATCH[2]}"     # e.g., "90614"
         local context="${BASH_REMATCH[3]}"     # e.g., "f11b29ab"
         
@@ -196,8 +203,8 @@ function detect_module_info() {
         local module_name stream
         if [[ "$package_name" =~ ^([^-]+) ]]; then
             module_name="${BASH_REMATCH[1]}"
-            # Extract major version as stream (e.g., 18 from 18.20.8)
-            if [[ "$package_release" =~ ([0-9]+)\. ]]; then
+            # Extract major version as stream from package version (e.g., 18 from 18.20.8)
+            if [[ "$package_version" =~ ^([0-9]+)\. ]]; then
                 stream="${BASH_REMATCH[1]}"
             else
                 stream="default"
@@ -725,24 +732,31 @@ function get_package_status() {
     local found_other=0
     shopt -s nullglob
     for rpm_file in "$repo_path"/"${package_name}"-*."$package_arch".rpm; do
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Examining RPM file: $rpm_file"
         local rpm_epoch rpm_version rpm_release rpm_arch
         rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
         rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>/dev/null)
         rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>/dev/null)
         rpm_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>/dev/null)
         [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
+        
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "RPM details: name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null) epoch=$rpm_epoch version=$rpm_version release=$rpm_release arch=$rpm_arch"
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Comparing with: name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch"
+        
         # Compare all fields for exact match
         if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
            && "$epoch" == "$rpm_epoch" \
            && "$package_version" == "$rpm_version" \
            && "$package_release" == "$rpm_release" \
            && "$package_arch" == "$rpm_arch" ]]; then
+            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match!"
             found_exact=1
             break
         else
             # If name and arch match, but version/release/epoch differ, mark as other
             if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
                && "$package_arch" == "$rpm_arch" ]]; then
+                [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found name/arch match but different version/release/epoch"
                 found_other=1
             fi
         fi
@@ -894,6 +908,7 @@ function load_config() {
             LOG_DIR) LOG_DIR="$value" ;;
             LOG_LEVEL) LOG_LEVEL="$value" ;;
             MAX_PACKAGES) MAX_PACKAGES="$value" ;;
+            NAME_FILTER) NAME_FILTER="$value" ;;
             PARALLEL) PARALLEL="$value" ;;
             RPMBUILD_PATH) RPMBUILD_PATH="$value" ;;
             SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
@@ -1007,7 +1022,14 @@ function parse_args() {
             ;;
         --debug)
             shift
-            DEBUG_MODE=$1
+            # Check if next argument is a number, otherwise default to 1
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                DEBUG_MODE=$1
+            else
+                DEBUG_MODE=1
+                # Put back the argument that wasn't a debug level
+                set -- "$1" "$@"
+            fi
             ;;
         --dry-run)
             DRY_RUN=1
@@ -1042,6 +1064,10 @@ function parse_args() {
             shift
             IFS=',' read -r -a FILTER_REPOS <<<"$1"
             ;;
+        --name-filter)
+            shift
+            NAME_FILTER="$1"
+            ;;
         --user-mode)
             IS_USER_MODE=1
             ;;
@@ -1073,6 +1099,7 @@ function parse_args() {
             echo "  --local-repos REPOS       Comma-separated list of local repos (default: ol9_edge,pgdg-common,pgdg16)"
             echo "  --log-dir PATH            Set log directory (default: /var/log/myrepo)"
             echo "  --max-packages NUM        Maximum number of packages to process (default: 0)"
+            echo "  --name-filter REGEX       Filter packages by name using regex pattern (default: none)"
             echo "  --repos REPOS             Comma-separated list of repos to process (default: all enabled)"
             echo "  --parallel NUM            Number of parallel processes (default: 2)"
             echo "  --shared-repo-path PATH   Set shared repository path (default: /mnt/hgfs/ForVMware/ol9_repos)"
@@ -1269,7 +1296,7 @@ function process_packages() {
         pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
         
         # Detect and store module information if this is a module package
-        if module_info_string=$(detect_module_info "$package_name" "$package_release" "$package_arch"); then
+        if module_info_string=$(detect_module_info "$package_name" "$package_release" "$package_arch" "$package_version"); then
             # Store module info: module_key -> "name:stream:platform:version:context:arch"
             # shellcheck disable=SC2034  # module_info array used globally for module metadata storage
             module_info["$pkg_key"]="$module_info_string"
@@ -1685,11 +1712,31 @@ function traverse_local_repos() {
     if ((SYNC_ONLY == 0)); then
 
         # Fetch installed packages list with detailed information
-        log "INFO" "Fetching list of installed packages..."
-
-        if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>"$MYREPO_ERR_FILE"; then
-            log "ERROR" "Failed to fetch installed packages list."
-            exit 1
+        if [[ -n "$NAME_FILTER" ]]; then
+            log "INFO" "Fetching list of installed packages (filtered by name pattern: $NAME_FILTER)..."
+            # Use dnf list with grep to filter by name pattern at the source
+            if dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' 2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE"; then
+                local package_count
+                package_count=$(wc -l < "$INSTALLED_PACKAGES_FILE")
+                log "INFO" "Found $package_count installed packages matching filter '$NAME_FILTER'"
+            else
+                # Check if dnf failed or if grep simply found no matches
+                local dnf_exit_code=${PIPESTATUS[0]}
+                if [[ $dnf_exit_code -ne 0 ]]; then
+                    log "ERROR" "DNF command failed while fetching installed packages list."
+                    exit 1
+                else
+                    # No packages matched the filter - this is not an error
+                    log "INFO" "No installed packages match the name filter '$NAME_FILTER'"
+                    echo -n > "$INSTALLED_PACKAGES_FILE"  # Create empty file
+                fi
+            fi
+        else
+            log "INFO" "Fetching list of installed packages..."
+            if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                log "ERROR" "Failed to fetch installed packages list."
+                exit 1
+            fi
         fi
 
         # Fetch the list of enabled repositories
@@ -1731,6 +1778,11 @@ function traverse_local_repos() {
             log "INFO" "Repository filtering enabled. Processing only: ${FILTER_REPOS[*]}"
         else
             log "INFO" "Processing packages from all enabled repositories"
+        fi
+
+        # Show name filtering status
+        if [[ -n "$NAME_FILTER" ]]; then
+            log "INFO" "Package name filtering enabled. Filter pattern: $NAME_FILTER"
         fi
 
         # Processing installed packages

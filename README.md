@@ -4,7 +4,10 @@
 
 ## Overview
 
-The `repo-handler` project provides a bash script designed to| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
+The `repo-handler` project provides a bash script designed to|| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
+| `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern during processing.  |
+| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
+| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
 | `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |
 | `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync'ed copy.             |anage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
 
@@ -24,6 +27,7 @@ The script helps:
 - **Batch Processing**: Efficiently processes packages in batches for performance optimization.
 - **Automatic Cleanup**: Removes older or uninstalled package versions from the local repository.
 - **Synchronization**: Keeps the local repository in sync with a shared repository using `rsync`.
+- **Flexible Filtering**: Supports both repository-level and package name-level filtering for precise control over what gets processed.
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
 - **Debugging Options**: Includes a `DEBUG_MODE` for verbose output during script execution.
@@ -101,6 +105,12 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
 EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 
+# Filter packages by name using regex pattern (empty = process all packages)
+# NAME_FILTER=""
+
+# Filter repositories to process (comma-separated list, empty = process all enabled)
+# FILTER_REPOS=""
+
 # myrepo.cfg – Configuration file for myrepo.sh
 ...
 # Re‑scan everything on the next run (1 = true, 0 = false).
@@ -139,6 +149,52 @@ Some repositories may contain packages installed on the golden-copy machine but 
 2. **Removed from the local repository path if already present**.
 
 This feature is useful for temporary or special-purpose repositories, such as **Copr repositories**.
+
+### Package Name Filtering Feature
+
+The `--name-filter` option allows you to process only specific packages based on their name patterns, making the script more efficient for targeted operations. This feature applies regex pattern matching to package names during the installed package fetching phase.
+
+#### Use Cases:
+
+- **Testing**: Process only specific packages to test repository functionality
+- **Selective Mirroring**: Mirror only packages matching certain naming patterns (e.g., all `nodejs*` packages)
+- **Debugging**: Isolate specific packages for troubleshooting
+- **Performance**: Reduce processing time when only certain packages are needed
+
+#### Examples:
+
+```bash
+# Process only Firefox packages
+./myrepo.sh --name-filter "firefox"
+
+# Process all NodeJS-related packages
+./myrepo.sh --name-filter "nodejs"
+
+# Process packages starting with "lib" (using regex)
+./myrepo.sh --name-filter "^lib"
+
+# Combine with repository filtering for precise control
+./myrepo.sh --repos ol9_appstream --name-filter "firefox|chrome"
+```
+
+#### Configuration File Support:
+
+You can also set the name filter in `myrepo.cfg`:
+
+```bash
+# Filter packages by name using regex pattern
+NAME_FILTER="firefox"
+```
+
+#### Important Notes:
+
+- **Regex Support**: The pattern supports extended regular expressions (ERE)
+- **Efficient Processing**: Filtering is applied at the DNF query level, not after fetching all packages
+- **Graceful Handling**: If no packages match the filter, the script continues normally without errors
+- **Case Sensitive**: Pattern matching is case-sensitive by default
+- **Combines with Repository Filtering**: Works together with `--repos` for fine-grained control
+```
+
 
 ### Configuration: Parallel Metadata Fetching
 
@@ -192,7 +248,14 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 #### Example:
 
 ```bash
+# Basic usage with debugging and custom settings
 ./myrepo.sh --debug 1 --batch-size 20 --repos ol9_edge,pgdg16 --local-repo-path /custom/repo
+
+# Process only Firefox packages from ol9_appstream repository
+./myrepo.sh --repos ol9_appstream --name-filter "firefox" --debug 1
+
+# Process all NodeJS packages with dry-run to see what would happen
+./myrepo.sh --name-filter "nodejs" --dry-run --debug 1
 ```
 
 ### How It Works
@@ -210,6 +273,8 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 - **Debugging**: Increase the `DEBUG_MODE` to get more detailed output, which can help in troubleshooting.
 - **Log Level Control**: Adjust the `LOG_LEVEL` to control the verbosity of log messages.
 - **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
+- **Efficient Filtering**: Use `--name-filter` combined with `--repos` for precise control over package processing and improved performance.
+- **Testing Filters**: Always test new name filter patterns with `--dry-run` first to verify they match the expected packages.
 
 ## License
 
