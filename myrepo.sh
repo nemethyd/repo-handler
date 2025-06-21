@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.11
+VERSION=2.1.12
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
