@@ -11,14 +11,14 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.7
+VERSION=2.1.9
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
 : "${DEBUG_MODE:=0}"
 : "${DRY_RUN:=0}"
 : "${FULL_REBUILD:=0}"
-: "${GROUP_OUTPUT:=0}"
+: "${GROUP_OUTPUT:=1}"
 : "${IS_USER_MODE:=0}"
 : "${LOG_LEVEL:=INFO}"
 : "${MAX_PACKAGES:=0}"
@@ -54,7 +54,11 @@ TEMP_FILES=()
 
 CONFIG_FILE="myrepo.cfg"
 
+# Summary table formatting constants
 PADDING_LENGTH=26
+TABLE_REPO_WIDTH=$PADDING_LENGTH  # Repository name column width
+TABLE_COUNT_WIDTH=8               # Numeric count column width  
+TABLE_STATUS_WIDTH=12             # Status column width
 
 # Declare associative arrays
 declare -A used_directories
@@ -64,6 +68,12 @@ declare -A available_repo_packages
 declare -A PROCESSED_PACKAGE_MAP
 
 declare -A repo_cache
+
+# Statistics tracking arrays
+declare -A stats_new_count
+declare -A stats_update_count  
+declare -A stats_exists_count
+declare -A stats_skipped_count
 
 
 ######################################
@@ -234,6 +244,8 @@ function download_repo_metadata() {
     local cache_max_age=$((CACHE_MAX_AGE_HOURS * 3600))  # Convert hours to seconds
     local hour
     hour=$(date +%H)
+    # Remove leading zero to avoid octal interpretation
+    hour=$((10#$hour))
     if (( hour >= NIGHT_START_HOUR || hour <= NIGHT_END_HOUR )); then
         cache_max_age=$((CACHE_MAX_AGE_HOURS_NIGHT * 3600))
     fi
@@ -341,6 +353,139 @@ function download_repo_metadata() {
             available_repo_packages["$repo"]=$(cat "$cache_file")
         fi
     done
+}
+
+function draw_table_border() {
+    local border_type="${1:-top}" # top, middle, bottom
+    
+    # Box drawing characters
+    case "$border_type" in
+        "top")
+            local left="┌" middle="┬" right="┐" horizontal="─"
+            ;;
+        "middle")
+            local left="├" middle="┼" right="┤" horizontal="─"
+            ;;
+        "bottom")
+            local left="└" middle="┴" right="┘" horizontal="─"
+            ;;
+    esac
+    
+    printf "%s" "$left"
+    printf "%*s" $TABLE_REPO_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_COUNT_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s" "$middle"
+    printf "%*s" $TABLE_STATUS_WIDTH "" | tr ' ' "$horizontal"
+    printf "%s\n" "$right"
+}
+
+function draw_table_header() {
+    printf "│ %-*s │ %*s │ %*s │ %*s │ %*s │ %-*s │\n" \
+        $TABLE_REPO_WIDTH "Repository" \
+        $TABLE_COUNT_WIDTH "New" \
+        $TABLE_COUNT_WIDTH "Update" \
+        $TABLE_COUNT_WIDTH "Exists" \
+        $TABLE_COUNT_WIDTH "Skipped" \
+        $TABLE_STATUS_WIDTH "Status"
+}
+
+function draw_table_row() {
+    local repo_name="$1"
+    local new_count="$2"
+    local update_count="$3"
+    local exists_count="$4"
+    local skipped_count="$5"
+    local status="$6"
+    
+    printf "│ %-*s │ %*s │ %*s │ %*s │ %*s │ %-*s │\n" \
+        $TABLE_REPO_WIDTH "$repo_name" \
+        $TABLE_COUNT_WIDTH "$new_count" \
+        $TABLE_COUNT_WIDTH "$update_count" \
+        $TABLE_COUNT_WIDTH "$exists_count" \
+        $TABLE_COUNT_WIDTH "$skipped_count" \
+        $TABLE_STATUS_WIDTH "$status"
+}
+
+function generate_summary_table() {
+    local total_new=0 total_update=0 total_exists=0 total_skipped=0
+    
+    # Calculate totals - check if arrays exist first
+    if [[ ${#stats_new_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_new_count[@]}"; do
+            ((total_new += stats_new_count[$repo]))
+        done
+    fi
+    if [[ ${#stats_update_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_update_count[@]}"; do
+            ((total_update += stats_update_count[$repo]))
+        done
+    fi
+    if [[ ${#stats_exists_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_exists_count[@]}"; do
+            ((total_exists += stats_exists_count[$repo]))
+        done
+    fi
+    if [[ ${#stats_skipped_count[@]} -gt 0 ]]; then
+        for repo in "${!stats_skipped_count[@]}"; do
+            ((total_skipped += stats_skipped_count[$repo]))
+        done
+    fi
+    
+    # Collect all unique repo names and sort them
+    local all_repos=()
+    for repo in "${!stats_new_count[@]}" "${!stats_update_count[@]}" "${!stats_exists_count[@]}" "${!stats_skipped_count[@]}"; do
+        if [[ -n "$repo" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+            all_repos+=("$repo")
+        fi
+    done
+    
+    # Sort repositories alphabetically
+    mapfile -t all_repos < <(printf '%s\n' "${all_repos[@]}" | sort)
+    
+    # Print summary table
+    echo
+    log "INFO" "Package Processing Summary:"
+    echo
+    draw_table_border "top"
+    draw_table_header
+    draw_table_border "middle"
+    
+    for repo in "${all_repos[@]}"; do
+        local new_count=${stats_new_count[$repo]:-0}
+        local update_count=${stats_update_count[$repo]:-0}  
+        local exists_count=${stats_exists_count[$repo]:-0}
+        local skipped_count=${stats_skipped_count[$repo]:-0}
+        local total_repo=$((new_count + update_count + exists_count + skipped_count))
+        
+        # Determine status based on activity
+        local status
+        if ((new_count > 0 || update_count > 0)); then
+            status="Modified"
+        elif ((exists_count > 0)); then
+            status="Unchanged"
+        elif ((skipped_count > 0)); then
+            status="Skipped"
+        else
+            status="Empty"
+        fi
+        
+        # Only show repos that had some activity
+        if ((total_repo > 0)); then
+            draw_table_row "$repo" "$new_count" "$update_count" "$exists_count" "$skipped_count" "$status"
+        fi
+    done
+    
+    draw_table_border "middle"
+    draw_table_row "TOTAL" "$total_new" "$total_update" "$total_exists" "$total_skipped" "Summary"
+    draw_table_border "bottom"
+    echo
 }
 
 function get_package_status() {
@@ -652,8 +797,8 @@ function parse_args() {
         --full-rebuild)
             FULL_REBUILD=1
             ;;
-        --group-output)
-            GROUP_OUTPUT=1
+        --no-group-output)
+            GROUP_OUTPUT=0
             ;;
         --local-repo-path)
             shift
@@ -697,7 +842,7 @@ function parse_args() {
             echo "  --dry-run                 Perform a dry run without making changes"
             echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
             echo "  --full-rebuild            Perform a full rebuild of the repository"
-            echo "  --group-output            Group consecutive EXISTS package outputs by repository"
+            echo "  --no-group-output         Disable grouping of EXISTS package outputs (show individual messages)"
             echo "  --local-repo-path PATH    Set local repository path (default: /repo)"
             echo "  --local-repos REPOS       Comma-separated list of local repos (default: ol9_edge,pgdg-common,pgdg16)"
             echo "  --log-dir PATH            Set log directory (default: /var/log/myrepo)"
@@ -727,7 +872,6 @@ function parse_args() {
         shift
     done
 }
-
 
 # Then add this function before is_package_in_local_sources() is called
 function populate_repo_cache() {
@@ -915,6 +1059,9 @@ function process_packages() {
 
         case $package_status in
         "EXISTS")
+            # Track statistics
+            ((stats_exists_count["$repo_name"]++))
+            
             if [[ $GROUP_OUTPUT -eq 1 ]]; then
                 # Collect for batch summary
                 ((exists_count["$repo_name"]++))
@@ -930,6 +1077,9 @@ function process_packages() {
             mark_processed "$pkg_key"
             ;;
         "NEW")
+            # Track statistics
+            ((stats_new_count["$repo_name"]++))
+            
             if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
                 log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is new." "\e[33m" # Yellow
                 download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
@@ -939,6 +1089,9 @@ function process_packages() {
             fi
             ;;
         "UPDATE")
+            # Track statistics
+            ((stats_update_count["$repo_name"]++))
+            
             if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
                 remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
                 log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is updated." "\e[34m" # Blue
@@ -1355,6 +1508,29 @@ function traverse_local_repos() {
             repo_name=$(get_repo_name "$package_repo")
             if [[ -n "$repo_path" ]]; then
                 used_directories["$repo_name"]="$repo_path"
+                
+                # Check package status and update statistics
+                if ! package_status=$(get_package_status "$repo_name" "$package_name" "$epoch_version" "$package_version" "$package_release" "$package_arch" "$repo_path"); then
+                    log "WARN" "Failed to determine status for package: $package_name-$package_version-$package_release.$package_arch"
+                    package_status="UNKNOWN"
+                fi
+                
+                # Update statistics based on package status
+                case $package_status in
+                    "EXISTS")
+                        ((stats_exists_count["$repo_name"]++))
+                        ;;
+                    "NEW")
+                        ((stats_new_count["$repo_name"]++))
+                        ;;
+                    "UPDATE")
+                        ((stats_update_count["$repo_name"]++))
+                        ;;
+                    *)
+                        ((stats_skipped_count["$repo_name"]++))
+                        ;;
+                esac
+                
                 batch_packages+=("$repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path")
                 if [[ $DEBUG_MODE -ge 2 ]]; then
                     log "DEBUG" "Adding to batch: $repo_name|$package_name|$epoch_version|$package_version|$package_release|$package_arch|$repo_path" >&2
@@ -1606,5 +1782,8 @@ traverse_local_repos
 update_and_sync_repos
 cleanup_metadata_cache
 cleanup
+
+# Generate and display summary table
+generate_summary_table
 
 log "INFO" "myrepo.sh Version $VERSION completed."
