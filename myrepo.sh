@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.12
+VERSION=2.1.13
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
@@ -49,6 +49,7 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 # JOB_STATUS_CHECK_INTERVAL, XARGS_BATCH_SIZE, MAX_PARALLEL_DOWNLOADS
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
 : "${REPOQUERY_PARALLEL:=4}"
+: "${REFRESH_METADATA:=0}"
 
 # Debug mode default
 : "${DEBUG_MODE:=0}"
@@ -730,8 +731,17 @@ function get_package_status() {
     # Find all matching RPMs for this package name and arch in the repo_path
     local found_exact=0
     local found_other=0
+    local found_existing=0
     shopt -s nullglob
     for rpm_file in "$repo_path"/"${package_name}"-*."$package_arch".rpm; do
+        # Validate that this is actually the package we're looking for, not a sub-package
+        local rpm_name
+        rpm_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)
+        
+        # Skip if the RPM name doesn't exactly match what we're looking for
+        if [[ "$rpm_name" != "$package_name" ]]; then
+            continue
+        fi
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Examining RPM file: $rpm_file"
         local rpm_epoch rpm_version rpm_release rpm_arch
         rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
@@ -739,10 +749,10 @@ function get_package_status() {
         rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>/dev/null)
         rpm_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>/dev/null)
         [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
-        
+
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "RPM details: name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null) epoch=$rpm_epoch version=$rpm_version release=$rpm_release arch=$rpm_arch"
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Comparing with: name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch"
-        
+
         # Compare all fields for exact match
         if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
            && "$epoch" == "$rpm_epoch" \
@@ -752,13 +762,12 @@ function get_package_status() {
             [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match!"
             found_exact=1
             break
+        elif [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
+              && "$package_arch" == "$rpm_arch" ]]; then
+            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found name/arch match but different version/release/epoch"
+            found_other=1
         else
-            # If name and arch match, but version/release/epoch differ, mark as other
-            if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
-               && "$package_arch" == "$rpm_arch" ]]; then
-                [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found name/arch match but different version/release/epoch"
-                found_other=1
-            fi
+            found_existing=1
         fi
     done
     shopt -u nullglob
@@ -766,6 +775,8 @@ function get_package_status() {
         echo "EXISTS"
     elif ((found_other)); then
         echo "UPDATE"
+    elif ((found_existing)); then
+        echo "EXISTING"
     else
         echo "NEW"
     fi
@@ -774,7 +785,8 @@ function get_package_status() {
 # Left here for consistency
 function get_repo_name() {
     local package_repo=$1
-    echo "$package_repo"
+    # Normalize repo name by removing @ prefix if present
+    echo "${package_repo#@}"
 }
 
 function get_repo_path() {
@@ -784,8 +796,11 @@ function get_repo_path() {
         return
     fi
 
-    # Construct the path based on repository name
-    echo "$LOCAL_REPO_PATH/$package_repo/getPackage"
+    # Normalize repo name by removing @ prefix if present
+    local normalized_repo="${package_repo#@}"
+    
+    # Construct the path based on normalized repository name
+    echo "$LOCAL_REPO_PATH/$normalized_repo/getPackage"
 }
 
 function is_package_in_local_sources() {
@@ -923,6 +938,7 @@ function load_config() {
             XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;  # Backward compatibility
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;  # Backward compatibility
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
+            REFRESH_METADATA) REFRESH_METADATA="$value" ;;
             *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
@@ -1082,6 +1098,9 @@ function parse_args() {
         --sync-only)
             SYNC_ONLY=1
             ;;
+        --refresh-metadata)
+            REFRESH_METADATA=1
+            ;;
         --version)
             echo "myrepo.sh Version $VERSION"
             exit 0
@@ -1105,6 +1124,7 @@ function parse_args() {
             echo "  --shared-repo-path PATH   Set shared repository path (default: /mnt/hgfs/ForVMware/ol9_repos)"
             echo "  --sync-only               Only perform createrepo and rsync steps"
             echo "  --user-mode               Run without sudo privileges"
+            echo "  --refresh-metadata        Force a refresh of DNF metadata cache"
             echo "  --version                 Print script version and exit"
             echo "  --help                    Display this help message and exit"
             exit 0
@@ -1138,7 +1158,9 @@ function populate_repo_cache() {
             continue
         fi
         
-        repo_path="$LOCAL_REPO_PATH/$repo/getPackage"
+        # Normalize repo name by removing @ prefix if present  
+        local normalized_repo="${repo#@}"
+        repo_path="$LOCAL_REPO_PATH/$normalized_repo/getPackage"
         if [[ -d "$repo_path" ]]; then
             # Create a temporary file to store package information
             local tmp_file
@@ -1374,6 +1396,13 @@ function process_packages() {
                 log "INFO" "$(align_repo_name "$repo_name"): Skipping update for local package $package_name-$package_version-$package_release.$package_arch." "\e[34m" # Blue
             fi
             ;;
+        "EXISTING")
+            # Track statistics - treat as skipped since it's not an exact match
+            ((stats_skipped_count["$repo_name"]++))
+            
+            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Package $package_name-$package_version-$package_release.$package_arch has different version in repository." "\e[90m" # Gray
+            mark_processed "$pkg_key"
+            ;;
         *)
             log "ERROR" "$(align_repo_name "$repo_name"): Unknown package status '$package_status' for $package_name-$package_version-$package_release.$package_arch." "\e[31m" # Red
             ;;
@@ -1542,9 +1571,30 @@ function process_rpm_file() {
 
 }
 
+# Refresh DNF metadata cache if requested
+function refresh_metadata() {
+    if ((REFRESH_METADATA == 1)); then
+        log "INFO" "Forcing DNF metadata refresh as requested (--refresh-metadata)"
+        if ((DRY_RUN)); then
+            log "INFO" "Would run 'dnf clean all && dnf makecache' (dry-run)"
+        else
+            if ! dnf clean all >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                log "WARN" "Failed to clean DNF cache, proceeding anyway..."
+            fi
+            if ! dnf makecache >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                log "WARN" "Failed to make DNF cache, proceeding anyway..."
+            else
+                log "INFO" "DNF metadata cache refreshed successfully."
+            fi
+        fi
+    fi
+}
+
 function remove_excluded_repos() {
     for repo in "${EXCLUDED_REPOS[@]}"; do
-        repo_path="$LOCAL_REPO_PATH/$repo"
+        # Normalize repo name by removing @ prefix if present
+        local normalized_repo="${repo#@}"
+        repo_path="$LOCAL_REPO_PATH/$normalized_repo"
 
         # Remove the actual repository directory if it exists
         if [[ -d "$repo_path" ]]; then
@@ -1715,7 +1765,7 @@ function traverse_local_repos() {
         if [[ -n "$NAME_FILTER" ]]; then
             log "INFO" "Fetching list of installed packages (filtered by name pattern: $NAME_FILTER)..."
             # Use dnf list with grep to filter by name pattern at the source
-            if dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' 2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE"; then
+            if dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}'  2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE"; then
                 local package_count
                 package_count=$(wc -l < "$INSTALLED_PACKAGES_FILE")
                 log "INFO" "Found $package_count installed packages matching filter '$NAME_FILTER'"
@@ -1804,13 +1854,15 @@ function traverse_local_repos() {
             fi
             
             # Skip if the package is in the excluded list
-            if [[ "${EXCLUDED_REPOS[*]}" == *" ${package_repo} "* ]]; then
+            # Normalize the repository name for comparison
+            local normalized_package_repo="${package_repo#@}"
+            if [[ " ${EXCLUDED_REPOS[*]} " == *" ${package_repo} "* ]] || [[ " ${EXCLUDED_REPOS[*]} " == *" ${normalized_package_repo} "* ]]; then
                 [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Skipping package $package_name from excluded repository: $package_repo"
                 continue
             fi
             
             # Skip if repository filtering is enabled and this repo is not in the filter list
-            if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${package_repo}\  ]]; then
+            if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${package_repo}\  ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${normalized_package_repo}\  ]]; then
                 [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Skipping package $package_name from non-filtered repository: $package_repo"
                 continue
             fi
@@ -2120,13 +2172,13 @@ function validate_config() {
     fi
 }
 
-# Improved function to wait for background jobs with timeout detection
+# Improved function to wait for background jobs with reduced verbosity
 function wait_for_jobs() {
     local current_jobs
     local previous_jobs=0
     local wait_count=0
-    local report_interval=60  # Report potentially slow jobs after this many seconds
-    
+    local report_interval=60  # Report every 60 seconds
+
     while true; do
         current_jobs=$(jobs -rp | wc -l)
         
@@ -2138,11 +2190,11 @@ function wait_for_jobs() {
         # Check if job count is changing
         if ((current_jobs == previous_jobs)); then
             ((wait_count++))
-            
-            # After waiting, just report progress but don't kill
+
+            # After waiting, report progress but suppress repeated messages
             if ((wait_count % report_interval == 0)); then
                 log "INFO" "Some DNF operations are taking longer than expected (${wait_count}s). This is normal for large packages or slow repositories."
-                
+
                 # Optionally show what's running for debugging but don't kill anything
                 if ((DEBUG_MODE >= 1)); then
                     log "DEBUG" "Current running jobs:"
@@ -2154,8 +2206,10 @@ function wait_for_jobs() {
             wait_count=0
             previous_jobs=$current_jobs
         fi
-        
-        log "INFO" "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}"
+
+        if ((wait_count % report_interval == 0)); then
+            log "INFO" "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}"
+        fi
         sleep 1
     done
 }
@@ -2176,6 +2230,7 @@ validate_config
 check_user_mode
 prepare_log_files
 log "INFO" "Starting myrepo.sh Version $VERSION"
+refresh_metadata
 create_helper_files
 load_processed_packages
 populate_repo_cache
