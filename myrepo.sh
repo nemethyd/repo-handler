@@ -744,17 +744,16 @@ function get_package_status() {
         fi
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Examining RPM file: $rpm_file"
         local rpm_epoch rpm_version rpm_release rpm_arch
-        rpm_epoch=$(rpm -qp --queryformat '%{EPOCH}' "$rpm_file" 2>/dev/null)
-        rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file" 2>/dev/null)
-        rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$rpm_file" 2>/dev/null)
-        rpm_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file" 2>/dev/null)
+        local rpm_metadata
+        rpm_metadata=$(rpm -qp --queryformat '%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}' "$rpm_file" 2>/dev/null)
+        IFS='|' read -r rpm_epoch rpm_version rpm_release rpm_arch <<< "$rpm_metadata"
         [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
 
-        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "RPM details: name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null) epoch=$rpm_epoch version=$rpm_version release=$rpm_release arch=$rpm_arch"
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "RPM details: name=$rpm_name epoch=$rpm_epoch version=$rpm_version release=$rpm_release arch=$rpm_arch"
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Comparing with: name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch"
 
         # Compare all fields for exact match
-        if [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
+        if [[ "$package_name" == "$rpm_name" \
            && "$epoch" == "$rpm_epoch" \
            && "$package_version" == "$rpm_version" \
            && "$package_release" == "$rpm_release" \
@@ -762,7 +761,7 @@ function get_package_status() {
             [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match!"
             found_exact=1
             break
-        elif [[ "$package_name" == "$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)" \
+        elif [[ "$package_name" == "$rpm_name" \
               && "$package_arch" == "$rpm_arch" ]]; then
             [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found name/arch match but different version/release/epoch"
             found_other=1
