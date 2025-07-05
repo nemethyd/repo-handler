@@ -2,7 +2,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-05-25
+# Last Updated: 2025-07-01
 
 # MIT licensing
 # Purpose:
@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.13
+VERSION=2.1.15
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=10}"
 : "${CONTINUE_ON_ERROR:=0}"
@@ -45,11 +45,19 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${CACHE_CLEANUP_DAYS:=7}"
 
 # Performance and timing defaults
-# Removed unused variables from experimental batch processing:
-# JOB_STATUS_CHECK_INTERVAL, XARGS_BATCH_SIZE, MAX_PARALLEL_DOWNLOADS
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
 : "${REPOQUERY_PARALLEL:=4}"
 : "${REFRESH_METADATA:=0}"
+
+# Adaptive performance tuning variables
+: "${ADAPTIVE_TUNING:=1}"              # Enable adaptive batch/parallel tuning
+: "${MIN_BATCH_SIZE:=5}"               # Minimum batch size
+: "${MAX_BATCH_SIZE:=50}"              # Maximum batch size
+: "${MIN_PARALLEL:=1}"                 # Minimum parallel processes
+: "${MAX_PARALLEL:=8}"                 # Maximum parallel processes
+: "${PERFORMANCE_SAMPLE_SIZE:=10}"     # Number of batches to sample for performance
+: "${TUNE_INTERVAL:=5}"                # Tune every N batches
+: "${EFFICIENCY_THRESHOLD:=80}"        # Efficiency threshold for adjustments (packages/sec * 100)
 
 # Debug mode default
 : "${DEBUG_MODE:=0}"
@@ -94,10 +102,155 @@ declare -A stats_module_count   # Track module packages per repo
 declare -A module_packages      # repo_name -> list of module packages
 declare -A module_info          # module_key -> "name:stream:version:context:arch"
 
+# Performance tracking variables
+declare -a batch_times          # Array to store batch processing times
+declare -a batch_sizes          # Array to store batch sizes
+declare -a parallel_counts      # Array to store parallel process counts
+batch_counter=0                 # Counter for processed batches
+total_packages_processed=0      # Total packages processed
+performance_start_time=0        # Script start time for overall performance
+
 
 ######################################
 ### Functions section in abc order ###
 ######################################
+
+# Adaptive performance tuning functions
+function adaptive_tune_performance() {
+    # Only tune if adaptive tuning is enabled and we have enough samples
+    if [[ $ADAPTIVE_TUNING -eq 0 ]] || [[ ${#batch_times[@]} -lt $PERFORMANCE_SAMPLE_SIZE ]]; then
+        return 0
+    fi
+    
+    # Calculate average batch processing time and efficiency
+    local total_time=0
+    local total_packages=0
+    local samples_to_analyze=$PERFORMANCE_SAMPLE_SIZE
+    
+    # Use the last N samples for analysis
+    local start_index=$((${#batch_times[@]} - samples_to_analyze))
+    [[ $start_index -lt 0 ]] && start_index=0
+    
+    for ((i = start_index; i < ${#batch_times[@]}; i++)); do
+        total_time=$((total_time + batch_times[i]))
+        total_packages=$((total_packages + batch_sizes[i]))
+    done
+    
+    if [[ $total_packages -eq 0 ]]; then
+        return 0
+    fi
+    
+    local avg_time_per_package=$((total_time / total_packages))
+    local current_efficiency=$((total_packages * 100 / total_time))  # packages per second * 100
+    
+    [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Performance analysis: avg_time_per_package=${avg_time_per_package}ms, efficiency=${current_efficiency}, batch_size=$BATCH_SIZE, parallel=$PARALLEL"
+    
+    # Adaptive logic: adjust batch size and parallel processes
+    local new_batch_size=$BATCH_SIZE
+    local new_parallel=$PARALLEL
+    # Use EFFICIENCY_THRESHOLD directly (already scaled to match current_efficiency)
+    local efficiency_threshold=$EFFICIENCY_THRESHOLD
+    
+    if [[ $current_efficiency -lt $efficiency_threshold ]]; then
+        # Performance is below threshold, try to optimize
+        if [[ $avg_time_per_package -gt 100 ]]; then
+            # Slow processing - reduce batch size, potentially increase parallelism
+            new_batch_size=$((BATCH_SIZE > MIN_BATCH_SIZE ? BATCH_SIZE - 2 : MIN_BATCH_SIZE))
+            new_parallel=$((PARALLEL < MAX_PARALLEL ? PARALLEL + 1 : MAX_PARALLEL))
+        else
+            # Fast processing but low efficiency - increase batch size
+            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 5 : MAX_BATCH_SIZE))
+        fi
+    else
+        # Good performance, try to optimize further
+        if [[ $avg_time_per_package -lt 50 ]]; then
+            # Very fast processing - increase batch size
+            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 3 : MAX_BATCH_SIZE))
+        fi
+    fi
+    
+    # Apply changes if they make sense
+    if [[ $new_batch_size -ne $BATCH_SIZE ]] || [[ $new_parallel -ne $PARALLEL ]]; then
+        log "INFO" "Adaptive tuning: batch_size $BATCH_SIZE→$new_batch_size, parallel $PARALLEL→$new_parallel (efficiency: $current_efficiency)"
+        BATCH_SIZE=$new_batch_size
+        PARALLEL=$new_parallel
+        
+        # Update parallel downloads based on new settings
+        set_parallel_downloads
+    fi
+}
+
+function adaptive_initialize_performance_tracking() {
+    performance_start_time=$(date +%s%3N)
+    batch_counter=0
+    total_packages_processed=0
+    batch_times=()
+    batch_sizes=()
+    parallel_counts=()
+    
+    if [[ $ADAPTIVE_TUNING -eq 1 ]]; then
+        log "INFO" "Adaptive performance tuning enabled (batch: $MIN_BATCH_SIZE-$MAX_BATCH_SIZE, parallel: $MIN_PARALLEL-$MAX_PARALLEL)"
+    fi
+}
+
+function adaptive_track_batch_performance() {
+    local batch_start_time="$1"
+    local batch_package_count="$2"
+    
+    local batch_end_time
+    batch_end_time=$(date +%s%3N)  # milliseconds
+    local batch_duration=$((batch_end_time - batch_start_time))
+    
+    # Store performance data
+    batch_times+=("$batch_duration")
+    batch_sizes+=("$batch_package_count")
+    parallel_counts+=("$PARALLEL")
+    
+    # Keep only recent performance data (sliding window)
+    if [[ ${#batch_times[@]} -gt $((PERFORMANCE_SAMPLE_SIZE * 2)) ]]; then
+        # Remove oldest half of the data
+        local keep_count=$PERFORMANCE_SAMPLE_SIZE
+        batch_times=("${batch_times[@]: -$keep_count}")
+        batch_sizes=("${batch_sizes[@]: -$keep_count}")
+        parallel_counts=("${parallel_counts[@]: -$keep_count}")
+    fi
+    
+    ((total_packages_processed += batch_package_count))
+    ((batch_counter++))
+    
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Batch performance: ${batch_package_count} packages in ${batch_duration}ms"
+    
+    # Trigger adaptive tuning every TUNE_INTERVAL batches
+    if [[ $((batch_counter % TUNE_INTERVAL)) -eq 0 ]]; then
+        adaptive_tune_performance
+    fi
+}
+
+function adaptive_show_final_performance() {
+    # Skip performance statistics in sync-only mode
+    if [[ $SYNC_ONLY -eq 1 ]]; then
+        return 0
+    fi
+    
+    if [[ $performance_start_time -eq 0 ]]; then
+        return 0
+    fi
+    
+    local total_time=$(( $(date +%s%3N) - performance_start_time ))
+    local avg_packages_per_sec=0
+    
+    if [[ $total_time -gt 0 ]]; then
+        avg_packages_per_sec=$(( (total_packages_processed * 1000) / total_time ))
+    fi
+    
+    log "INFO" "Performance summary: $total_packages_processed packages in ${total_time}ms (${avg_packages_per_sec} pkg/sec)"
+    
+    if [[ $ADAPTIVE_TUNING -eq 1 ]] && [[ ${#batch_times[@]} -gt 0 ]]; then
+        local final_batch_size=${batch_sizes[-1]:-$BATCH_SIZE}
+        local final_parallel=${parallel_counts[-1]:-$PARALLEL}
+        log "INFO" "Final adaptive settings: batch_size=$final_batch_size, parallel=$final_parallel"
+    fi
+}
 
 function align_repo_name() {
     local repo_name="$1"
@@ -508,6 +661,11 @@ function draw_table_row_flex() {
 }
 
 function generate_summary_table() {
+    # Skip summary table in sync-only mode
+    if [[ $SYNC_ONLY -eq 1 ]]; then
+        return 0
+    fi
+    
     local total_new=0 total_update=0 total_exists=0 total_skipped=0 total_module=0
     
     # Calculate totals - check if arrays exist first
@@ -938,6 +1096,15 @@ function load_config() {
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;  # Backward compatibility
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             REFRESH_METADATA) REFRESH_METADATA="$value" ;;
+            # Adaptive performance tuning variables
+            ADAPTIVE_TUNING) ADAPTIVE_TUNING="$value" ;;
+            MIN_BATCH_SIZE) MIN_BATCH_SIZE="$value" ;;
+            MAX_BATCH_SIZE) MAX_BATCH_SIZE="$value" ;;
+            MIN_PARALLEL) MIN_PARALLEL="$value" ;;
+            MAX_PARALLEL) MAX_PARALLEL="$value" ;;
+            PERFORMANCE_SAMPLE_SIZE) PERFORMANCE_SAMPLE_SIZE="$value" ;;
+            TUNE_INTERVAL) TUNE_INTERVAL="$value" ;;
+            EFFICIENCY_THRESHOLD) EFFICIENCY_THRESHOLD="$value" ;;
             *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
@@ -1260,7 +1427,11 @@ function process_batch() {
     local batch_packages=("$@")
 
     if ((${#batch_packages[@]} > 0)); then
-        [[ DEBUG_MODE -ge 1 ]] && log "INFO" "Processing batch: ${batch_packages[*]}"
+        # Track batch start time for adaptive performance
+        local batch_start_time
+        batch_start_time=$(date +%s%3N)
+        
+        [[ DEBUG_MODE -ge 1 ]] && log "INFO" "Processing batch of ${#batch_packages[@]} packages"
         process_packages \
             "$DEBUG_MODE" \
             "${batch_packages[*]}" \
@@ -1269,6 +1440,9 @@ function process_batch() {
             "$PARALLEL" &
         # Wait for background jobs to finish before starting a new batch
         wait_for_jobs
+        
+        # Track batch performance for adaptive tuning
+        adaptive_track_batch_performance "$batch_start_time" "${#batch_packages[@]}"
     fi
 }
 
@@ -2232,6 +2406,7 @@ log "INFO" "Starting myrepo.sh Version $VERSION"
 refresh_metadata
 create_helper_files
 load_processed_packages
+adaptive_initialize_performance_tracking
 populate_repo_cache
 set_parallel_downloads
 remove_excluded_repos
@@ -2239,6 +2414,9 @@ traverse_local_repos
 update_and_sync_repos
 cleanup_metadata_cache
 cleanup
+
+# Show final adaptive performance statistics and summary table
+adaptive_show_final_performance
 
 # Generate and display summary table
 generate_summary_table
