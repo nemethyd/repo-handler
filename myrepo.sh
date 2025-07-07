@@ -1434,7 +1434,7 @@ function parse_args() {
             echo "  --repos REPOS             Comma-separated list of repos to process (default: all enabled)"
             echo "  --parallel NUM            Number of parallel processes (default: 2)"
             echo "  --shared-repo-path PATH   Set shared repository path (default: /mnt/hgfs/ForVMware/ol9_repos)"
-            echo "  --sync-only               Only perform createrepo and rsync steps"
+            echo "  --sync-only               Only perform rsync steps (skip package processing and metadata updates)"
             echo "  --user-mode               Run without sudo privileges"
             echo "  --refresh-metadata        Force a refresh of DNF metadata cache"
             echo "  --version                 Print script version and exit"
@@ -2375,11 +2375,59 @@ function extract_rpm_metadata_batch() {
 function update_and_sync_repos() {
     # Update and sync the repositories
     if [ "$MAX_PACKAGES" -eq 0 ]; then
-        log "INFO" "Updating repository metadata..."
-
-        # If SYNC_ONLY is set, we need to determine which directories to update
+        # Skip metadata updates in sync-only mode since no packages were processed
         if ((SYNC_ONLY == 1)); then
-            # Determine which repositories to process
+            log "INFO" "Skipping metadata updates in sync-only mode (no packages processed)"
+        else
+            log "INFO" "Updating repository metadata..."
+
+            for repo in "${!used_directories[@]}"; do
+                package_path="${used_directories[$repo]}"
+                repo_path=$(dirname "$package_path")
+                repo_name=$(basename "$repo_path")
+
+                if ((DRY_RUN)); then
+                    if ((USE_PARALLEL_COMPRESSION)); then
+                        log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update --workers $PARALLEL $repo_path'"
+                    else
+                        log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
+                    fi
+                    # Check if module.yaml would be generated
+                    generate_module_yaml "$repo_name" "$repo_path"
+                else
+                    log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
+                    
+                    # Fix permissions on repository directory and metadata before createrepo
+                    if [[ "$IS_USER_MODE" -eq 0 ]]; then
+                        # Ensure proper ownership and permissions for metadata creation
+                        if [[ -d "$repo_path/repodata" ]]; then
+                            sudo chown -R "$USER:$USER" "$repo_path/repodata" 2>/dev/null || true
+                        fi
+                        # Ensure the main directory is writable
+                        sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                        sudo chmod 755 "$repo_path" 2>/dev/null || true
+                    fi
+                    
+                    local createrepo_cmd="createrepo_c --update"
+                    if ((USE_PARALLEL_COMPRESSION)); then
+                        createrepo_cmd+=" --workers $PARALLEL"
+                    fi
+                    createrepo_cmd+=" \"$repo_path\""
+                    
+                    if ! eval "$createrepo_cmd" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                        log "ERROR" "$(align_repo_name "$repo_name"): Error updating metadata for $repo_path"
+                    else
+                        log "INFO" "$(align_repo_name "$repo_name"): Metadata updated successfully"
+                        # Generate module.yaml if module packages were detected for this repository
+                        generate_module_yaml "$repo_name" "$repo_path"
+                    fi
+                fi
+            done
+        fi
+
+        # If SYNC_ONLY is set, we need to determine which directories to sync
+        if ((SYNC_ONLY == 1)); then
+            # Determine which repositories to process for syncing only
             if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
                 # Use filtered repositories
                 for repo_name in "${FILTER_REPOS[@]}"; do
@@ -2396,49 +2444,6 @@ function update_and_sync_repos() {
                 done < <(find "$LOCAL_REPO_PATH" -mindepth 1 -maxdepth 1 -type d -print0)
             fi
         fi
-
-        for repo in "${!used_directories[@]}"; do
-            package_path="${used_directories[$repo]}"
-            repo_path=$(dirname "$package_path")
-            repo_name=$(basename "$repo_path")
-
-            if ((DRY_RUN)); then
-                if ((USE_PARALLEL_COMPRESSION)); then
-                    log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update --workers $PARALLEL $repo_path'"
-                else
-                    log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
-                fi
-                # Check if module.yaml would be generated
-                generate_module_yaml "$repo_name" "$repo_path"
-            else
-                log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
-                
-                # Fix permissions on repository directory and metadata before createrepo
-                if [[ "$IS_USER_MODE" -eq 0 ]]; then
-                    # Ensure proper ownership and permissions for metadata creation
-                    if [[ -d "$repo_path/repodata" ]]; then
-                        sudo chown -R "$USER:$USER" "$repo_path/repodata" 2>/dev/null || true
-                    fi
-                    # Ensure the main directory is writable
-                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
-                    sudo chmod 755 "$repo_path" 2>/dev/null || true
-                fi
-                
-                local createrepo_cmd="createrepo_c --update"
-                if ((USE_PARALLEL_COMPRESSION)); then
-                    createrepo_cmd+=" --workers $PARALLEL"
-                fi
-                createrepo_cmd+=" \"$repo_path\""
-                
-                if ! eval "$createrepo_cmd" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
-                    log "ERROR" "$(align_repo_name "$repo_name"): Error updating metadata for $repo_path"
-                else
-                    log "INFO" "$(align_repo_name "$repo_name"): Metadata updated successfully"
-                    # Generate module.yaml if module packages were detected for this repository
-                    generate_module_yaml "$repo_name" "$repo_path"
-                fi
-            fi
-        done
 
         log "INFO" "Creating sanitized symlinks for synchronization..."
 

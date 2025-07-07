@@ -4,7 +4,10 @@
 
 ## Overview
 
-The `repo-handler` project provides a bash script designed to|| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
+The `repo-handler` project provides a bash script designed to|| `--max-packages`    | *INT*                      | `0` | `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
+| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync'ed copy.             |
+| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup and metadata; only rsync.                 |
+| `--user-mode`       | *(flag)*                   | *off*                 | Run without `sudo`; helper files go under `$HOME/tmp`.          |              | Limit the total number of packages scanned (0 = no limit).      |
 | `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern during processing.  |
 | `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
 | `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
