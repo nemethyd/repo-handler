@@ -87,7 +87,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # MAX_PACKAGES=0
 
 # Set batch size for processing
-# BATCH_SIZE=10
+# BATCH_SIZE=50
 
 # Set the number of parallel processes
 # PARALLEL=2
@@ -227,7 +227,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 | Option              | Argument                   | Default               | Purpose                                                         |
 |---------------------|--------------------------- |-----------------------|-----------------------------------------------------------------|
-| `--batch-size`      | *INT*                      | `10`                  | Number of packages processed in one batch.                      |
+| `--batch-size`      | *INT*                      | `50`                  | Number of packages processed in one batch (optimized default). |
 | `--debug`           | *0‒2*                      | `0`                   | Extra runtime diagnostics (0 = off, 1 = basic, 2 = verbose).    |
 | `--dry-run`         | *(flag)*                   | *off*                 | Simulate all actions; make **no** changes on disk.              |
 | `--exclude-repos`   | *CSV*                      | *empty*               | Comma‑separated list of repo IDs that must **not** be mirrored. |
@@ -249,7 +249,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 ```bash
 # Basic usage with debugging and custom settings
-./myrepo.sh --debug 1 --batch-size 20 --repos ol9_edge,pgdg16 --local-repo-path /custom/repo
+./myrepo.sh --debug 1 --batch-size 60 --repos ol9_edge,pgdg16 --local-repo-path /custom/repo
 
 # Process only Firefox packages from ol9_appstream repository
 ./myrepo.sh --repos ol9_appstream --name-filter "firefox" --debug 1

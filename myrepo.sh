@@ -2,7 +2,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-07-01
+# Last Updated: 2025-07-06
 
 # MIT licensing
 # Purpose:
@@ -11,9 +11,9 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.15
+VERSION=2.1.16
 # Default values for environment variables if not set
-: "${BATCH_SIZE:=10}"
+: "${BATCH_SIZE:=50}"                  # Optimized starting point based on performance analysis
 : "${CONTINUE_ON_ERROR:=0}"
 : "${DEBUG_MODE:=0}"
 : "${DRY_RUN:=0}"
@@ -22,7 +22,7 @@ VERSION=2.1.15
 : "${IS_USER_MODE:=0}"
 : "${LOG_LEVEL:=INFO}"
 : "${MAX_PACKAGES:=0}"
-: "${PARALLEL:=4}"
+: "${PARALLEL:=6}"                     # Increased from 4
 : "${SYNC_ONLY:=0}"
 
 # Repository filtering (empty means process all enabled repos)
@@ -46,18 +46,20 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
 # Performance and timing defaults
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
-: "${REPOQUERY_PARALLEL:=4}"
+: "${REPOQUERY_PARALLEL:=8}"               # Increased from 4
 : "${REFRESH_METADATA:=0}"
+: "${IO_BUFFER_SIZE:=8192}"                # Buffer size for file operations
+: "${USE_PARALLEL_COMPRESSION:=1}"         # Enable parallel compression for createrepo
 
 # Adaptive performance tuning variables
-: "${ADAPTIVE_TUNING:=1}"              # Enable adaptive batch/parallel tuning
-: "${MIN_BATCH_SIZE:=5}"               # Minimum batch size
-: "${MAX_BATCH_SIZE:=50}"              # Maximum batch size
-: "${MIN_PARALLEL:=1}"                 # Minimum parallel processes
-: "${MAX_PARALLEL:=8}"                 # Maximum parallel processes
-: "${PERFORMANCE_SAMPLE_SIZE:=10}"     # Number of batches to sample for performance
-: "${TUNE_INTERVAL:=5}"                # Tune every N batches
-: "${EFFICIENCY_THRESHOLD:=80}"        # Efficiency threshold for adjustments (packages/sec * 100)
+: "${ADAPTIVE_TUNING:=1}"                  # Enable adaptive batch/parallel tuning
+: "${MIN_BATCH_SIZE:=20}"                  # Increased for better baseline performance
+: "${MAX_BATCH_SIZE:=100}"                 # Increased from 50
+: "${MIN_PARALLEL:=2}"                     # Increased from 1
+: "${MAX_PARALLEL:=16}"                    # Increased from 8
+: "${PERFORMANCE_SAMPLE_SIZE:=5}"          # Reduced from 10 for faster adaptation
+: "${TUNE_INTERVAL:=3}"                    # Reduced from 5 for more frequent tuning
+: "${EFFICIENCY_THRESHOLD:=60}"            # Reduced from 80 for more aggressive tuning
 
 # Debug mode default
 : "${DEBUG_MODE:=0}"
@@ -158,14 +160,14 @@ function adaptive_tune_performance() {
             new_batch_size=$((BATCH_SIZE > MIN_BATCH_SIZE ? BATCH_SIZE - 2 : MIN_BATCH_SIZE))
             new_parallel=$((PARALLEL < MAX_PARALLEL ? PARALLEL + 1 : MAX_PARALLEL))
         else
-            # Fast processing but low efficiency - increase batch size
-            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 5 : MAX_BATCH_SIZE))
+            # Fast processing but low efficiency - increase batch size more aggressively
+            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 10 : MAX_BATCH_SIZE))
         fi
     else
         # Good performance, try to optimize further
         if [[ $avg_time_per_package -lt 50 ]]; then
-            # Very fast processing - increase batch size
-            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 3 : MAX_BATCH_SIZE))
+            # Very fast processing - increase batch size aggressively
+            new_batch_size=$((BATCH_SIZE < MAX_BATCH_SIZE ? BATCH_SIZE + 8 : MAX_BATCH_SIZE))
         fi
     fi
     
@@ -250,6 +252,9 @@ function adaptive_show_final_performance() {
         local final_parallel=${parallel_counts[-1]:-$PARALLEL}
         log "INFO" "Final adaptive settings: batch_size=$final_batch_size, parallel=$final_parallel"
     fi
+    
+    # Add performance analysis and recommendations
+    analyze_performance
 }
 
 function align_repo_name() {
@@ -281,6 +286,51 @@ function check_user_mode() {
 function cleanup() {
     rm -f "$TEMP_FILE" "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE"
     rm -f "${TEMP_FILES[@]}"
+}
+
+# Performance analysis and recommendations
+function analyze_performance() {
+    if [[ $SYNC_ONLY -eq 1 ]]; then
+        return 0
+    fi
+    
+    local total_time=$(( $(date +%s%3N) - performance_start_time ))
+    local avg_packages_per_sec=0
+    
+    if [[ $total_time -gt 0 && $total_packages_processed -gt 0 ]]; then
+        avg_packages_per_sec=$(( (total_packages_processed * 1000) / total_time ))
+        
+        # Performance recommendations
+        echo
+        log "INFO" "Performance Analysis & Recommendations:"
+        
+        if [[ $avg_packages_per_sec -lt 10 ]]; then
+            log "WARN" "Low throughput detected (${avg_packages_per_sec} pkg/sec). Consider:"
+            log "INFO" "  - Increasing PARALLEL (current: $PARALLEL, max: $MAX_PARALLEL)"
+            log "INFO" "  - Increasing BATCH_SIZE (current: $BATCH_SIZE, max: $MAX_BATCH_SIZE)"
+            log "INFO" "  - Checking disk I/O performance"
+            log "INFO" "  - Enabling USE_PARALLEL_COMPRESSION (current: $USE_PARALLEL_COMPRESSION)"
+        elif [[ $avg_packages_per_sec -lt 50 ]]; then
+            log "INFO" "Moderate throughput (${avg_packages_per_sec} pkg/sec). Potential optimizations:"
+            log "INFO" "  - Fine-tune PARALLEL and BATCH_SIZE values"
+            log "INFO" "  - Consider SSD storage for better I/O performance"
+        else
+            log "INFO" "Good throughput achieved (${avg_packages_per_sec} pkg/sec)"
+        fi
+        
+        # Resource utilization recommendations
+        local cpu_cores
+        cpu_cores=$(nproc)
+        if [[ $PARALLEL -lt $((cpu_cores / 2)) ]]; then
+            log "INFO" "  - CPU utilization: Consider increasing PARALLEL (current: $PARALLEL, available cores: $cpu_cores)"
+        fi
+        
+        # Memory usage estimation
+        local memory_usage_mb=$((BATCH_SIZE * PARALLEL * 2))  # Rough estimate: 2MB per package*process
+        if [[ $memory_usage_mb -gt 1024 ]]; then
+            log "WARN" "  - High memory usage estimated (~${memory_usage_mb}MB). Monitor system resources."
+        fi
+    fi
 }
 
 function cleanup_metadata_cache() {
@@ -415,10 +465,29 @@ function download_packages() {
     done
 
     for repo_path in "${!repo_packages[@]}"; do
-        mkdir -p "$repo_path" || {
-            log_to_temp_file "Failed to create directory: $repo_path"
-            exit 1
-        }
+        # Create directory with proper permissions
+        if [[ "$IS_USER_MODE" -eq 0 ]]; then
+            # Use sudo to create directory and set permissions for multi-user access
+            sudo mkdir -p "$repo_path" || {
+                log_to_temp_file "Failed to create directory: $repo_path"
+                exit 1
+            }
+            # Set permissions to allow the current user to write to the directory
+            sudo chown "$USER:$USER" "$repo_path" || {
+                log_to_temp_file "Failed to set ownership for directory: $repo_path"
+                exit 1
+            }
+            # Ensure the directory is writable by the owner and group
+            sudo chmod 755 "$repo_path" || {
+                log_to_temp_file "Failed to set permissions for directory: $repo_path"
+                exit 1
+            }
+        else
+            mkdir -p "$repo_path" || {
+                log_to_temp_file "Failed to create directory: $repo_path"
+                exit 1
+            }
+        fi
 
         # Run download in background
         if ((DRY_RUN)); then
@@ -427,9 +496,10 @@ function download_packages() {
             {
                 log_to_temp_file "Downloading packages to $repo_path: ${repo_packages[$repo_path]}"
                 # Check if sudo is required and set the appropriate command prefix
-                DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL_DOWNLOADS download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
+                # Enhanced DNF command with better performance options
+                DNF_COMMAND="dnf --setopt=max_parallel_downloads=$PARALLEL_DOWNLOADS --setopt=fastestmirror=1 --setopt=deltarpm=0 download --arch=x86_64,noarch --destdir=$repo_path --resolve ${repo_packages[$repo_path]}"
 
-                if [[ -z "$IS_USER_MODE" ]]; then
+                if [[ "$IS_USER_MODE" -eq 0 ]]; then
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
@@ -465,8 +535,14 @@ function download_repo_metadata() {
     local repos_to_process=()
     if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
         repos_to_process=("${FILTER_REPOS[@]}")
+        log "INFO" "Repository filtering enabled: caching metadata for ${#repos_to_process[@]} filtered repositories (${repos_to_process[*]})"
     else
         repos_to_process=("${ENABLED_REPOS[@]}")
+        if [[ -n "$NAME_FILTER" ]]; then
+            log "INFO" "Name filtering enabled: caching metadata for all ${#repos_to_process[@]} enabled repositories (name filter: $NAME_FILTER)"
+        else
+            log "INFO" "Caching metadata for all ${#repos_to_process[@]} enabled repositories"
+        fi
     fi
 
     # Helper: get repomd.xml URL for a repo
@@ -558,6 +634,16 @@ function download_repo_metadata() {
     done
     # Wait for all background jobs to finish
     wait
+    
+    # Performance summary
+    local total_enabled=${#ENABLED_REPOS[@]}
+    local total_processed=${#repos_to_process[@]}
+    local skipped_repos=$((total_enabled - total_processed))
+    
+    if [[ ${#FILTER_REPOS[@]} -gt 0 && $skipped_repos -gt 0 ]]; then
+        log "INFO" "Repository filtering: processed $total_processed/$total_enabled repositories (skipped $skipped_repos for performance)"
+    fi
+    
     log "INFO" "All metadata fetch jobs finished."
     # Load metadata into available_repo_packages
     for repo in "${repos_to_process[@]}"; do
@@ -892,20 +978,23 @@ function get_package_status() {
     local found_existing=0
     shopt -s nullglob
     for rpm_file in "$repo_path"/"${package_name}"-*."$package_arch".rpm; do
-        # Validate that this is actually the package we're looking for, not a sub-package
-        local rpm_name
-        rpm_name=$(rpm -qp --queryformat '%{NAME}' "$rpm_file" 2>/dev/null)
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Examining RPM file: $rpm_file"
+        
+        # Get all metadata in one rpm call for efficiency
+        local rpm_metadata
+        rpm_metadata=$(rpm -qp --queryformat '%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}' "$rpm_file" 2>/dev/null)
+        if [[ -z "$rpm_metadata" ]]; then
+            continue
+        fi
+        
+        local rpm_name rpm_epoch rpm_version rpm_release rpm_arch
+        IFS='|' read -r rpm_name rpm_epoch rpm_version rpm_release rpm_arch <<< "$rpm_metadata"
+        [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
         
         # Skip if the RPM name doesn't exactly match what we're looking for
         if [[ "$rpm_name" != "$package_name" ]]; then
             continue
         fi
-        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Examining RPM file: $rpm_file"
-        local rpm_epoch rpm_version rpm_release rpm_arch
-        local rpm_metadata
-        rpm_metadata=$(rpm -qp --queryformat '%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}' "$rpm_file" 2>/dev/null)
-        IFS='|' read -r rpm_epoch rpm_version rpm_release rpm_arch <<< "$rpm_metadata"
-        [[ "$rpm_epoch" == "(none)" || -z "$rpm_epoch" ]] && rpm_epoch="0"
 
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "RPM details: name=$rpm_name epoch=$rpm_epoch version=$rpm_version release=$rpm_release arch=$rpm_arch"
         [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Comparing with: name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch"
@@ -936,6 +1025,36 @@ function get_package_status() {
         echo "EXISTING"
     else
         echo "NEW"
+    fi
+}
+
+# Check if a package is already installed with exact same version
+function is_exact_package_installed() {
+    local package_name="$1"
+    local epoch="$2"
+    local package_version="$3"
+    local package_release="$4"
+    local package_arch="$5"
+    
+    [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Checking if exact package is installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+    
+    # Normalize epoch for comparison
+    [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+    
+    # Check if the exact package is installed using rpm query
+    if rpm -q --qf '%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "$package_name" 2>/dev/null | while IFS='|' read -r installed_epoch installed_version installed_release installed_arch; do
+        [[ "$installed_epoch" == "(none)" || -z "$installed_epoch" ]] && installed_epoch="0"
+        
+        if [[ "$epoch" == "$installed_epoch" && "$package_version" == "$installed_version" && "$package_release" == "$installed_release" && "$package_arch" == "$installed_arch" ]]; then
+            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+            echo "EXACT_INSTALLED"
+            exit 0
+        fi
+    done | head -1; then
+        return 0
+    else
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "No exact match found for: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+        return 1
     fi
 }
 
@@ -1132,14 +1251,41 @@ function locate_local_rpm() {
 
     local rpm_path
 
-    # Search in dnf cache directory
-    rpm_path=$(find /var/cache/dnf -name "${package_name}-${package_version}-${package_release}.${package_arch}.rpm" 2>/dev/null | head -n 1)
+    # Search in multiple locations in order of preference
+    local search_paths=(
+        "/var/cache/dnf"          # DNF cache
+        "/var/cache/yum"          # YUM cache (legacy)
+        "$RPMBUILD_PATH"          # Local build directory
+        "/tmp"                    # Temporary directory
+        "$HOME/Downloads"         # User downloads directory
+    )
 
-    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-        echo "$rpm_path"
-    else
-        echo ""
+    # Try each search path
+    for search_path in "${search_paths[@]}"; do
+        if [[ -d "$search_path" ]]; then
+            # Search recursively to find RPMs in subdirectories (like x86_64/)
+            rpm_path=$(find "$search_path" -type f -name "${package_name}-${package_version}-${package_release}.${package_arch}.rpm" 2>/dev/null | head -n 1)
+            if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found local RPM at: $rpm_path"
+                echo "$rpm_path"
+                return 0
+            fi
+        fi
+    done
+
+    # If not found in standard locations, try to get the file from the installed package location
+    # This is a fallback - check if we can get the original source
+    if command -v repoquery >/dev/null 2>&1; then
+        local repo_info
+        repo_info=$(repoquery --installed --qf "%{ui_from_repo}" "$package_name-$package_version-$package_release.$package_arch" 2>/dev/null | head -1)
+        if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
+            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Package $package_name originally from repo: $repo_info"
+            # Could potentially download from the original repo if needed
+        fi
     fi
+
+    [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "No local RPM found for: ${package_name}-${package_version}-${package_release}.${package_arch}"
+    echo ""
 }
 
 # --- compact / full dual‑output logger ---
@@ -1274,7 +1420,7 @@ function parse_args() {
         --help)
             echo "Usage: myrepo.sh [OPTIONS]"
             echo "Options:"
-            echo "  --batch-size NUM          Number of packages per batch (default: 10)"
+            echo "  --batch-size NUM          Number of packages per batch (default: 50)"
             echo "  --debug LEVEL             Set debug level (default: 0)"
             echo "  --dry-run                 Perform a dry run without making changes"
             echo "  --exclude-repos REPOS     Comma-separated list of repos to exclude (default: none)"
@@ -1333,18 +1479,11 @@ function populate_repo_cache() {
             tmp_file=$(mktemp)
             TEMP_FILES+=("$tmp_file")
             
-            # Find all RPMs and extract their metadata
-            # shellcheck disable=SC2016 # Variables are intentionally not expanded in parent shell
-            find "$repo_path" -type f -name "*.rpm" -print0 | \
-            xargs -0 -r -n 10 sh -c '
-                for rpm_file in "$@"; do
-                    if meta=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
-                        # Handle (none) epoch
-                        meta=${meta//(none)/0}
-                        echo "$meta"
-                    fi
-                done
-            ' _ >> "$tmp_file"
+            # Use the efficient batch metadata extraction
+            extract_rpm_metadata_batch "$repo_path" "$tmp_file"
+            
+            # Handle (none) epoch values in the cached data
+            sed -i 's/|(none)|/|0|/g' "$tmp_file"
             
             # Store the cached data
             repo_cache["$repo"]=$(cat "$tmp_file")
@@ -1545,15 +1684,61 @@ function process_packages() {
             mark_processed "$pkg_key"
             ;;
         "NEW")
-            # Track statistics
-            ((stats_new_count["$repo_name"]++))
+            # First, try to find a local cached copy before attempting download
+            local rpm_path
+            rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
             
-            if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
-                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is new." "\e[33m" # Yellow
-                download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+            if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                # Found local copy - use it instead of downloading
+                [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Found local cached RPM at: $rpm_path for NEW package $package_name-$package_version-$package_release.$package_arch"
+                
+                if ((DRY_RUN)); then
+                    log "INFO" "$(align_repo_name "$repo_name"): Would copy $package_name-$package_version-$package_release.$package_arch from local cache (dry-run)." "\e[36m" # Cyan
+                    ((stats_new_count["$repo_name"]++))
+                else
+                    # Ensure target directory exists with proper permissions
+                    if [[ "$IS_USER_MODE" -eq 0 ]]; then
+                        sudo mkdir -p "$repo_path" && sudo chown "$USER:$USER" "$repo_path" && sudo chmod 755 "$repo_path"
+                    else
+                        mkdir -p "$repo_path"
+                    fi
+                    
+                    # Use sudo for copy if not in user mode
+                    local copy_cmd="cp"
+                    [[ "$IS_USER_MODE" -eq 0 ]] && copy_cmd="sudo cp"
+                    
+                    if $copy_cmd "$rpm_path" "$repo_path/"; then
+                        log "INFO" "$(align_repo_name "$repo_name"): Copied $package_name-$package_version-$package_release.$package_arch from local cache." "\e[36m" # Cyan
+                        ((stats_new_count["$repo_name"]++))
+                    else
+                        log "WARN" "$(align_repo_name "$repo_name"): Failed to copy $package_name-$package_version-$package_release.$package_arch from local cache, will try download" "\e[33m" # Yellow
+                        # Fall back to download if copy fails
+                        if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
+                            log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is new (fallback to download)." "\e[33m" # Yellow
+                            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                        fi
+                        ((stats_new_count["$repo_name"]++))
+                    fi
+                fi
+                mark_processed "$pkg_key"
+            # Check if the exact same package is already installed to avoid conflicts
+            elif is_exact_package_installed "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch"; then
+                [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Package $package_name-$package_version-$package_release.$package_arch is already installed with exact same version, no local cache found"
+                # No local copy available but package is installed, treat as exists since it's installed
+                ((stats_exists_count["$repo_name"]++))
+                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already installed (no local copy)." "\e[32m" # Green
                 mark_processed "$pkg_key"
             else
-                log "INFO" "$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch." "\e[33m" # Yellow
+                # No local copy found and not installed - proceed with download
+                ((stats_new_count["$repo_name"]++))
+                
+                if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
+                    log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is new (no local cache)." "\e[33m" # Yellow
+                    download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                    mark_processed "$pkg_key"
+                else
+                    log "INFO" "$(align_repo_name "$repo_name"): Skipping download for local package $package_name-$package_version-$package_release.$package_arch." "\e[33m" # Yellow
+                fi
             fi
             ;;
         "UPDATE")
@@ -1561,10 +1746,48 @@ function process_packages() {
             ((stats_update_count["$repo_name"]++))
             
             if [[ ! " ${local_repos[*]} " == *" ${repo_name} "* ]]; then
-                remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
-                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is updated." "\e[34m" # Blue
-                download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
-                mark_processed "$pkg_key"
+                # First, try to find a local cached copy before downloading the update
+                local rpm_path
+                rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+                
+                if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                    # Found local copy of the updated package - use it instead of downloading
+                    [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Found local cached RPM at: $rpm_path for UPDATE package $package_name-$package_version-$package_release.$package_arch"
+                    
+                    # Remove existing packages first
+                    remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
+                    
+                    if ((DRY_RUN)); then
+                        log "INFO" "$(align_repo_name "$repo_name"): Would copy updated $package_name-$package_version-$package_release.$package_arch from local cache (dry-run)." "\e[36m" # Cyan
+                    else
+                        # Ensure target directory exists with proper permissions
+                        if [[ "$IS_USER_MODE" -eq 0 ]]; then
+                            sudo mkdir -p "$repo_path" && sudo chown "$USER:$USER" "$repo_path" && sudo chmod 755 "$repo_path"
+                        else
+                            mkdir -p "$repo_path"
+                        fi
+                        
+                        # Use sudo for copy if not in user mode
+                        local copy_cmd="cp"
+                        [[ "$IS_USER_MODE" -eq 0 ]] && copy_cmd="sudo cp"
+                        
+                        if $copy_cmd "$rpm_path" "$repo_path/"; then
+                            log "INFO" "$(align_repo_name "$repo_name"): Copied updated $package_name-$package_version-$package_release.$package_arch from local cache." "\e[36m" # Cyan
+                        else
+                            log "WARN" "$(align_repo_name "$repo_name"): Failed to copy updated $package_name-$package_version-$package_release.$package_arch from local cache, will try download" "\e[33m" # Yellow
+                            # Fall back to download if copy fails
+                            log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is updated (fallback to download)." "\e[34m" # Blue
+                            download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                        fi
+                    fi
+                    mark_processed "$pkg_key"
+                else
+                    # No local copy found - proceed with standard download
+                    remove_existing_packages "$package_name" "$package_version" "$package_release" "$repo_path"
+                    log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch is updated (no local cache)." "\e[34m" # Blue
+                    download_packages "$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch|$repo_path"
+                    mark_processed "$pkg_key"
+                fi
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Skipping update for local package $package_name-$package_version-$package_release.$package_arch." "\e[34m" # Blue
             fi
@@ -1915,7 +2138,6 @@ function remove_uninstalled_packages() {
     fi
 }
 
-
 function sanitize_repo_name() {
     local repo_name="$1"
     echo "${repo_name//[^a-zA-Z0-9._-]/_}"
@@ -2134,6 +2356,22 @@ function traverse_local_repos() {
     fi # End of SYNC_ONLY condition
 }
 
+# Efficient batch RPM metadata extraction
+function extract_rpm_metadata_batch() {
+    local repo_path="$1"
+    local output_file="$2"
+    
+    # Use find + xargs for efficient batch processing
+    find "$repo_path" -type f -name "*.rpm" -print0 | \
+    xargs -0 -r -P "$PARALLEL" -n 20 sh -c '
+        for rpm_file in "$@"; do
+            if meta=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
+                echo "$meta"
+            fi
+        done
+    ' _ >> "$output_file"
+}
+
 function update_and_sync_repos() {
     # Update and sync the repositories
     if [ "$MAX_PACKAGES" -eq 0 ]; then
@@ -2165,12 +2403,34 @@ function update_and_sync_repos() {
             repo_name=$(basename "$repo_path")
 
             if ((DRY_RUN)); then
-                log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
+                if ((USE_PARALLEL_COMPRESSION)); then
+                    log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update --workers $PARALLEL $repo_path'"
+                else
+                    log "INFO" "$(align_repo_name "$repo_name"): Would run 'createrepo_c --update $repo_path'"
+                fi
                 # Check if module.yaml would be generated
                 generate_module_yaml "$repo_name" "$repo_path"
             else
                 log "INFO" "$(align_repo_name "$repo_name"): Updating metadata for $repo_path"
-                if ! createrepo_c --update "$repo_path" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                
+                # Fix permissions on repository directory and metadata before createrepo
+                if [[ "$IS_USER_MODE" -eq 0 ]]; then
+                    # Ensure proper ownership and permissions for metadata creation
+                    if [[ -d "$repo_path/repodata" ]]; then
+                        sudo chown -R "$USER:$USER" "$repo_path/repodata" 2>/dev/null || true
+                    fi
+                    # Ensure the main directory is writable
+                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                    sudo chmod 755 "$repo_path" 2>/dev/null || true
+                fi
+                
+                local createrepo_cmd="createrepo_c --update"
+                if ((USE_PARALLEL_COMPRESSION)); then
+                    createrepo_cmd+=" --workers $PARALLEL"
+                fi
+                createrepo_cmd+=" \"$repo_path\""
+                
+                if ! eval "$createrepo_cmd" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
                     log "ERROR" "$(align_repo_name "$repo_name"): Error updating metadata for $repo_path"
                 else
                     log "INFO" "$(align_repo_name "$repo_name"): Metadata updated successfully"
