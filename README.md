@@ -4,15 +4,12 @@
 
 ## Overview
 
-The `repo-handler` project provides a bash script designed to|| `--max-packages`    | *INT*                      | `0` | `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
-| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync'ed copy.             |
-| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup and metadata; only rsync.                 |
-| `--user-mode`       | *(flag)*                   | *off*                 | Run without `sudo`; helper files go under `$HOME/tmp`.          |              | Limit the total number of packages scanned (0 = no limit).      |
+The `repo-handler` project provides a bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local | `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
 | `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern during processing.  |
+| `--no-group-output` | *(flag)*                   | *off*                 | Disable grouping of EXISTS package outputs (show individual).   |
 | `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
-| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
-| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |
-| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync'ed copy.             |anage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
+| `--refresh-metadata`| *(flag)*                   | *off*                 | Force a refresh of DNF metadata cache before processing.        |
+| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |rror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
 
 The script helps:
 
@@ -114,12 +111,33 @@ EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 # Filter repositories to process (comma-separated list, empty = process all enabled)
 # FILTER_REPOS=""
 
-# myrepo.cfg – Configuration file for myrepo.sh
-...
 # Re‑scan everything on the next run (1 = true, 0 = false).
 # When set to 1 the processed‑package cache is cleared at start‑up.
 # FULL_REBUILD=0
 
+# Group consecutive EXISTS package outputs by repository (1 = enabled, 0 = disabled)
+# Default is enabled (1). Set to 0 to show individual package messages instead.
+# GROUP_OUTPUT=1
+
+# Local Repository Management Settings
+# AUTO_UPDATE_LOCAL_REPOS=1          # Enable automatic detection of local repo changes
+# LOCAL_REPO_CHECK_METHOD=FAST       # Detection method: FAST (timestamp) or ACCURATE (content)
+
+# Adaptive Performance Tuning Settings
+# ADAPTIVE_TUNING=1                  # Enable adaptive batch size and parallelism tuning
+# MIN_BATCH_SIZE=20                  # Minimum batch size for adaptive tuning
+# MAX_BATCH_SIZE=100                 # Maximum batch size for adaptive tuning
+# MIN_PARALLEL=1                     # Minimum parallel processes
+# MAX_PARALLEL=8                     # Maximum parallel processes
+# PERFORMANCE_SAMPLE_SIZE=5          # Performance samples before adjustments
+# TUNE_INTERVAL=3                    # Batches between tuning attempts
+# EFFICIENCY_THRESHOLD=60            # Efficiency % threshold for optimization
+
+# Repository metadata compression type (default: zstd)
+# REPO_COMPRESS_TYPE=zstd
+
+# Number of parallel repoquery jobs for metadata fetching (default: 4)
+# REPOQUERY_PARALLEL=4
 ```
 
 ### Log Level Control
@@ -196,14 +214,114 @@ NAME_FILTER="firefox"
 - **Graceful Handling**: If no packages match the filter, the script continues normally without errors
 - **Case Sensitive**: Pattern matching is case-sensitive by default
 - **Combines with Repository Filtering**: Works together with `--repos` for fine-grained control
+
+### Local Repository Management (Manual Change Detection)
+
+Version 2.1.18+ introduces advanced local repository management that can automatically detect and handle manual changes to local repositories. This is particularly useful in environments where RPM packages are manually copied to local repositories outside of the script's normal processing workflow.
+
+#### Key Features:
+
+- **Dual-Tier Metadata Strategy**: Regular repositories only update metadata when packages are processed, while local repositories can detect manual changes even when no packages are processed during the current run.
+- **Configurable Detection Methods**: Choose between FAST (timestamp-based) and ACCURATE (content-based) detection methods.
+- **Automatic Updates**: Local repositories are automatically checked for manual changes and metadata is updated accordingly.
+- **Sync-Only Mode Optimization**: Metadata updates are intelligently skipped during `--sync-only` mode for better performance.
+
+#### Configuration Options:
+
+```bash
+# Enable automatic detection and update of local repository changes (1 = enabled, 0 = disabled)
+# When enabled, the script will check local repositories for manual changes even if no packages
+# were processed during the current run. Useful for repositories where RPMs are manually copied.
+AUTO_UPDATE_LOCAL_REPOS=1
+
+# Local repository metadata check method (FAST or ACCURATE)
+# FAST: Uses timestamp comparison between RPM files and metadata (faster, good for most cases)
+# ACCURATE: Uses content comparison to detect count mismatches (more thorough but slower)
+# Default is FAST for optimal performance while still catching most manual changes.
+LOCAL_REPO_CHECK_METHOD=FAST
 ```
 
+#### How It Works:
+
+1. **FAST Method**: Compares the newest RPM file timestamp against the repository metadata timestamp. If RPMs are newer, metadata is updated.
+2. **ACCURATE Method**: Counts actual RPM files and compares with the metadata package count. If counts differ, metadata is updated.
+
+#### Use Cases:
+
+- **Manual Package Deployment**: When administrators manually copy RPM files to local repositories
+- **Airgapped Environments**: Where packages are transferred via external media and manually placed
+- **Mixed Workflows**: Environments where both automated and manual package management occur
+- **Development Environments**: Where local builds are frequently copied to test repositories
+
+#### Example Configuration:
+
+```bash
+# myrepo.cfg - Enable accurate detection for critical repositories
+AUTO_UPDATE_LOCAL_REPOS=1
+LOCAL_REPO_CHECK_METHOD=ACCURATE
+LOCAL_REPOS="ol9_edge,custom_apps,local_builds"
+```
+
+This ensures that manually added packages are properly indexed and available through the repository metadata without requiring a full rebuild.
+
+### Adaptive Performance Tuning
+
+The script includes an intelligent adaptive performance tuning system that automatically optimizes `BATCH_SIZE` and `PARALLEL` settings based on real-time performance metrics. This helps achieve optimal throughput across different system configurations and network conditions.
+
+#### Key Features:
+
+- **Dynamic Optimization**: Automatically adjusts batch size and parallelism based on performance measurements
+- **Efficiency Monitoring**: Tracks processing efficiency and makes adjustments when performance drops
+- **Configurable Bounds**: Set minimum and maximum limits for batch size and parallel processes
+- **Sample-Based Analysis**: Uses multiple performance samples for stable optimization decisions
+- **Non-Disruptive**: Adjustments are made gradually without interrupting ongoing operations
+
+#### Configuration Options:
+
+```bash
+# Enable adaptive tuning (1 = enabled, 0 = disabled)
+ADAPTIVE_TUNING=1
+
+# Performance bounds
+MIN_BATCH_SIZE=20          # Minimum batch size (optimized default)
+MAX_BATCH_SIZE=100         # Maximum batch size
+MIN_PARALLEL=1             # Minimum parallel processes
+MAX_PARALLEL=8             # Maximum parallel processes
+
+# Tuning behavior
+PERFORMANCE_SAMPLE_SIZE=5  # Number of samples before adjustments
+TUNE_INTERVAL=3           # Batches between tuning attempts
+EFFICIENCY_THRESHOLD=60   # Efficiency % threshold for optimization
+```
+
+#### How It Works:
+
+1. **Performance Measurement**: Tracks processing time and throughput for each batch
+2. **Efficiency Calculation**: Computes efficiency based on actual vs. theoretical optimal performance
+3. **Adaptive Adjustment**: When efficiency drops below threshold, adjusts batch size or parallelism
+4. **Stability Control**: Uses sample averaging and interval controls to prevent excessive adjustments
+
+#### Benefits:
+
+- **Optimized Throughput**: Automatically finds the best performance settings for your environment
+- **Reduced Manual Tuning**: Eliminates the need to manually experiment with batch sizes
+- **Environment Adaptation**: Adjusts to different network speeds, disk I/O, and CPU capabilities
+- **Resource Efficiency**: Prevents over-provisioning that could waste system resources
+
+#### Example Scenarios:
+
+- **Fast SSD Storage**: May increase batch sizes for better disk I/O efficiency
+- **Limited Network**: May reduce parallelism to avoid bandwidth saturation
+- **High-CPU Systems**: May increase parallelism to utilize available cores
+- **Mixed Workloads**: Dynamically adapts as system load changes
+
+The adaptive tuning system is enabled by default with conservative settings that work well for most environments while providing room for optimization.
 
 ### Configuration: Parallel Metadata Fetching
 
 - **REPOQUERY_PARALLEL**: Number of parallel jobs for repository metadata fetching (dnf repoquery). Default: 4. Increase for faster metadata updates if you have many enabled repositories and sufficient CPU/network resources. Lower if you experience resource contention. Set in `myrepo.cfg` as:
 
-  ```
+  ```bash
   REPOQUERY_PARALLEL=4
   ```
 
@@ -248,7 +366,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | `--help`            | —                          | —                     | Display built‑in usage synopsis.                                |
 
 
-#### Example:
+#### Examples:
 
 ```bash
 # Basic usage with debugging and custom settings
@@ -259,16 +377,42 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 # Process all NodeJS packages with dry-run to see what would happen
 ./myrepo.sh --name-filter "nodejs" --dry-run --debug 1
+
+# Sync-only mode for fast rsync without package processing
+./myrepo.sh --sync-only
+
+# Full rebuild with verbose debugging
+./myrepo.sh --full-rebuild --debug 2
+
+# User mode for non-root environments
+./myrepo.sh --user-mode --local-repo-path "$HOME/myrepo"
+
+# Force metadata refresh before processing
+./myrepo.sh --refresh-metadata --debug 1
+
+# Process specific repositories with custom parallel settings
+./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4 --batch-size 80
 ```
 
 ### How It Works
 
-1. **Fetching Installed Packages**
-2. **Determining Package Status**
-3. **Processing Packages**
-4. **Cleaning Up**
-5. **Updating Repository Metadata**
-6. **Synchronization**
+The script implements a sophisticated workflow that efficiently manages local package repositories with intelligent metadata handling:
+
+1. **Fetching Installed Packages**: Retrieves the list of installed packages from the system using DNF/YUM queries, with optional filtering by repository or package name patterns.
+
+2. **Determining Package Status**: For each package, determines whether it's NEW (needs to be added), EXISTS (already present), UPDATE (newer version available), or should be skipped.
+
+3. **Processing Packages**: Processes packages in optimized batches using adaptive performance tuning. Local packages are handled differently from remote packages to account for manual deployment scenarios.
+
+4. **Cleaning Up**: Removes uninstalled packages and outdated versions from local repositories to maintain a clean, current state.
+
+5. **Dual-Tier Metadata Updates**: 
+   - **Regular Repositories**: Updates metadata only when packages are processed during the current run
+   - **Local Repositories**: Checks for manual changes (using configurable FAST/ACCURATE methods) and updates metadata accordingly, even if no packages were processed automatically
+
+6. **Synchronization**: Uses rsync to efficiently synchronize the local repositories with shared storage, ensuring consistency across environments.
+
+7. **Performance Optimization**: Continuously monitors and adjusts processing parameters (batch size, parallelism) based on real-time performance metrics to maximize throughput.
 
 ## Tips
 
@@ -278,6 +422,12 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 - **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
 - **Efficient Filtering**: Use `--name-filter` combined with `--repos` for precise control over package processing and improved performance.
 - **Testing Filters**: Always test new name filter patterns with `--dry-run` first to verify they match the expected packages.
+- **Local Repository Management**: Enable `AUTO_UPDATE_LOCAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
+- **Performance Tuning**: Let adaptive tuning optimize performance automatically, or disable it and manually tune `BATCH_SIZE` and `PARALLEL` for specific environments.
+- **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
+- **User Mode**: Use `--user-mode` for non-root environments or when sudo access is restricted.
+- **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
+- **Monitoring**: Check the performance statistics output to understand processing efficiency and identify potential bottlenecks.
 
 ## License
 
@@ -289,5 +439,7 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 
 ## Conclusion
 
-The `repo-handler` script provides a robust solution for managing local package repositories in isolated environments. By utilizing a configuration file and command-line options, it offers flexibility and ease of use, ensuring that your repositories are always up-to-date and contain only the necessary packages.
+The `repo-handler` script provides a comprehensive and intelligent solution for managing local package repositories in isolated environments. With features like adaptive performance tuning, dual-tier metadata management, intelligent local repository change detection, and flexible filtering options, it offers both power and ease of use. The script automatically optimizes its performance while ensuring that your repositories remain current and contain only the necessary packages for your specific environment.
+
+The combination of configuration file support, extensive command-line options, and automatic optimization makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
 

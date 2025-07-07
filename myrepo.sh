@@ -11,7 +11,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.1.16
+VERSION=2.1.19
 # Default values for environment variables if not set
 : "${BATCH_SIZE:=50}"                  # Optimized starting point based on performance analysis
 : "${CONTINUE_ON_ERROR:=0}"
@@ -60,6 +60,10 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${PERFORMANCE_SAMPLE_SIZE:=5}"          # Reduced from 10 for faster adaptation
 : "${TUNE_INTERVAL:=3}"                    # Reduced from 5 for more frequent tuning
 : "${EFFICIENCY_THRESHOLD:=60}"            # Reduced from 80 for more aggressive tuning
+
+# Local repository management defaults
+: "${LOCAL_REPO_CHECK_METHOD:=FAST}"       # FAST (timestamp) or ACCURATE (content) detection
+: "${AUTO_UPDATE_LOCAL_REPOS:=1}"          # Enable automatic detection and update of local repo changes
 
 # Debug mode default
 : "${DEBUG_MODE:=0}"
@@ -331,6 +335,85 @@ function analyze_performance() {
             log "WARN" "  - High memory usage estimated (~${memory_usage_mb}MB). Monitor system resources."
         fi
     fi
+}
+
+# Check if a local repository needs metadata update using FAST (timestamp) method
+function check_repo_needs_metadata_update_fast() {
+    local repo_name="$1"
+    local repo_path="$2"
+    local repo_dir=$(dirname "$repo_path")
+    
+    # Compare newest RPM timestamp with metadata timestamp
+    local newest_rpm=$(find "$repo_path" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+    if [[ -n "$newest_rpm" && -d "$repo_dir/repodata" ]]; then
+        local metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
+        local rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
+        
+        [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Comparing times - RPM: $rpm_time, Metadata: $metadata_time"
+        
+        if [[ $rpm_time -gt $metadata_time ]]; then
+            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): RPM newer than metadata ($(basename "$newest_rpm"))"
+            return 0  # Needs update
+        fi
+    elif [[ -n "$newest_rpm" && ! -d "$repo_dir/repodata" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): No metadata exists but RPMs found"
+        return 0  # No metadata exists but RPMs do
+    fi
+    
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Metadata appears up to date"
+    return 1  # No update needed
+}
+
+# Check if a local repository needs metadata update using ACCURATE (content) method
+function check_repo_needs_metadata_update_accurate() {
+    local repo_name="$1"
+    local repo_path="$2"
+    local repo_dir=$(dirname "$repo_path")
+    
+    # Check if metadata exists at all
+    if [[ ! -d "$repo_dir/repodata" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): No metadata directory found"
+        return 0  # No metadata, needs update
+    fi
+    
+    # Get current RPM count
+    local current_rpms=$(find "$repo_path" -name "*.rpm" -type f | wc -l)
+    
+    # Get RPM count from metadata using a quick repoquery check
+    local metadata_rpms
+    if metadata_rpms=$(repoquery --repofrompath="temp_$repo_name,$repo_dir" --repoid="temp_$repo_name" --all 2>/dev/null | wc -l); then
+        [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Current RPMs: $current_rpms, Metadata RPMs: $metadata_rpms"
+        
+        if [[ $current_rpms -ne $metadata_rpms ]]; then
+            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): RPM count mismatch ($current_rpms vs $metadata_rpms)"
+            return 0  # Count mismatch, needs update
+        fi
+    else
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Failed to query metadata"
+        return 0  # Can't read metadata, assume update needed
+    fi
+    
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Content appears consistent"
+    return 1  # Probably up to date
+}
+
+# Unified function to check if a repository needs metadata update
+function check_repo_needs_metadata_update() {
+    local repo_name="$1"
+    local repo_path="$2"
+    
+    case "$LOCAL_REPO_CHECK_METHOD" in
+        "FAST")
+            check_repo_needs_metadata_update_fast "$repo_name" "$repo_path"
+            ;;
+        "ACCURATE")
+            check_repo_needs_metadata_update_accurate "$repo_name" "$repo_path"
+            ;;
+        *)
+            log "WARN" "Unknown LOCAL_REPO_CHECK_METHOD: $LOCAL_REPO_CHECK_METHOD, using FAST"
+            check_repo_needs_metadata_update_fast "$repo_name" "$repo_path"
+            ;;
+    esac
 }
 
 function cleanup_metadata_cache() {
@@ -1209,9 +1292,7 @@ function load_config() {
             NIGHT_START_HOUR) NIGHT_START_HOUR="$value" ;;
             NIGHT_END_HOUR) NIGHT_END_HOUR="$value" ;;
             CACHE_CLEANUP_DAYS) CACHE_CLEANUP_DAYS="$value" ;;
-            JOB_STATUS_CHECK_INTERVAL) JOB_STATUS_CHECK_INTERVAL="$value" ;;  # Backward compatibility
             JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
-            XARGS_BATCH_SIZE) XARGS_BATCH_SIZE="$value" ;;  # Backward compatibility
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;  # Backward compatibility
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             REFRESH_METADATA) REFRESH_METADATA="$value" ;;
@@ -1224,6 +1305,9 @@ function load_config() {
             PERFORMANCE_SAMPLE_SIZE) PERFORMANCE_SAMPLE_SIZE="$value" ;;
             TUNE_INTERVAL) TUNE_INTERVAL="$value" ;;
             EFFICIENCY_THRESHOLD) EFFICIENCY_THRESHOLD="$value" ;;
+            # Local repository management variables
+            LOCAL_REPO_CHECK_METHOD) LOCAL_REPO_CHECK_METHOD="$value" ;;
+            AUTO_UPDATE_LOCAL_REPOS) AUTO_UPDATE_LOCAL_REPOS="$value" ;;
             *) [[ "$silent_mode" == "false" ]] && log "WARN" "Unknown configuration option in '$found_config_path': $key" ;; # Changed from ERROR to WARN
             esac
         done < <(grep -v '^\s*#' "$found_config_path") # Use grep to filter comments before the loop
@@ -2381,6 +2465,7 @@ function update_and_sync_repos() {
         else
             log "INFO" "Updating repository metadata..."
 
+            # PHASE 1: Update metadata for repositories that had packages processed
             for repo in "${!used_directories[@]}"; do
                 package_path="${used_directories[$repo]}"
                 repo_path=$(dirname "$package_path")
@@ -2423,6 +2508,63 @@ function update_and_sync_repos() {
                     fi
                 fi
             done
+
+            # PHASE 2: Check local repositories for manual changes (if enabled)
+            if ((AUTO_UPDATE_LOCAL_REPOS == 1)); then
+                [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Checking local repositories for manual changes (method: $LOCAL_REPO_CHECK_METHOD)..."
+                
+                for local_repo in "${LOCAL_REPOS[@]}"; do
+                    # Skip if already processed in Phase 1
+                    if [[ -n "${used_directories[$local_repo]}" ]]; then
+                        [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$local_repo"): Already processed in Phase 1, skipping manual check"
+                        continue
+                    fi
+                    
+                    local repo_path="$LOCAL_REPO_PATH/$local_repo/getPackage"
+                    if [[ -d "$repo_path" ]]; then
+                        if check_repo_needs_metadata_update "$local_repo" "$repo_path"; then
+                            log "INFO" "$(align_repo_name "$local_repo"): Manual changes detected, updating metadata"
+                            
+                            local repo_dir=$(dirname "$repo_path")
+                            if ((DRY_RUN)); then
+                                if ((USE_PARALLEL_COMPRESSION)); then
+                                    log "INFO" "$(align_repo_name "$local_repo"): Would run 'createrepo_c --update --workers $PARALLEL $repo_dir'"
+                                else
+                                    log "INFO" "$(align_repo_name "$local_repo"): Would run 'createrepo_c --update $repo_dir'"
+                                fi
+                            else
+                                # Fix permissions
+                                if [[ "$IS_USER_MODE" -eq 0 ]]; then
+                                    if [[ -d "$repo_dir/repodata" ]]; then
+                                        sudo chown -R "$USER:$USER" "$repo_dir/repodata" 2>/dev/null || true
+                                    fi
+                                    sudo chown "$USER:$USER" "$repo_dir" 2>/dev/null || true
+                                    sudo chmod 755 "$repo_dir" 2>/dev/null || true
+                                fi
+                                
+                                local createrepo_cmd="createrepo_c --update"
+                                if ((USE_PARALLEL_COMPRESSION)); then
+                                    createrepo_cmd+=" --workers $PARALLEL"
+                                fi
+                                createrepo_cmd+=" \"$repo_dir\""
+                                
+                                if ! eval "$createrepo_cmd" >>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
+                                    log "ERROR" "$(align_repo_name "$local_repo"): Error updating metadata for $repo_dir"
+                                else
+                                    log "INFO" "$(align_repo_name "$local_repo"): Metadata updated successfully"
+                                fi
+                            fi
+                            
+                            # Add to used_directories for syncing
+                            used_directories["$local_repo"]="$repo_path"
+                        else
+                            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$local_repo"): No metadata update needed"
+                            # Still add to used_directories for syncing (even without metadata update)
+                            used_directories["$local_repo"]="$repo_path"
+                        fi
+                    fi
+                done
+            fi
         fi
 
         # If SYNC_ONLY is set, we need to determine which directories to sync
