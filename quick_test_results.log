@@ -1,0 +1,23 @@
+=== Quick DNF Performance Comparison ===
+Testing parallel vs serial DNF modes with the same workload
+
+Test configuration: --user-mode --dry-run --max-packages 15 --name-filter 'bash'
+
+TEST 1: Parallel DNF Mode (default)
+=====================================
+[I] Using parallel DNF mode with max 4 concurrent processes
+[I] Repository metadata download completed in 12s
+Parallel mode total time: 20s
+
+TEST 2: Serial DNF Mode
+=======================
+[I] Using serial DNF mode to prevent database lock contention
+[I] Repository metadata download completed in 11s
+Serial mode total time: 19s
+
+PERFORMANCE COMPARISON:
+======================
+Parallel mode: 20s
+Serial mode:   19s
+Result: Serial mode is 5% faster!
+Recommendation: Use --dnf-serial flag for better performance

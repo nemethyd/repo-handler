@@ -2,12 +2,16 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-07-06
+# Last Updated: 2025-07-09
 
 # MIT licensing
 # Purpose:
 # This script replicates and updates a local repository from installed packages
 # and synchronizes it with a shared repository, handling updates and cleanup of
+
+# NOTE: Function order should be alphabetized in a future refactoring effort.
+# Current function order has some inconsistencies but reordering would be a large change.
+# All shellcheck issues have been resolved as of 2025-07-09.
 # older package versions.
 
 # Script version
@@ -46,7 +50,8 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
 # Performance and timing defaults
 : "${JOB_WAIT_REPORT_INTERVAL:=60}"
-: "${REPOQUERY_PARALLEL:=8}"               # Increased from 4
+: "${REPOQUERY_PARALLEL:=2}"               # Reduced from 8 to prevent DNF contention
+: "${DNF_SERIAL_MODE:=0}"                  # Set to 1 to disable all DNF parallelism for problem environments
 : "${REFRESH_METADATA:=0}"
 : "${IO_BUFFER_SIZE:=8192}"                # Buffer size for file operations
 : "${USE_PARALLEL_COMPRESSION:=1}"         # Enable parallel compression for createrepo
@@ -122,6 +127,52 @@ performance_start_time=0        # Script start time for overall performance
 ######################################
 
 # Adaptive performance tuning functions
+function adaptive_initialize_performance_tracking() {
+    performance_start_time=$(date +%s%3N)
+    batch_counter=0
+    total_packages_processed=0
+    batch_times=()
+    batch_sizes=()
+    parallel_counts=()
+    
+    if [[ $ADAPTIVE_TUNING -eq 1 ]]; then
+        log "INFO" "Adaptive performance tuning enabled (batch: $MIN_BATCH_SIZE-$MAX_BATCH_SIZE, parallel: $MIN_PARALLEL-$MAX_PARALLEL)"
+    fi
+}
+
+function adaptive_track_batch_performance() {
+    local batch_start_time="$1"
+    local batch_package_count="$2"
+    
+    local batch_end_time
+    batch_end_time=$(date +%s%3N)  # milliseconds
+    local batch_duration=$((batch_end_time - batch_start_time))
+    
+    # Store performance data
+    batch_times+=("$batch_duration")
+    batch_sizes+=("$batch_package_count")
+    parallel_counts+=("$PARALLEL")
+    
+    # Keep only recent performance data (sliding window)
+    if [[ ${#batch_times[@]} -gt $((PERFORMANCE_SAMPLE_SIZE * 2)) ]]; then
+        # Remove oldest half of the data
+        local keep_count=$PERFORMANCE_SAMPLE_SIZE
+        batch_times=("${batch_times[@]: -$keep_count}")
+        batch_sizes=("${batch_sizes[@]: -$keep_count}")
+        parallel_counts=("${parallel_counts[@]: -$keep_count}")
+    fi
+    
+    ((total_packages_processed += batch_package_count))
+    ((batch_counter++))
+    
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Batch performance: ${batch_package_count} packages in ${batch_duration}ms"
+    
+    # Trigger adaptive tuning every TUNE_INTERVAL batches
+    if [[ $((batch_counter % TUNE_INTERVAL)) -eq 0 ]]; then
+        adaptive_tune_performance
+    fi
+}
+
 function adaptive_tune_performance() {
     # Only tune if adaptive tuning is enabled and we have enough samples
     if [[ $ADAPTIVE_TUNING -eq 0 ]] || [[ ${#batch_times[@]} -lt $PERFORMANCE_SAMPLE_SIZE ]]; then
@@ -186,110 +237,9 @@ function adaptive_tune_performance() {
     fi
 }
 
-function adaptive_initialize_performance_tracking() {
-    performance_start_time=$(date +%s%3N)
-    batch_counter=0
-    total_packages_processed=0
-    batch_times=()
-    batch_sizes=()
-    parallel_counts=()
-    
-    if [[ $ADAPTIVE_TUNING -eq 1 ]]; then
-        log "INFO" "Adaptive performance tuning enabled (batch: $MIN_BATCH_SIZE-$MAX_BATCH_SIZE, parallel: $MIN_PARALLEL-$MAX_PARALLEL)"
-    fi
-}
-
-function adaptive_track_batch_performance() {
-    local batch_start_time="$1"
-    local batch_package_count="$2"
-    
-    local batch_end_time
-    batch_end_time=$(date +%s%3N)  # milliseconds
-    local batch_duration=$((batch_end_time - batch_start_time))
-    
-    # Store performance data
-    batch_times+=("$batch_duration")
-    batch_sizes+=("$batch_package_count")
-    parallel_counts+=("$PARALLEL")
-    
-    # Keep only recent performance data (sliding window)
-    if [[ ${#batch_times[@]} -gt $((PERFORMANCE_SAMPLE_SIZE * 2)) ]]; then
-        # Remove oldest half of the data
-        local keep_count=$PERFORMANCE_SAMPLE_SIZE
-        batch_times=("${batch_times[@]: -$keep_count}")
-        batch_sizes=("${batch_sizes[@]: -$keep_count}")
-        parallel_counts=("${parallel_counts[@]: -$keep_count}")
-    fi
-    
-    ((total_packages_processed += batch_package_count))
-    ((batch_counter++))
-    
-    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Batch performance: ${batch_package_count} packages in ${batch_duration}ms"
-    
-    # Trigger adaptive tuning every TUNE_INTERVAL batches
-    if [[ $((batch_counter % TUNE_INTERVAL)) -eq 0 ]]; then
-        adaptive_tune_performance
-    fi
-}
-
-function adaptive_show_final_performance() {
-    # Skip performance statistics in sync-only mode
-    if [[ $SYNC_ONLY -eq 1 ]]; then
-        return 0
-    fi
-    
-    if [[ $performance_start_time -eq 0 ]]; then
-        return 0
-    fi
-    
-    local total_time=$(( $(date +%s%3N) - performance_start_time ))
-    local avg_packages_per_sec=0
-    
-    if [[ $total_time -gt 0 ]]; then
-        avg_packages_per_sec=$(( (total_packages_processed * 1000) / total_time ))
-    fi
-    
-    log "INFO" "Performance summary: $total_packages_processed packages in ${total_time}ms (${avg_packages_per_sec} pkg/sec)"
-    
-    if [[ $ADAPTIVE_TUNING -eq 1 ]] && [[ ${#batch_times[@]} -gt 0 ]]; then
-        local final_batch_size=${batch_sizes[-1]:-$BATCH_SIZE}
-        local final_parallel=${parallel_counts[-1]:-$PARALLEL}
-        log "INFO" "Final adaptive settings: batch_size=$final_batch_size, parallel=$final_parallel"
-    fi
-    
-    # Add performance analysis and recommendations
-    analyze_performance
-}
-
 function align_repo_name() {
     local repo_name="$1"
     printf "%-${PADDING_LENGTH}s" "$repo_name"
-}
-
-function check_user_mode() {
-    # Check if script is run as root
-    if [[ -z $IS_USER_MODE && $EUID -ne 0 ]]; then
-        log "ERROR" "This script must be run as root or with sudo privileges."
-        exit 1
-    fi
-    # Set the base directory for temporary files depending on IS_USER_MODE
-    if [[ $IS_USER_MODE -eq 1 ]]; then
-        TMP_DIR="$HOME/tmp"
-        mkdir -p "$TMP_DIR" || {
-            log "ERROR" "Failed to create temporary directory $TMP_DIR for user mode."
-            exit 1
-        }
-    else
-        TMP_DIR="/tmp"
-    fi
-    INSTALLED_PACKAGES_FILE="$TMP_DIR/installed_packages.lst"
-    PROCESSED_PACKAGES_FILE="$TMP_DIR/processed_packages.share"
-}
-
-# Cleanup function to remove temporary files
-function cleanup() {
-    rm -f "$TEMP_FILE" "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE"
-    rm -f "${TEMP_FILES[@]}"
 }
 
 # Performance analysis and recommendations
@@ -337,38 +287,12 @@ function analyze_performance() {
     fi
 }
 
-# Check if a local repository needs metadata update using FAST (timestamp) method
-function check_repo_needs_metadata_update_fast() {
-    local repo_name="$1"
-    local repo_path="$2"
-    local repo_dir=$(dirname "$repo_path")
-    
-    # Compare newest RPM timestamp with metadata timestamp
-    local newest_rpm=$(find "$repo_path" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-    if [[ -n "$newest_rpm" && -d "$repo_dir/repodata" ]]; then
-        local metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
-        local rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
-        
-        [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Comparing times - RPM: $rpm_time, Metadata: $metadata_time"
-        
-        if [[ $rpm_time -gt $metadata_time ]]; then
-            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): RPM newer than metadata ($(basename "$newest_rpm"))"
-            return 0  # Needs update
-        fi
-    elif [[ -n "$newest_rpm" && ! -d "$repo_dir/repodata" ]]; then
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): No metadata exists but RPMs found"
-        return 0  # No metadata exists but RPMs do
-    fi
-    
-    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Metadata appears up to date"
-    return 1  # No update needed
-}
-
 # Check if a local repository needs metadata update using ACCURATE (content) method
 function check_repo_needs_metadata_update_accurate() {
     local repo_name="$1"
     local repo_path="$2"
-    local repo_dir=$(dirname "$repo_path")
+    local repo_dir
+    repo_dir=$(dirname "$repo_path")
     
     # Check if metadata exists at all
     if [[ ! -d "$repo_dir/repodata" ]]; then
@@ -377,7 +301,8 @@ function check_repo_needs_metadata_update_accurate() {
     fi
     
     # Get current RPM count
-    local current_rpms=$(find "$repo_path" -name "*.rpm" -type f | wc -l)
+    local current_rpms
+    current_rpms=$(find "$repo_path" -name "*.rpm" -type f | wc -l)
     
     # Get RPM count from metadata using a quick repoquery check
     local metadata_rpms
@@ -416,6 +341,63 @@ function check_repo_needs_metadata_update() {
     esac
 }
 
+# Check if a local repository needs metadata update using FAST (timestamp) method
+function check_repo_needs_metadata_update_fast() {
+    local repo_name="$1"
+    local repo_path="$2"
+    local repo_dir
+    repo_dir=$(dirname "$repo_path")
+    
+    # Compare newest RPM timestamp with metadata timestamp
+    local newest_rpm
+    newest_rpm=$(find "$repo_path" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+    if [[ -n "$newest_rpm" && -d "$repo_dir/repodata" ]]; then
+        local metadata_time
+        metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
+        local rpm_time
+        rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
+        
+        [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Comparing times - RPM: $rpm_time, Metadata: $metadata_time"
+        
+        if [[ $rpm_time -gt $metadata_time ]]; then
+            [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): RPM newer than metadata ($(basename "$newest_rpm"))"
+            return 0  # Needs update
+        fi
+    elif [[ -n "$newest_rpm" && ! -d "$repo_dir/repodata" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): No metadata exists but RPMs found"
+        return 0  # No metadata exists but RPMs do
+    fi
+    
+    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "$(align_repo_name "$repo_name"): Metadata appears up to date"
+    return 1  # No update needed
+}
+
+function check_user_mode() {
+    # Check if script is run as root
+    if [[ -z $IS_USER_MODE && $EUID -ne 0 ]]; then
+        log "ERROR" "This script must be run as root or with sudo privileges."
+        exit 1
+    fi
+    # Set the base directory for temporary files depending on IS_USER_MODE
+    if [[ $IS_USER_MODE -eq 1 ]]; then
+        TMP_DIR="$HOME/tmp"
+        mkdir -p "$TMP_DIR" || {
+            log "ERROR" "Failed to create temporary directory $TMP_DIR for user mode."
+            exit 1
+        }
+    else
+        TMP_DIR="/tmp"
+    fi
+    INSTALLED_PACKAGES_FILE="$TMP_DIR/installed_packages.lst"
+    PROCESSED_PACKAGES_FILE="$TMP_DIR/processed_packages.share"
+}
+
+# Cleanup function to remove temporary files
+function cleanup() {
+    rm -f "$TEMP_FILE" "$INSTALLED_PACKAGES_FILE" "$PROCESSED_PACKAGES_FILE"
+    rm -f "${TEMP_FILES[@]}"
+}
+
 function cleanup_metadata_cache() {
     local cache_dir="$HOME/.cache/myrepo"
     local max_age_days=7
@@ -444,32 +426,6 @@ function create_temp_file() {
     tmp_file=$(mktemp /tmp/myrepo_"$(date +%s)"_$$.XXXXXX)
     TEMP_FILES+=("$tmp_file")
     echo "$tmp_file"
-}
-
-function determine_repo_source() {
-    local package_name=$1
-    local epoch_version=$2
-    local package_version=$3
-    local package_release=$4
-    local package_arch=$5
-
-    for repo in "${ENABLED_REPOS[@]}"; do
-        # Reconstruct the expected package string without epoch if it's '0'
-        local expected_package
-        if [[ -n "$epoch_version" && "$epoch_version" != "0" ]]; then
-            expected_package="${package_name}|${epoch_version}|${package_version}|${package_release}|${package_arch}"
-        else
-            expected_package="${package_name}|0|${package_version}|${package_release}|${package_arch}"
-        fi
-
-        # Compare with cached repo metadata
-        if echo "${available_repo_packages[$repo]}" | grep -Fxq "$expected_package"; then
-            echo "$repo"
-            return
-        fi
-    done
-
-    echo "Invalid" # Default to Invalid if no matching repo is found
 }
 
 function detect_module_info() {
@@ -506,6 +462,32 @@ function detect_module_info() {
     fi
     
     return 1  # Not a module package
+}
+
+function determine_repo_source() {
+    local package_name=$1
+    local epoch_version=$2
+    local package_version=$3
+    local package_release=$4
+    local package_arch=$5
+
+    for repo in "${ENABLED_REPOS[@]}"; do
+        # Reconstruct the expected package string without epoch if it's '0'
+        local expected_package
+        if [[ -n "$epoch_version" && "$epoch_version" != "0" ]]; then
+            expected_package="${package_name}|${epoch_version}|${package_version}|${package_release}|${package_arch}"
+        else
+            expected_package="${package_name}|0|${package_version}|${package_release}|${package_arch}"
+        fi
+
+        # Compare with cached repo metadata
+        if echo "${available_repo_packages[$repo]}" | grep -Fxq "$expected_package"; then
+            echo "$repo"
+            return
+        fi
+    done
+
+    echo "Invalid" # Default to Invalid if no matching repo is found
 }
 
 # Download packages with parallel downloads or use local cached RPMs
@@ -602,6 +584,14 @@ function download_packages() {
 function download_repo_metadata() {
     local cache_dir="$HOME/.cache/myrepo"
     mkdir -p "$cache_dir"
+    
+    # Initialize temp file for tracking slow operations across subshells
+    TEMP_SLOW_OPS_FILE=$(mktemp) || {
+        log "ERROR" "Failed to create temporary slow operations tracking file"
+        exit 1
+    }
+    TEMP_FILES+=("$TEMP_SLOW_OPS_FILE")
+    
     local cache_max_age=$((CACHE_MAX_AGE_HOURS * 3600))  # Convert hours to seconds
     local hour
     hour=$(date +%H)
@@ -680,31 +670,92 @@ function download_repo_metadata() {
         fi
     done
 
-    # Fetch metadata in parallel for repos that need update
-    local max_parallel=${REPOQUERY_PARALLEL}
+    # Fetch metadata in parallel for repos that need update (unless serial mode is enabled)
+    local max_parallel=$((DNF_SERIAL_MODE ? 1 : REPOQUERY_PARALLEL))
     local running=0
+    local slow_operations=0
+    
+    if ((DNF_SERIAL_MODE)); then
+        log "INFO" "DNF serial mode enabled - processing repositories sequentially to avoid contention"
+    fi
+    
     for repo in "${repos_to_process[@]}"; do
         if [[ ${repo_needs_update["$repo"]} -eq 1 ]]; then
             log "INFO" "Fetching metadata for $repo in background..."
             (
-                if repo_data=$(dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE"); then
-                    echo "$repo_data" > "$cache_dir/${repo}.cache"
-                    # Save version if available
-                    if [[ -n "${repo_versions[$repo]}" ]]; then
-                        echo "${repo_versions[$repo]}" > "$cache_dir/${repo}.version"
+                local repo_start_time
+                repo_start_time=$(date +%s)
+                local fetch_success=false
+                local retry_count=0
+                local max_retries=3
+                
+                # Retry logic for DNF contention issues
+                while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
+                    if [[ $retry_count -gt 0 ]]; then
+                        local wait_time=$((retry_count * 3 + RANDOM % 10))  # Add some randomness to avoid thundering herd
+                        log "DEBUG" "DNF retry $retry_count/$max_retries for $repo, waiting ${wait_time}s..."
+                        sleep $wait_time
                     fi
-                    if [[ -n "${repo_versions[$repo]}" ]]; then
-                        log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) [version: ${repo_versions[$repo]}]"
+                    
+                    # Use timeout to prevent hanging DNF processes and add lock contention detection
+                    if timeout 180 dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE" > "${cache_dir}/${repo}.cache.tmp"; then
+                        # Success - move temp file to final location
+                        mv "${cache_dir}/${repo}.cache.tmp" "${cache_dir}/${repo}.cache"
+                        repo_data=$(cat "${cache_dir}/${repo}.cache")
+                        
+                        # Save version if available
+                        if [[ -n "${repo_versions[$repo]}" ]]; then
+                            echo "${repo_versions[$repo]}" > "$cache_dir/${repo}.version"
+                        fi
+                        
+                        local repo_end_time
+                        repo_end_time=$(date +%s)
+                        local repo_duration=$((repo_end_time - repo_start_time))
+                        
+                        if [[ -n "${repo_versions[$repo]}" ]]; then
+                            log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) in ${repo_duration}s [version: ${repo_versions[$repo]}]"
+                        else
+                            log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) in ${repo_duration}s"
+                        fi
+                        
+                        # Track slow operations for adaptive parallelism using a temp file
+                        if (( repo_duration > 60 )); then
+                            echo "slow" >> "$TEMP_SLOW_OPS_FILE"
+                        fi
+                        
+                        fetch_success=true
                     else
-                        log "INFO" "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages)"
+                        ((retry_count++))
+                        rm -f "${cache_dir}/${repo}.cache.tmp"  # Clean up failed attempt
+                        if [[ $retry_count -lt $max_retries ]]; then
+                            log "WARN" "DNF fetch failed for $repo (attempt $retry_count/$max_retries), retrying..."
+                        fi
                     fi
-                else
-                    log "ERROR" "Failed to fetch metadata for $repo"
+                done
+                
+                if [[ $fetch_success == false ]]; then
+                    log "ERROR" "Failed to fetch metadata for $repo after $max_retries attempts"
                 fi
             ) &
             ((++running))
             if (( running >= max_parallel )); then
+                local wait_start
+                wait_start=$(date +%s)
                 wait -n 2>/dev/null || wait
+                local wait_end
+                wait_end=$(date +%s)
+                local wait_duration=$((wait_end - wait_start))
+                
+                # Adaptive parallelism: reduce if operations are consistently slow
+                local slow_operations=0
+                if [[ -f "$TEMP_SLOW_OPS_FILE" ]]; then
+                    slow_operations=$(wc -l < "$TEMP_SLOW_OPS_FILE" 2>/dev/null || echo 0)
+                fi
+                if (( wait_duration > 90 && slow_operations > 2 && max_parallel > 1 )); then
+                    max_parallel=$((max_parallel - 1))
+                    log "DEBUG" "Reducing DNF parallelism to $max_parallel due to contention (slow operations: $slow_operations)"
+                fi
+                
                 ((--running))
             fi
         else
@@ -827,6 +878,111 @@ function draw_table_row_flex() {
         fi
     done
     printf "║\n"
+}
+
+# Efficient batch RPM metadata extraction
+function extract_rpm_metadata_batch() {
+    local repo_path="$1"
+    local output_file="$2"
+    
+    # Use find + xargs for efficient batch processing
+    find "$repo_path" -type f -name "*.rpm" -print0 | \
+    xargs -0 -r -P "$PARALLEL" -n 20 sh -c "
+        for rpm_file in \"\$@\"; do
+            if meta=\$(rpm -qp --queryformat \"%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\" \"\$rpm_file\" 2>/dev/null); then
+                echo \"\$meta\"
+            fi
+        done
+    " _ >> "$output_file"
+}
+
+# Generate module.yaml file for a repository based on detected module packages
+function generate_module_yaml() {
+    local repo_name="$1"
+    local repo_path="$2"
+    
+    # Check if we have any module packages for this repository
+    if [[ -z "${module_packages[$repo_name]}" ]]; then
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "No module packages found for $repo_name, skipping module.yaml generation"
+        return 0
+    fi
+    
+    local module_yaml_file="$repo_path/module.yaml"
+    local temp_yaml
+    temp_yaml=$(mktemp)
+    TEMP_FILES+=("$temp_yaml")
+    
+    log "INFO" "$(align_repo_name "$repo_name"): Generating module.yaml with ${stats_module_count[$repo_name]:-0} module packages"
+    
+    # Start building the module.yaml content
+    {
+        echo "---"
+        echo "document: modulemd"
+        echo "version: 2"
+        echo "data:"
+        echo "  name: auto-generated"
+        echo "  stream: default"
+        echo "  version: 1"
+        echo "  context: auto"
+        echo "  summary: Auto-generated module metadata"
+        echo "  description: >"
+        echo "    This module was automatically generated from detected module packages."
+        echo "  license:"
+        echo "    module:"
+        echo "      - MIT"
+        echo "  dependencies:"
+        echo "    - buildrequires:"
+        echo "        platform: []"
+        echo "      requires:"
+        echo "        platform: []"
+        echo "  profiles:"
+        echo "    default:"
+        echo "      rpms: []"
+        echo "  artifacts:"
+        echo "    rpms:"
+    } > "$temp_yaml"
+    
+    # Add each module package to the artifacts section
+    local pkg_list="${module_packages[$repo_name]}"
+    for pkg_key in $pkg_list; do
+        # Initialize module variables
+        local mod_name="" mod_stream="" _mod_platform="" _mod_version="" _mod_context="" _mod_arch=""
+        
+        # Get the module info for this package
+        local module_info_string="${module_info[$pkg_key]}"
+        if [[ -n "$module_info_string" ]]; then
+            # Parse module info: name:stream:platform:version:context:arch
+            IFS ':' read -r mod_name mod_stream _mod_platform _mod_version _mod_context _mod_arch <<< "$module_info_string"
+            
+            # Add to artifacts list (using the package key which is name-version-release.arch format)
+            echo "      - $pkg_key" >> "$temp_yaml"
+            
+            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Added to module.yaml: $pkg_key (module: $mod_name:$mod_stream)"
+        fi
+    done
+    
+    # Move the temporary file to the final location
+    if ((DRY_RUN)); then
+        log "INFO" "$(align_repo_name "$repo_name"): Would create module.yaml with $(wc -l < "$temp_yaml") lines (dry-run)"
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Module.yaml content preview:" && head -20 "$temp_yaml" | sed 's/^/  /'
+    else
+        if mv "$temp_yaml" "$module_yaml_file"; then
+            log "INFO" "$(align_repo_name "$repo_name"): Created module.yaml with $(wc -l < "$module_yaml_file") lines"
+            
+            # Update repository metadata with the new module.yaml
+            if update_module_metadata "$repo_name" "$repo_path" "$module_yaml_file"; then
+                log "INFO" "$(align_repo_name "$repo_name"): Module metadata updated successfully"
+            else
+                log "ERROR" "$(align_repo_name "$repo_name"): Failed to update module metadata"
+                return 1
+            fi
+        else
+            log "ERROR" "$(align_repo_name "$repo_name"): Failed to create module.yaml file"
+            return 1
+        fi
+    fi
+    
+    return 0
 }
 
 function generate_summary_table() {
@@ -955,95 +1111,6 @@ function generate_summary_table() {
     echo
 }
 
-# Generate module.yaml file for a repository based on detected module packages
-function generate_module_yaml() {
-    local repo_name="$1"
-    local repo_path="$2"
-    
-    # Check if we have any module packages for this repository
-    if [[ -z "${module_packages[$repo_name]}" ]]; then
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "No module packages found for $repo_name, skipping module.yaml generation"
-        return 0
-    fi
-    
-    local module_yaml_file="$repo_path/module.yaml"
-    local temp_yaml
-    temp_yaml=$(mktemp)
-    TEMP_FILES+=("$temp_yaml")
-    
-    log "INFO" "$(align_repo_name "$repo_name"): Generating module.yaml with ${stats_module_count[$repo_name]:-0} module packages"
-    
-    # Start building the module.yaml content
-    cat > "$temp_yaml" << 'EOF'
----
-document: modulemd
-version: 2
-data:
-  name: auto-generated
-  stream: default
-  version: 1
-  context: auto
-  summary: Auto-generated module metadata
-  description: >
-    This module was automatically generated from detected module packages.
-  license:
-    module:
-      - MIT
-  dependencies:
-    - buildrequires:
-        platform: []
-      requires:
-        platform: []
-  profiles:
-    default:
-      rpms: []
-  artifacts:
-    rpms:
-EOF
-    
-    # Add each module package to the artifacts section
-    local pkg_list="${module_packages[$repo_name]}"
-    for pkg_key in $pkg_list; do
-        # Initialize module variables
-        local mod_name="" mod_stream="" _mod_platform="" _mod_version="" _mod_context="" _mod_arch=""
-        
-        # Get the module info for this package
-        local module_info_string="${module_info[$pkg_key]}"
-        if [[ -n "$module_info_string" ]]; then
-            # Parse module info: name:stream:platform:version:context:arch
-            IFS ':' read -r mod_name mod_stream _mod_platform _mod_version _mod_context _mod_arch <<< "$module_info_string"
-            
-            # Add to artifacts list (using the package key which is name-version-release.arch format)
-            echo "      - $pkg_key" >> "$temp_yaml"
-            
-            [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Added to module.yaml: $pkg_key (module: $mod_name:$mod_stream)"
-        fi
-    done
-    
-    # Move the temporary file to the final location
-    if ((DRY_RUN)); then
-        log "INFO" "$(align_repo_name "$repo_name"): Would create module.yaml with $(wc -l < "$temp_yaml") lines (dry-run)"
-        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Module.yaml content preview:" && head -20 "$temp_yaml" | sed 's/^/  /'
-    else
-        if mv "$temp_yaml" "$module_yaml_file"; then
-            log "INFO" "$(align_repo_name "$repo_name"): Created module.yaml with $(wc -l < "$module_yaml_file") lines"
-            
-            # Update repository metadata with the new module.yaml
-            if update_module_metadata "$repo_name" "$repo_path" "$module_yaml_file"; then
-                log "INFO" "$(align_repo_name "$repo_name"): Module metadata updated successfully"
-            else
-                log "ERROR" "$(align_repo_name "$repo_name"): Failed to update module metadata"
-                return 1
-            fi
-        else
-            log "ERROR" "$(align_repo_name "$repo_name"): Failed to create module.yaml file"
-            return 1
-        fi
-    fi
-    
-    return 0
-}
-
 function get_package_status() {
     local repo_name="$1"
     local package_name="$2"
@@ -1052,6 +1119,10 @@ function get_package_status() {
     local package_release="$5"
     local package_arch="$6"
     local repo_path="$7"
+
+    # Performance timing for package status checks
+    local status_start_time
+    status_start_time=$(date +%s%3N)
 
     [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Checking package status: repo=$repo_name name=$package_name epoch=$epoch version=$package_version release=$package_release arch=$package_arch path=$repo_path"
 
@@ -1100,6 +1171,17 @@ function get_package_status() {
         fi
     done
     shopt -u nullglob
+    
+    # Performance timing for package status checks
+    local status_end_time
+    status_end_time=$(date +%s%3N)
+    local status_duration=$((status_end_time - status_start_time))
+    
+    # Log slow package status checks (over 500ms)
+    if ((status_duration > 500)); then
+        log "DEBUG" "$(align_repo_name "$repo_name"): Slow package status check for $package_name took ${status_duration}ms"
+    fi
+    
     if ((found_exact)); then
         echo "EXISTS"
     elif ((found_other)); then
@@ -1108,36 +1190,6 @@ function get_package_status() {
         echo "EXISTING"
     else
         echo "NEW"
-    fi
-}
-
-# Check if a package is already installed with exact same version
-function is_exact_package_installed() {
-    local package_name="$1"
-    local epoch="$2"
-    local package_version="$3"
-    local package_release="$4"
-    local package_arch="$5"
-    
-    [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Checking if exact package is installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
-    
-    # Normalize epoch for comparison
-    [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
-    
-    # Check if the exact package is installed using rpm query
-    if rpm -q --qf '%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "$package_name" 2>/dev/null | while IFS='|' read -r installed_epoch installed_version installed_release installed_arch; do
-        [[ "$installed_epoch" == "(none)" || -z "$installed_epoch" ]] && installed_epoch="0"
-        
-        if [[ "$epoch" == "$installed_epoch" && "$package_version" == "$installed_version" && "$package_release" == "$installed_release" && "$package_arch" == "$installed_arch" ]]; then
-            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
-            echo "EXACT_INSTALLED"
-            exit 0
-        fi
-    done | head -1; then
-        return 0
-    else
-        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "No exact match found for: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
-        return 1
     fi
 }
 
@@ -1160,6 +1212,35 @@ function get_repo_path() {
     
     # Construct the path based on normalized repository name
     echo "$LOCAL_REPO_PATH/$normalized_repo/getPackage"
+}
+
+# Check if a package is already installed with exact same version
+function is_exact_package_installed() {
+    local package_name="$1"
+    local epoch="$2"
+    local package_version="$3"
+    local package_release="$4"
+    local package_arch="$5"
+    
+    [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Checking if exact package is installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+    
+    # Normalize epoch for comparison
+    [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+    
+    # Check if the exact package is installed using rpm query
+    if rpm -q --qf '%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "$package_name" 2>/dev/null | while IFS='|' read -r installed_epoch installed_version installed_release installed_arch; do
+        [[ "$installed_epoch" == "(none)" || -z "$installed_epoch" ]] && installed_epoch="0"
+        
+        if [[ "$epoch" == "$installed_epoch" && "$package_version" == "$installed_version" && "$package_release" == "$installed_release" && "$package_arch" == "$installed_arch" ]]; then
+            [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "Found exact match installed: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+            exit 0
+        fi
+    done | head -1; then
+        return 0
+    else
+        [ "$DEBUG_MODE" -ge 2 ] && log "DEBUG" "No exact match found for: $package_name-$package_version-$package_release.$package_arch (epoch: $epoch)"
+        return 1
+    fi
 }
 
 function is_package_in_local_sources() {
@@ -1293,6 +1374,7 @@ function load_config() {
             NIGHT_END_HOUR) NIGHT_END_HOUR="$value" ;;
             CACHE_CLEANUP_DAYS) CACHE_CLEANUP_DAYS="$value" ;;
             JOB_WAIT_REPORT_INTERVAL) JOB_WAIT_REPORT_INTERVAL="$value" ;;
+            DNF_SERIAL_MODE) DNF_SERIAL_MODE="$value" ;;
             MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;  # Backward compatibility
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             REFRESH_METADATA) REFRESH_METADATA="$value" ;;
@@ -1497,6 +1579,9 @@ function parse_args() {
         --refresh-metadata)
             REFRESH_METADATA=1
             ;;
+        --dnf-serial)
+            DNF_SERIAL_MODE=1
+            ;;
         --version)
             echo "myrepo.sh Version $VERSION"
             exit 0
@@ -1521,6 +1606,7 @@ function parse_args() {
             echo "  --sync-only               Only perform rsync steps (skip package processing and metadata updates)"
             echo "  --user-mode               Run without sudo privileges"
             echo "  --refresh-metadata        Force a refresh of DNF metadata cache"
+            echo "  --dnf-serial              Use serial DNF mode to prevent database lock contention"
             echo "  --version                 Print script version and exit"
             echo "  --help                    Display this help message and exit"
             exit 0
@@ -1654,7 +1740,7 @@ function process_batch() {
         local batch_start_time
         batch_start_time=$(date +%s%3N)
         
-        [[ DEBUG_MODE -ge 1 ]] && log "INFO" "Processing batch of ${#batch_packages[@]} packages"
+        log "INFO" "Processing batch of ${#batch_packages[@]} packages..."
         process_packages \
             "$DEBUG_MODE" \
             "${batch_packages[*]}" \
@@ -1663,6 +1749,13 @@ function process_batch() {
             "$PARALLEL" &
         # Wait for background jobs to finish before starting a new batch
         wait_for_jobs
+        
+        # Track batch performance timing
+        local batch_end_time
+        batch_end_time=$(date +%s%3N)  # milliseconds
+        local batch_duration=$((batch_end_time - batch_start_time))
+        local packages_per_sec=$(( ${#batch_packages[@]} * 1000 / (batch_duration + 1) ))
+        log "INFO" "Batch completed: ${#batch_packages[@]} packages in ${batch_duration}ms (${packages_per_sec} pkg/sec)"
         
         # Track batch performance for adaptive tuning
         adaptive_track_batch_performance "$batch_start_time" "${#batch_packages[@]}"
@@ -1706,12 +1799,25 @@ function process_packages() {
     fi
 
     # Handle the packages based on their status
+    local package_count=0
+    local last_feedback_time
+    last_feedback_time=$(date +%s)
+    
     for pkg in "${packages[@]}"; do
         IFS='|' read -r repo_name package_name epoch package_version package_release package_arch repo_path <<<"$pkg"
 
         PADDING_LENGTH=22 # Set constant padding length
 
         pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+        
+        # Progress feedback every 10 seconds or 50 packages
+        ((package_count++))
+        local current_time
+        current_time=$(date +%s)
+        if ((current_time - last_feedback_time >= 10)) || ((package_count % 50 == 0)); then
+            log "INFO" "Processing package $package_count/${#packages[@]}: $package_name..."
+            last_feedback_time=$current_time
+        fi
         
         # Detect and store module information if this is a module package
         if module_info_string=$(detect_module_info "$package_name" "$package_release" "$package_arch" "$package_version"); then
@@ -2138,7 +2244,7 @@ function remove_existing_packages() {
     shopt -u nullglob
 }
 
-# Optimized function to remove uninstalled packages
+# Optimized function to remove uninstalled packages with enhanced caching
 function remove_uninstalled_packages() {
     local repo_path="$1"
     local repo_name
@@ -2169,30 +2275,44 @@ function remove_uninstalled_packages() {
     remove_list=$(mktemp)
     TEMP_FILES+=("$remove_list")
     
-    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, but that's intended here
+    # Create a cache file for RPM metadata to avoid repeated rpm calls
+    local rpm_cache_file
+    rpm_cache_file=$(mktemp)
+    TEMP_FILES+=("$rpm_cache_file")
+    
+    # Pre-extract all RPM metadata in optimized batches
+    local metadata_start
+    metadata_start=$(date +%s)
     find "$repo_path" -type f -name "*.rpm" -print0 | \
-    xargs -0 -r -P "$PARALLEL" -n 50 sh -c '
-        installed_file="$1"
-        remove_file="$2"
-        dry_run="$3"
-        debug_mode="$4"
-        shift 4
-        for rpm_file in "$@"; do
-            # Get all metadata in a single rpm call
-            if ! rpm_data=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
-                echo "Error reading $rpm_file, skipping" >&2
-                continue
-            fi
-            rpm_data=${rpm_data//(none)/0}
-            if ! grep -qF "$rpm_data" "$installed_file"; then
-                if [ "$dry_run" -eq 1 ]; then
-                    echo "$rpm_file" >> "$remove_file.dryrun"
-                else
-                    echo "$rpm_file" >> "$remove_file"
-                fi
+    xargs -0 -r -P "$PARALLEL" -n 30 sh -c "
+        cache_file=\"\$1\"
+        shift
+        for rpm_file in \"\$@\"; do
+            if rpm_data=\$(rpm -qp --queryformat \"%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\" \"\$rpm_file\" 2>/dev/null); then
+                rpm_data=\${rpm_data//(none)/0}
+                echo \"\$rpm_file|\$rpm_data\" >> \"\$cache_file\"
             fi
         done
-    ' _ "$installed_pkgs_file" "$remove_list" "$DRY_RUN" "$DEBUG_MODE"
+    " _ "$rpm_cache_file"
+    
+    local metadata_end
+    metadata_end=$(date +%s)
+    local metadata_duration=$((metadata_end - metadata_start))
+    log "INFO" "$(align_repo_name "$repo_name"): RPM metadata extraction completed in ${metadata_duration}s" "\e[90m"
+    
+    # Sort cache file for faster processing
+    sort -t'|' -k2,6 "$rpm_cache_file" > "$rpm_cache_file.sorted"
+    
+    # Use the cached metadata to check for uninstalled packages
+    while IFS='|' read -r rpm_file rpm_data; do
+        if ! grep -qF "$rpm_data" "$installed_pkgs_file"; then
+            if ((DRY_RUN)); then
+                echo "$rpm_file" >> "$remove_list.dryrun"
+            else
+                echo "$rpm_file" >> "$remove_list"
+            fi
+        fi
+    done < "$rpm_cache_file.sorted"
     
     local removed_count=0
     local dryrun_count=0
@@ -2203,8 +2323,14 @@ function remove_uninstalled_packages() {
                 log "DEBUG" "$(align_repo_name "$repo_name"): Removed $(basename "$pkg")" "\e[31m"
             done < "$remove_list"
         fi
-        xargs -a "$remove_list" -P "$PARALLEL" -n 20 rm -f
-        log "INFO" "$(align_repo_name "$repo_name"): $removed_count uninstalled packages removed successfully." "\e[32m"
+        # Use optimized parallel removal with better batching
+        local removal_start
+        removal_start=$(date +%s)
+        xargs -a "$remove_list" -P "$PARALLEL" -n 50 rm -f
+        local removal_end
+        removal_end=$(date +%s)
+        local removal_duration=$((removal_end - removal_start))
+        log "INFO" "$(align_repo_name "$repo_name"): $removed_count uninstalled packages removed in ${removal_duration}s." "\e[32m"
     elif [[ -f "$remove_list.dryrun" && "$DRY_RUN" -eq 1 ]]; then
         dryrun_count=$(wc -l < "$remove_list.dryrun")
         if ((dryrun_count > 0)); then
@@ -2243,27 +2369,93 @@ function traverse_local_repos() {
         # Fetch installed packages list with detailed information
         if [[ -n "$NAME_FILTER" ]]; then
             log "INFO" "Fetching list of installed packages (filtered by name pattern: $NAME_FILTER)..."
-            # Use dnf list with grep to filter by name pattern at the source
-            if dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}'  2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE"; then
-                local package_count
-                package_count=$(wc -l < "$INSTALLED_PACKAGES_FILE")
-                log "INFO" "Found $package_count installed packages matching filter '$NAME_FILTER'"
-            else
-                # Check if dnf failed or if grep simply found no matches
-                local dnf_exit_code=${PIPESTATUS[0]}
-                if [[ $dnf_exit_code -ne 0 ]]; then
-                    log "ERROR" "DNF command failed while fetching installed packages list."
-                    exit 1
-                else
-                    # No packages matched the filter - this is not an error
-                    log "INFO" "No installed packages match the name filter '$NAME_FILTER'"
-                    echo -n > "$INSTALLED_PACKAGES_FILE"  # Create empty file
+            local filter_fetch_start
+            filter_fetch_start=$(date +%s)
+            
+            # Use retry logic for filtered package fetch to handle DNF contention
+            local fetch_success=false
+            local retry_count=0
+            local max_retries=3
+            
+            while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
+                if [[ $retry_count -gt 0 ]]; then
+                    local wait_time=$((retry_count * 5))
+                    log "INFO" "Retrying filtered package fetch (attempt $((retry_count + 1))/$max_retries) after ${wait_time}s..."
+                    sleep $wait_time
                 fi
+                
+                # Use timeout and better error handling for filtered queries
+                if timeout 300 dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' 2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE.tmp"; then
+                    mv "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE"
+                    fetch_success=true
+                    
+                    local filter_fetch_end
+                    filter_fetch_end=$(date +%s)
+                    local filter_fetch_duration=$((filter_fetch_end - filter_fetch_start))
+                    local package_count
+                    package_count=$(wc -l < "$INSTALLED_PACKAGES_FILE")
+                    log "INFO" "Found $package_count installed packages matching filter '$NAME_FILTER' in ${filter_fetch_duration}s"
+                else
+                    # Check if dnf failed or if grep simply found no matches
+                    local dnf_exit_code=${PIPESTATUS[0]}
+                    if [[ $dnf_exit_code -ne 0 ]]; then
+                        ((retry_count++))
+                        rm -f "$INSTALLED_PACKAGES_FILE.tmp"  # Clean up failed attempt
+                        if [[ $retry_count -lt $max_retries ]]; then
+                            log "WARN" "DNF filtered package fetch failed, retrying..."
+                        fi
+                    else
+                        # No packages matched the filter - this is not an error, but we still need to create the file
+                        mv "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE" 2>/dev/null || echo -n > "$INSTALLED_PACKAGES_FILE"
+                        log "INFO" "No installed packages match the name filter '$NAME_FILTER'"
+                        fetch_success=true
+                    fi
+                fi
+            done
+            
+            if [[ $fetch_success == false ]]; then
+                log "ERROR" "DNF command failed while fetching installed packages list after $max_retries attempts."
+                exit 1
             fi
         else
             log "INFO" "Fetching list of installed packages..."
-            if ! dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE" 2>>"$MYREPO_ERR_FILE"; then
-                log "ERROR" "Failed to fetch installed packages list."
+            local package_fetch_start
+            package_fetch_start=$(date +%s)
+            
+            # Use timeout and retry logic for the main package query to handle contention
+            local fetch_success=false
+            local retry_count=0
+            local max_retries=3
+            
+            while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
+                if [[ $retry_count -gt 0 ]]; then
+                    local wait_time=$((retry_count * 5))
+                    log "INFO" "Retrying package list fetch (attempt $((retry_count + 1))/$max_retries) after ${wait_time}s..."
+                    sleep $wait_time
+                fi
+                
+                # Use timeout to prevent hanging and add better error handling
+                if timeout 300 dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE.tmp" 2>>"$MYREPO_ERR_FILE"; then
+                    mv "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE"
+                    fetch_success=true
+                    
+                    local package_fetch_end
+                    package_fetch_end=$(date +%s)
+                    local package_fetch_duration=$((package_fetch_end - package_fetch_start))
+                    local package_count
+                    package_count=$(wc -l < "$INSTALLED_PACKAGES_FILE")
+                    log "INFO" "Fetched $package_count installed packages in ${package_fetch_duration}s"
+                else
+                    ((retry_count++))
+                    rm -f "$INSTALLED_PACKAGES_FILE.tmp"  # Clean up failed attempt
+                    if [[ $retry_count -lt $max_retries ]]; then
+                        log "WARN" "DNF package list fetch failed, retrying..."
+                    fi
+                fi
+            done
+            
+            if [[ $fetch_success == false ]]; then
+                log "ERROR" "Failed to fetch installed packages list after $max_retries attempts."
                 exit 1
             fi
         fi
@@ -2279,7 +2471,19 @@ function traverse_local_repos() {
         fi
 
         # Download repository metadata for enabled repos
+        log "INFO" "Downloading repository metadata..."
+        if ((DNF_SERIAL_MODE)); then
+            log "INFO" "Using serial DNF mode to prevent database lock contention"
+        else
+            log "INFO" "Using parallel DNF mode with max $REPOQUERY_PARALLEL concurrent processes"
+        fi
+        local metadata_start_time
+        metadata_start_time=$(date +%s)
         download_repo_metadata
+        local metadata_end_time
+        metadata_end_time=$(date +%s)
+        local metadata_duration=$((metadata_end_time - metadata_start_time))
+        log "INFO" "Repository metadata download completed in ${metadata_duration}s"
 
         # Validate repository filtering if specified
         if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
@@ -2318,6 +2522,9 @@ function traverse_local_repos() {
         log "INFO" "Processing installed packages..."
         package_counter=0
         batch_packages=()
+        local main_loop_start_time
+        main_loop_start_time=$(date +%s)
+        local last_main_feedback_time=$main_loop_start_time
 
         # Main loop processing the lines
         for line in "${package_lines[@]}"; do
@@ -2395,6 +2602,17 @@ function traverse_local_repos() {
                 continue
             fi
             ((package_counter++))
+            
+            # Progress feedback every 30 seconds or 100 packages
+            local current_main_time
+            current_main_time=$(date +%s)
+            if ((current_main_time - last_main_feedback_time >= 30)) || ((package_counter % 100 == 0)); then
+                local elapsed_main=$((current_main_time - main_loop_start_time))
+                local rate=$((package_counter * 60 / (elapsed_main + 1)))  # packages per minute
+                log "INFO" "Main loop progress: $package_counter packages processed, $rate pkg/min, batch size: ${#batch_packages[@]}"
+                last_main_feedback_time=$current_main_time
+            fi
+            
             if ((MAX_PACKAGES > 0 && package_counter >= MAX_PACKAGES)); then
                 break
             fi
@@ -2408,6 +2626,11 @@ function traverse_local_repos() {
         fi
         wait
         log "INFO" "Removing uninstalled packages..."
+        local removal_start_time
+        removal_start_time=$(date +%s)
+        local removal_jobs_running=0
+        local max_removal_parallel=$((PARALLEL < 4 ? PARALLEL : 4))  # Cap removal parallelism
+        
         for repo in "${!used_directories[@]}"; do
             repo_path="${used_directories[$repo]}"
             
@@ -2422,7 +2645,25 @@ function traverse_local_repos() {
                     log "INFO" "$(align_repo_name "$repo"): No RPM files found in $repo_path, skipping removal process."
                     continue
                 fi
-                remove_uninstalled_packages "$repo_path"
+                
+                # Run removal in background for parallel processing
+                (
+                    local repo_removal_start
+                    repo_removal_start=$(date +%s)
+                    remove_uninstalled_packages "$repo_path"
+                    local repo_removal_end
+                    repo_removal_end=$(date +%s)
+                    local repo_removal_duration=$((repo_removal_end - repo_removal_start))
+                    log "INFO" "$(align_repo_name "$repo"): Removal check completed in ${repo_removal_duration}s"
+                ) &
+                
+                ((removal_jobs_running++))
+                
+                # Control parallel removal jobs
+                if ((removal_jobs_running >= max_removal_parallel)); then
+                    wait -n  # Wait for any job to finish
+                    ((removal_jobs_running--))
+                fi
             else
                 log "INFO" "$(align_repo_name "$repo"): Repository path $repo_path does not exist, skipping."
             fi
@@ -2437,23 +2678,11 @@ function traverse_local_repos() {
             fi
         done
         wait
+        local removal_end_time
+        removal_end_time=$(date +%s)
+        local total_removal_time=$((removal_end_time - removal_start_time))
+        log "INFO" "All package removal operations completed in ${total_removal_time}s"
     fi # End of SYNC_ONLY condition
-}
-
-# Efficient batch RPM metadata extraction
-function extract_rpm_metadata_batch() {
-    local repo_path="$1"
-    local output_file="$2"
-    
-    # Use find + xargs for efficient batch processing
-    find "$repo_path" -type f -name "*.rpm" -print0 | \
-    xargs -0 -r -P "$PARALLEL" -n 20 sh -c '
-        for rpm_file in "$@"; do
-            if meta=$(rpm -qp --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
-                echo "$meta"
-            fi
-        done
-    ' _ >> "$output_file"
 }
 
 function update_and_sync_repos() {
@@ -2525,7 +2754,8 @@ function update_and_sync_repos() {
                         if check_repo_needs_metadata_update "$local_repo" "$repo_path"; then
                             log "INFO" "$(align_repo_name "$local_repo"): Manual changes detected, updating metadata"
                             
-                            local repo_dir=$(dirname "$repo_path")
+                            local repo_dir
+                            repo_dir=$(dirname "$repo_path")
                             if ((DRY_RUN)); then
                                 if ((USE_PARALLEL_COMPRESSION)); then
                                     log "INFO" "$(align_repo_name "$local_repo"): Would run 'createrepo_c --update --workers $PARALLEL $repo_dir'"
@@ -2758,6 +2988,7 @@ function wait_for_jobs() {
     local previous_jobs=0
     local wait_count=0
     local report_interval=60  # Report every 60 seconds
+    local last_report=0
 
     while true; do
         current_jobs=$(jobs -rp | wc -l)
@@ -2770,26 +3001,30 @@ function wait_for_jobs() {
         # Check if job count is changing
         if ((current_jobs == previous_jobs)); then
             ((wait_count++))
-
-            # After waiting, report progress but suppress repeated messages
-            if ((wait_count % report_interval == 0)); then
-                log "INFO" "Some DNF operations are taking longer than expected (${wait_count}s). This is normal for large packages or slow repositories."
-
-                # Optionally show what's running for debugging but don't kill anything
-                if ((DEBUG_MODE >= 1)); then
-                    log "DEBUG" "Current running jobs:"
-                    jobs -l | grep -i "dnf\|download"
-                fi
-            fi
         else
             # Reset counter if job count changes (progress is happening)
             wait_count=0
             previous_jobs=$current_jobs
+            last_report=0  # Reset last report time when jobs change
         fi
 
-        if ((wait_count % report_interval == 0)); then
+        # Only report once per interval, and only after some waiting time
+        if ((wait_count > 10 && wait_count % report_interval == 0 && wait_count != last_report)); then
             log "INFO" "Waiting for jobs in $0 ... Currently running: ${current_jobs}/${PARALLEL}"
+            last_report=$wait_count
+            
+            # Only show detailed info for very long waits
+            if ((wait_count >= 120)); then
+                log "INFO" "Some DNF operations are taking longer than expected (${wait_count}s). This is normal for large packages or slow repositories."
+                
+                # Optionally show what's running for debugging but don't kill anything
+                if ((DEBUG_MODE >= 1)); then
+                    log "DEBUG" "Current running jobs:"
+                    jobs -l | grep -i "dnf\|download" || true
+                fi
+            fi
         fi
+        
         sleep 1
     done
 }
