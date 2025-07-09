@@ -165,7 +165,10 @@ function adaptive_track_batch_performance() {
     ((total_packages_processed += batch_package_count))
     ((batch_counter++))
     
-    [[ $DEBUG_MODE -ge 2 ]] && log "DEBUG" "Batch performance: ${batch_package_count} packages in ${batch_duration}ms"
+    # Only log batch performance in debug mode or for very slow batches
+    if [[ $DEBUG_MODE -ge 2 ]] || [[ $batch_duration -gt 2000 ]]; then
+        log "DEBUG" "Batch performance: ${batch_package_count} packages in ${batch_duration}ms"
+    fi
     
     # Trigger adaptive tuning every TUNE_INTERVAL batches
     if [[ $((batch_counter % TUNE_INTERVAL)) -eq 0 ]]; then
@@ -228,7 +231,7 @@ function adaptive_tune_performance() {
     
     # Apply changes if they make sense
     if [[ $new_batch_size -ne $BATCH_SIZE ]] || [[ $new_parallel -ne $PARALLEL ]]; then
-        log "INFO" "Adaptive tuning: batch_size $BATCH_SIZE→$new_batch_size, parallel $PARALLEL→$new_parallel (efficiency: $current_efficiency)"
+        [[ $DEBUG_MODE -ge 1 ]] && log "DEBUG" "Adaptive tuning: batch_size $BATCH_SIZE→$new_batch_size, parallel $PARALLEL→$new_parallel (efficiency: $current_efficiency)"
         BATCH_SIZE=$new_batch_size
         PARALLEL=$new_parallel
         
@@ -1740,7 +1743,7 @@ function process_batch() {
         local batch_start_time
         batch_start_time=$(date +%s%3N)
         
-        log "INFO" "Processing batch of ${#batch_packages[@]} packages..."
+        [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Processing batch of ${#batch_packages[@]} packages..."
         process_packages \
             "$DEBUG_MODE" \
             "${batch_packages[*]}" \
@@ -1755,7 +1758,11 @@ function process_batch() {
         batch_end_time=$(date +%s%3N)  # milliseconds
         local batch_duration=$((batch_end_time - batch_start_time))
         local packages_per_sec=$(( ${#batch_packages[@]} * 1000 / (batch_duration + 1) ))
-        log "INFO" "Batch completed: ${#batch_packages[@]} packages in ${batch_duration}ms (${packages_per_sec} pkg/sec)"
+        
+        # Only log batch completion for large batches or debug mode
+        if [[ $DEBUG_MODE -ge 1 ]]; then
+            log "DEBUG" "Batch completed: ${#batch_packages[@]} packages in ${batch_duration}ms (${packages_per_sec} pkg/sec)"
+        fi
         
         # Track batch performance for adaptive tuning
         adaptive_track_batch_performance "$batch_start_time" "${#batch_packages[@]}"
@@ -1815,7 +1822,7 @@ function process_packages() {
         local current_time
         current_time=$(date +%s)
         if ((current_time - last_feedback_time >= 10)) || ((package_count % 50 == 0)); then
-            log "INFO" "Processing package $package_count/${#packages[@]}: $package_name..."
+            [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Processing package $package_count/${#packages[@]}: $package_name..."
             last_feedback_time=$current_time
         fi
         
@@ -1869,7 +1876,7 @@ function process_packages() {
                 fi
             else
                 # Default behavior: log immediately
-                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch exists." "\e[32m" # Green
+                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already exists in repo." "\e[32m" # Green
             fi
             mark_processed "$pkg_key"
             ;;
@@ -1916,7 +1923,7 @@ function process_packages() {
                 [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Package $package_name-$package_version-$package_release.$package_arch is already installed with exact same version, no local cache found"
                 # No local copy available but package is installed, treat as exists since it's installed
                 ((stats_exists_count["$repo_name"]++))
-                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already installed (no local copy)." "\e[32m" # Green
+                log "INFO" "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already installed." "\e[32m" # Green
                 mark_processed "$pkg_key"
             else
                 # No local copy found and not installed - proceed with download
@@ -2084,9 +2091,14 @@ function process_packages() {
                 fi
                 
                 if [[ $count -eq 1 ]]; then
-                    log "INFO" "$(align_repo_name "$repo_name"): 1 package already exists${first_letters}." "\e[32m" # Green
+                    # Show individual messages for single packages
+                    log "INFO" "$(align_repo_name "$repo_name"): 1 package already exists in repo${first_letters}." "\e[32m" # Green
+                elif [[ $count -gt 5 ]]; then
+                    # Show summary for larger counts to reduce noise
+                    log "INFO" "$(align_repo_name "$repo_name"): $count packages already exist in repo${first_letters}." "\e[32m" # Green
                 else
-                    log "INFO" "$(align_repo_name "$repo_name"): $count packages already exist${first_letters}." "\e[32m" # Green
+                    # For small counts (2-5), show in debug mode only
+                    [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "$(align_repo_name "$repo_name"): $count packages already exist in repo${first_letters}." "\e[32m" # Green
                 fi
                 # Optionally show package details in debug mode
                 if [[ $DEBUG_MODE -ge 1 ]]; then
@@ -2606,10 +2618,10 @@ function traverse_local_repos() {
             # Progress feedback every 30 seconds or 100 packages
             local current_main_time
             current_main_time=$(date +%s)
-            if ((current_main_time - last_main_feedback_time >= 30)) || ((package_counter % 100 == 0)); then
+            if ((current_main_time - last_main_feedback_time >= 60)) || ((package_counter % 500 == 0)); then
                 local elapsed_main=$((current_main_time - main_loop_start_time))
                 local rate=$((package_counter * 60 / (elapsed_main + 1)))  # packages per minute
-                log "INFO" "Main loop progress: $package_counter packages processed, $rate pkg/min, batch size: ${#batch_packages[@]}"
+                [ "$DEBUG_MODE" -ge 1 ] && log "DEBUG" "Main loop progress: $package_counter packages processed, $rate pkg/min, batch size: ${#batch_packages[@]}"
                 last_main_feedback_time=$current_main_time
             fi
             
