@@ -6,7 +6,7 @@
 
 # MIT licensing
 # Purpose:
-# This script replicates and updates a local repository from installed packages
+# This script replicates and updates repositories from installed packages
 # and synchronizes it with a shared repository, handling updates and cleanup of
 
 # NOTE: Function order should be alphabetized in a future refactoring effort.
@@ -16,7 +16,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.3.0
+VERSION=2.3.1
  # Default values for environment variables if not set
 : "${BATCH_SIZE:=50}"                  # Optimized starting point based on performance analysis
 : "${CONTINUE_ON_ERROR:=0}"
@@ -56,6 +56,13 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${REFRESH_METADATA:=0}"
 : "${IO_BUFFER_SIZE:=8192}"                # Buffer size for file operations
 : "${USE_PARALLEL_COMPRESSION:=1}"         # Enable parallel compression for createrepo
+
+# DNF timeout and retry defaults
+: "${DNF_TIMEOUT_SECONDS:=300}"            # Timeout for DNF operations (5 minutes)
+: "${DNF_MAX_RETRIES:=3}"                  # Maximum number of retry attempts for DNF operations
+: "${DNF_RETRY_DELAY:=5}"                  # Base delay between retries (seconds, multiplied by attempt number)
+: "${CURL_TIMEOUT_SECONDS:=10}"            # Timeout for curl operations
+: "${SUDO_TIMEOUT_SECONDS:=10}"            # Timeout for sudo operations
 
 # Permission management defaults
 : "${SET_PERMISSIONS:=0}"                  # Set to 1 to automatically fix permission issues
@@ -344,7 +351,7 @@ function analyze_performance() {
     fi
 }
 
-# Check if a local repository needs metadata update using ACCURATE (content) method
+# Check if a repository needs metadata update using ACCURATE (content) method
 function check_repo_needs_metadata_update_accurate() {
     local repo_name="$1"
     local repo_path="$2"
@@ -398,7 +405,7 @@ function check_repo_needs_metadata_update() {
     esac
 }
 
-# Check if a local repository needs metadata update using FAST (timestamp) method
+# Check if a repository needs metadata update using FAST (timestamp) method
 function check_repo_needs_metadata_update_fast() {
     local repo_name="$1"
     local repo_path="$2"
@@ -446,14 +453,14 @@ function check_repo_subdirectory_permissions() {
             if [[ -d "$repo_path" ]]; then
                 if [[ ! -w "$repo_path" ]]; then
                     if [[ $IS_USER_MODE -eq 1 ]]; then
-                        log 0 "Local repo directory not writable by current user: $repo_path"
+                        log 0 "Repository directory not writable by current user: $repo_path"
                         ((error_count++))
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo' write permission FAILED"
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo' write permission FAILED"
                     else
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo' not writable, but running as root"
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo' not writable, but running as root"
                     fi
                 else
-                    [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo' write permission PASSED"
+                    [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo' write permission PASSED"
                 fi
                 
                 # Check getPackage subdirectory if it exists
@@ -461,14 +468,14 @@ function check_repo_subdirectory_permissions() {
                 if [[ -d "$package_path" ]]; then
                     if [[ ! -w "$package_path" ]]; then
                         if [[ $IS_USER_MODE -eq 1 ]]; then
-                            log 0 "Local repo getPackage directory not writable: $package_path"
+                            log 0 "Repository getPackage directory not writable: $package_path"
                             ((error_count++))
-                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/getPackage' write permission FAILED"
+                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/getPackage' write permission FAILED"
                         else
-                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/getPackage' not writable, but running as root"
+                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/getPackage' not writable, but running as root"
                         fi
                     else
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/getPackage' write permission PASSED"
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/getPackage' write permission PASSED"
                     fi
                 fi
                 
@@ -477,21 +484,21 @@ function check_repo_subdirectory_permissions() {
                 if [[ -d "$repodata_path" ]]; then
                     if [[ ! -w "$repodata_path" ]]; then
                         if [[ $IS_USER_MODE -eq 1 ]]; then
-                            log 0 "Local repo repodata directory not writable: $repodata_path"
+                            log 0 "Repository repodata directory not writable: $repodata_path"
                             ((error_count++))
-                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/repodata' write permission FAILED"
+                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/repodata' write permission FAILED"
                         else
-                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/repodata' not writable, but running as root"
+                            [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/repodata' not writable, but running as root"
                         fi
                     else
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Local repo '$repo/repodata' write permission PASSED"
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log 3 "validate_config: Repository '$repo/repodata' write permission PASSED"
                     fi
                 fi
             fi
         done
         
         if [[ $error_count -gt 0 && $IS_USER_MODE -eq 1 ]]; then
-            log 0 "Found $error_count write permission issues in local repositories."
+            log 0 "Found $error_count write permission issues in repository directories."
             log 0 "Fix permissions with: sudo chown -R $(whoami):$(id -gn) $base_path"
         fi
     else
@@ -631,9 +638,8 @@ function check_user_mode() {
         # Check if user is in sudoers by testing a harmless sudo command
         if ! sudo -n true 2>/dev/null; then
             log 3 "check_user_mode: Passwordless sudo not available, testing with timeout..."
-            
-            # Test sudo with a short timeout to avoid hanging
-            if ! timeout 5 sudo -k -p "Enter sudo password for user mode verification: " true 2>/dev/null; then
+                 # Test sudo with a short timeout to avoid hanging
+        if ! timeout "$((SUDO_TIMEOUT_SECONDS / 2))" sudo -k -p "Enter sudo password for user mode verification: " true 2>/dev/null; then
                 log 0 "User mode requires sudo privileges. Please ensure:"
                 log 0 "1. Your user is in the sudoers group (wheel)"
                 log 0 "2. You can run 'sudo dnf' commands"
@@ -648,7 +654,7 @@ function check_user_mode() {
         log 3 "check_user_mode: Testing sudo access to dnf commands..."
         if ! sudo -n dnf --version >/dev/null 2>&1; then
             log 3 "check_user_mode: Passwordless dnf access not available, testing with prompt..."
-            if ! timeout 10 sudo dnf --version >/dev/null 2>&1; then
+            if ! timeout "$SUDO_TIMEOUT_SECONDS" sudo dnf --version >/dev/null 2>&1; then
                 log 1 "Warning: sudo access to dnf commands may be limited"
                 log 1 "Some operations may fail or require password prompts"
             fi
@@ -934,7 +940,7 @@ function download_repo_metadata() {
         local url="$1"
         local version=""
         # Try to fetch and parse repomd.xml
-        if curl -s --max-time 10 "$url" >"$cache_dir/repomd.xml.tmp"; then
+        if curl -s --max-time "$CURL_TIMEOUT_SECONDS" "$url" >"$cache_dir/repomd.xml.tmp"; then
             # Try to extract <revision> (timestamp) or <checksum>
             version=$(awk -F'[<>]' '/<revision>/ {print $3; exit}' "$cache_dir/repomd.xml.tmp")
             if [[ -z "$version" ]]; then
@@ -1000,18 +1006,18 @@ function download_repo_metadata() {
                 repo_start_time=$(date +%s)
                 local fetch_success=false
                 local retry_count=0
-                local max_retries=3
+                local max_retries=$DNF_MAX_RETRIES
                 
                 # Retry logic for DNF contention issues
                 while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
                     if [[ $retry_count -gt 0 ]]; then
-                        local wait_time=$((retry_count * 3 + RANDOM % 10))  # Add some randomness to avoid thundering herd
+                        local wait_time=$((retry_count * DNF_RETRY_DELAY + RANDOM % 10))  # Add some randomness to avoid thundering herd
                         log 3 "DNF retry $retry_count/$max_retries for $repo, waiting ${wait_time}s..."
-                        sleep $wait_time
+                        sleep "$wait_time"
                     fi
                     
                     # Use timeout to prevent hanging DNF processes and add lock contention detection
-                    if timeout 180 dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE" > "${cache_dir}/${repo}.cache.tmp"; then
+                    if timeout "$DNF_TIMEOUT_SECONDS" dnf repoquery -y --arch=x86_64,noarch --disablerepo="*" --enablerepo="$repo" --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>>"$MYREPO_ERR_FILE" > "${cache_dir}/${repo}.cache.tmp"; then
                         # Success - move temp file to final location
                         mv "${cache_dir}/${repo}.cache.tmp" "${cache_dir}/${repo}.cache"
                         repo_data=$(cat "${cache_dir}/${repo}.cache")
@@ -1755,6 +1761,12 @@ function load_config() {
             DNF_SERIAL_MODE) DNF_SERIAL_MODE="$value" ;;
             REPOQUERY_PARALLEL) REPOQUERY_PARALLEL="$value" ;;
             REFRESH_METADATA) REFRESH_METADATA="$value" ;;
+            # DNF timeout and retry variables
+            DNF_TIMEOUT_SECONDS) DNF_TIMEOUT_SECONDS="$value" ;;
+            DNF_MAX_RETRIES) DNF_MAX_RETRIES="$value" ;;
+            DNF_RETRY_DELAY) DNF_RETRY_DELAY="$value" ;;
+            CURL_TIMEOUT_SECONDS) CURL_TIMEOUT_SECONDS="$value" ;;
+            SUDO_TIMEOUT_SECONDS) SUDO_TIMEOUT_SECONDS="$value" ;;
             # Adaptive performance tuning variables
             ADAPTIVE_TUNING) ADAPTIVE_TUNING="$value" ;;
             MIN_BATCH_SIZE) MIN_BATCH_SIZE="$value" ;;
@@ -2065,18 +2077,18 @@ function parse_args() {
 
 # Then add this function before is_package_in_local_sources() is called
 function populate_repo_cache() {
-    log 2 "Building local package cache for ${#MANUAL_REPOS[@]} repositories..."
-    log 2 "This may take a moment while scanning local RPM files..."
+    log 2 "Building manual repository package cache for ${#MANUAL_REPOS[@]} manual repositories..."
+    log 2 "This may take a moment while scanning manual repository RPM files..."
     
     # Initialize the repo_cache associative array
     local repo_count=0
     for repo in "${MANUAL_REPOS[@]}"; do
         ((repo_count++))
-        log 2 "Scanning repository $repo_count/${#MANUAL_REPOS[@]}: $repo..."
+        log 2 "Scanning manual repository $repo_count/${#MANUAL_REPOS[@]}: $repo..."
         
         # Skip if the repository is excluded
         if [[ " ${EXCLUDED_REPOS[*]} " == *" ${repo} "* ]]; then
-            log 3 "Skipping excluded repository: $repo"
+            log 3 "Skipping excluded manual repository: $repo"
             continue
         fi
         
@@ -2100,15 +2112,15 @@ function populate_repo_cache() {
             repo_cache["$repo"]=$(cat "$tmp_file")
             local package_count
             package_count=$(wc -l < "$tmp_file")
-            log 3 "Cached $package_count packages from $repo"
+            log 3 "Cached $package_count packages from manual repository $repo"
         else
             # If directory doesn't exist, initialize with empty string
             repo_cache["$repo"]=""
-            log 3 "Repository directory not found: $repo_path"
+            log 3 "Manual repository directory not found: $repo_path"
         fi
     done
     
-    log 2 "Local package cache build completed for ${#MANUAL_REPOS[@]} repositories."
+    log 2 "Manual repository package cache build completed for ${#MANUAL_REPOS[@]} manual repositories."
 }
 
 function prepare_log_files() {
@@ -2875,8 +2887,8 @@ function set_parallel_downloads() {
     fi
 }
 
-# Traverse all packages and place them in manual repositories
-function traverse_manual_repos() {
+# Traverse all packages and place them in all repositories
+function traverse_all_repos() {
     if ((SYNC_ONLY == 0)); then
 
         # Fetch installed packages list with detailed information
@@ -2889,17 +2901,17 @@ function traverse_manual_repos() {
             # Use retry logic for filtered package fetch to handle DNF contention
             local fetch_success=false
             local retry_count=0
-            local max_retries=3
+            local max_retries=$DNF_MAX_RETRIES
             
             while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
                 if [[ $retry_count -gt 0 ]]; then
-                    local wait_time=$((retry_count * 5))
+                    local wait_time=$((retry_count * DNF_RETRY_DELAY))
                     log 2 "Retrying filtered package fetch (attempt $((retry_count + 1))/$max_retries) after ${wait_time}s..."
-                    sleep $wait_time
+                    sleep "$wait_time"
                 fi
                 
                 # Use timeout and better error handling for filtered queries
-                if timeout 300 dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' 2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE.tmp"; then
+                if timeout "$DNF_TIMEOUT_SECONDS" dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' 2>>"$MYREPO_ERR_FILE" | grep -E "^[^|]*${NAME_FILTER}[^|]*\|" >"$INSTALLED_PACKAGES_FILE.tmp"; then
                     mv "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE"
                     fetch_success=true
                     
@@ -2940,17 +2952,17 @@ function traverse_manual_repos() {
             # Use timeout and retry logic for the main package query to handle contention
             local fetch_success=false
             local retry_count=0
-            local max_retries=3
+            local max_retries=$DNF_MAX_RETRIES
             
             while [[ $retry_count -lt $max_retries ]] && [[ $fetch_success == false ]]; do
                 if [[ $retry_count -gt 0 ]]; then
-                    local wait_time=$((retry_count * 5))
+                    local wait_time=$((retry_count * DNF_RETRY_DELAY))
                     log 2 "Retrying package list fetch (attempt $((retry_count + 1))/$max_retries) after ${wait_time}s..."
-                    sleep $wait_time
+                    sleep "$wait_time"
                 fi
                 
                 # Use timeout to prevent hanging and add better error handling
-                if timeout 300 dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE.tmp" 2>>"$MYREPO_ERR_FILE"; then
+                if timeout "$DNF_TIMEOUT_SECONDS" dnf repoquery --installed --qf '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}' >"$INSTALLED_PACKAGES_FILE.tmp" 2>>"$MYREPO_ERR_FILE"; then
                     mv "$INSTALLED_PACKAGES_FILE.tmp" "$INSTALLED_PACKAGES_FILE"
                     fetch_success=true
                     
@@ -3670,7 +3682,7 @@ adaptive_initialize_performance_tracking
 populate_repo_cache
 set_parallel_downloads
 remove_excluded_repos
-traverse_manual_repos
+traverse_all_repos
 update_and_sync_repos
 cleanup_metadata_cache
 cleanup

@@ -122,7 +122,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
-# Set the local repository path (base directory containing the repository tree)
+# Set the repository base path (directory containing both internet-sourced and manual repositories)
 # LOCAL_REPO_PATH="/repo"
 
 # Set the shared repository path
@@ -465,7 +465,7 @@ Common permission issues and solutions:
    sudo chown -R $(whoami):$(id -gn) /repo
    ```
 
-2. **"Local repo directory not writable"**
+2. **"Repository directory not writable"**
    ```bash
    chmod -R u+w /repo/repository_name
    ```
