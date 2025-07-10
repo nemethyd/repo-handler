@@ -1,39 +1,96 @@
 # Repo Handler Script
 
-**Developed by**: Dániel Némethy (nemethy@moderato.hu) with AI support (ChatGPT-4)
+**Developed by**: Dániel Némethy (nemethy@moderato.hu) with AI support (Claude Sonnet, ChatGPT-4)
 
 ## Overview
 
-The `repo-handler` project provides a bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local | `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
-| `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern during processing.  |
-| `--no-group-output` | *(flag)*                   | *off*                 | Disable grouping of EXISTS package outputs (show individual).   |
-| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
-| `--refresh-metadata`| *(flag)*                   | *off*                 | Force a refresh of DNF metadata cache before processing.        |
-| `--repos`           | *CSV*                      | *all enabled*         | Comma‑separated list of repos to process (filters packages).    |rror of installed packages needs to be maintained and synchronized with a shared repository. The goal is to create a much smaller repository that contains only the packages required for the specific environment, compared to the vast number of packages in the original internet repositories.
+The `repo-handler` project provides a bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
+
+### Repository Architecture
+
+The script manages a **LOCAL_REPO_PATH** (typically `/repo`) that contains two types of repositories:
+
+1. **Internet-sourced repositories**: These contain a reduced subset of official internet repositories, including only the packages that are actually installed on the local "golden copy" system. This creates much smaller repositories compared to the original internet repositories.
+
+2. **Manual repositories** (defined in `MANUAL_REPOS`): These are additional repositories (like `ol9_edge`) that will be replicated and synchronized regardless of whether their content is installed locally. These allow for manual package deployment and custom repository management.
 
 The script helps:
 
-- **Replicate and Update**: Creates and updates a local repository based on the installed packages from a "golden copy" system.
-- **Automatic Cleanup**: Removes uninstalled or outdated packages from the repository, ensuring it only contains necessary packages.
-- **Synchronization**: Keeps the local repository in sync with a shared repository using `rsync`, allowing the local repository to remain fresh and current.
-- **Configuration Flexibility**: Allows customization through a configuration file `myrepo.cfg` and command-line arguments, providing flexibility and ease of use.
-- **Repository Exclusions**: Enables exclusion of certain repositories from being processed, useful for repositories that should not be mirrored.
+- **Replicate and Update**: Creates and updates internet-sourced repositories based on installed packages from a "golden copy" system, plus manages manual repositories regardless of installation status.
+- **Automatic Cleanup**: Removes uninstalled or outdated packages from internet-sourced repositories, ensuring they only contain necessary packages.
+- **Manual Repository Support**: Maintains and synchronizes manual repositories (like `ol9_edge`) that can contain packages not necessarily installed locally.
+- **Synchronization**: Keeps both types of repositories in sync with a shared repository using `rsync`.
+- **Configuration Flexibility**: Allows customization through a configuration file `myrepo.cfg` and command-line arguments.
+- **Repository Exclusions**: Enables exclusion of certain repositories from being processed.
 
 ![MyRepo Workflow](images/MyRepo.png)
 
 ### Key Features:
 
-- **Reduced Repository Size**: The replicated repository is much smaller than the original internet repositories, containing only the necessary packages for the specific environment.
+- **Reduced Repository Size**: The internet-sourced repositories are much smaller than the original upstream repositories, containing only packages installed on the specific environment, while manual repositories provide flexibility for additional package deployment.
 - **Batch Processing**: Efficiently processes packages in batches for performance optimization.
 - **Automatic Cleanup**: Removes older or uninstalled package versions from the local repository.
 - **Synchronization**: Keeps the local repository in sync with a shared repository using `rsync`.
 - **Flexible Filtering**: Supports both repository-level and package name-level filtering for precise control over what gets processed.
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
-- **Debugging Options**: Includes a `DEBUG_MODE` for verbose output during script execution.
-- **Log Level Control**: Allows setting the verbosity of log messages using the `LOG_LEVEL` option (e.g., `ERROR`, `WARN`, `INFO`, `DEBUG`).
+- **Debugging Options**: Includes a `DEBUG_LEVEL` for controlling output verbosity during script execution.
+- **Debug Level Control**: Allows setting the verbosity of log messages using the `DEBUG_LEVEL` option (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE).
 - **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
+
+## Architecture Overview
+
+The script manages a repository structure within **LOCAL_REPO_PATH** (typically `/repo`) that contains:
+
+### 1. **Internet-sourced repositories** 
+These are automatically managed repositories that mirror official internet repositories, but contain only packages that are installed on the local "golden copy" system. This dramatically reduces repository size compared to full upstream mirrors.
+
+### 2. **Manual repositories** (MANUAL_REPOS)
+These are additional repositories (e.g., `ol9_edge`) that:
+- Are replicated and synchronized regardless of local installation status
+- Allow for manual package deployment and custom repository management  
+- Enable air-gapped environments to maintain custom package collections
+- Can be manually populated with RPMs outside the script's automatic processing
+
+**Key concepts:**
+- **LOCAL_REPO_PATH**: Base directory (`/repo`) containing the complete repository tree structure
+- **MANUAL_REPOS**: Specific repository names within LOCAL_REPO_PATH that receive special manual management treatment
+
+## Requirements
+
+Before running `myrepo.sh`, ensure the following requirements are met:
+
+### System Requirements
+
+- **Linux Distribution**: Red Hat-based distributions (RHEL, CentOS, Oracle Linux, etc.)
+- **Package Manager**: DNF (Dandified YUM)
+- **Tools**: `createrepo_c`, `rsync`, `bash` (version 4.0+)
+
+### User Permissions
+
+**Default Mode (USER_MODE=0 - Recommended):**
+- **Sudo Access Required**: The user must have sudo privileges to run DNF operations and access repository directories
+- The script will automatically use `sudo` when needed for operations like:
+  - Running DNF commands (`dnf download`, `dnf list`, etc.)
+  - Creating and updating repository metadata (`createrepo_c`)
+  - Writing to system directories
+
+**User Mode (USER_MODE=1 - Advanced):**
+- **Direct Write Access Required**: The user must have direct write access to all repository paths
+- No sudo is used, but all directories must be owned/writable by the current user
+- Requires manual permission setup (see [Setting Up Permissions](#setting-up-permissions))
+
+### Installation of Required Tools
+
+```bash
+# Install required packages (requires sudo)
+sudo dnf install createrepo_c rsync dnf-utils
+```
+
+**Important**: If you don't have sudo access on your system, you cannot run this script in the default mode. Either:
+1. Obtain sudo privileges, or
+2. Use `--user-mode` and manually configure all directory permissions
 
 ## Configuration
 
@@ -49,11 +106,11 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 
 2. **Uncomment and Modify Desired Options**:
 
-   For example, to change the `DEBUG_MODE` to `1`:
+   For example, to change the `DEBUG_LEVEL` to `3`:
 
    ```bash
-   # Set debug mode (0 = off, 1 = basic debug, 2 = verbose debug)
-   DEBUG_MODE=1
+   # Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
+   DEBUG_LEVEL=3
    ```
 
 3. **Save and Close the File**.
@@ -65,23 +122,20 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
-# Set the local repository path
+# Set the local repository path (base directory containing the repository tree)
 # LOCAL_REPO_PATH="/repo"
 
 # Set the shared repository path
 # SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 
-# Define local repositories (comma-separated)
-# LOCAL_REPOS="ol9_edge,pgdg-common,pgdg16"
+# Define manual repositories (individual repos within LOCAL_REPO_PATH, comma-separated)
+# MANUAL_REPOS="ol9_edge"
 
 # Set the RPM build path
 # RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
-# Set debug mode (0 = off, 1 = basic debug, 2 = verbose debug)
-# DEBUG_MODE=0
-
-# Set log level (ERROR, WARN, INFO, DEBUG)
-# LOG_LEVEL="INFO"
+# Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
+# DEBUG_LEVEL=2
 
 # Set maximum number of packages to process (0 = no limit)
 # MAX_PACKAGES=0
@@ -90,7 +144,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # BATCH_SIZE=50
 
 # Set the number of parallel processes
-# PARALLEL=2
+# PARALLEL=6
 
 # Enable dry run (1 = true, 0 = false)
 # DRY_RUN=0
@@ -99,7 +153,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # CONTINUE_ON_ERROR=0
 
 # Run under the non-root user environment (1 = true, 0 = false)
-# USER_MODE=0
+# IS_USER_MODE=0
 
 # Define repositories that should be excluded from processing
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
@@ -119,8 +173,8 @@ EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 # Default is enabled (1). Set to 0 to show individual package messages instead.
 # GROUP_OUTPUT=1
 
-# Local Repository Management Settings
-# AUTO_UPDATE_LOCAL_REPOS=1          # Enable automatic detection of local repo changes
+# Manual Repository Management Settings
+# AUTO_UPDATE_MANUAL_REPOS=1          # Enable automatic detection of manual repo changes
 # LOCAL_REPO_CHECK_METHOD=FAST       # Detection method: FAST (timestamp) or ACCURATE (content)
 
 # Adaptive Performance Tuning Settings
@@ -142,25 +196,22 @@ EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 
 ### Log Level Control
 
-The `LOG_LEVEL` option allows you to control the verbosity of log messages. Available levels are:
+The `DEBUG_LEVEL` option allows you to control the verbosity of log messages. Available levels are:
 
-- `ERROR`: Logs only critical errors.
-- `WARN`: Logs warnings and errors.
-- `INFO`: Logs informational messages, warnings, and errors (default).
-- `DEBUG`: Logs detailed debugging information, along with all other levels.
+- `0` (ERROR): Logs only critical errors.
+- `1` (WARN): Logs warnings and errors.
+- `2` (INFO): Logs informational messages, warnings, and errors (default).
+- `3` (DEBUG): Logs detailed debugging information, along with all other levels.
+- `4` (TRACE): Logs very detailed trace information for troubleshooting.
 
-To set the log level, modify the `LOG_LEVEL` option in `myrepo.cfg`:
-
-```bash
-# Set log level (ERROR, WARN, INFO, DEBUG)
-LOG_LEVEL="DEBUG"
-```
-
-Alternatively, you can override this setting using the `--log-level` command-line argument:
+To set the debug level, modify the `DEBUG_LEVEL` option in `myrepo.cfg`:
 
 ```bash
-./myrepo.sh --log-level DEBUG
+# Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
+DEBUG_LEVEL=3
 ```
+
+You can also set it via command line using `--debug LEVEL`.
 
 ### Repository Exclusion Feature
 
@@ -215,26 +266,26 @@ NAME_FILTER="firefox"
 - **Case Sensitive**: Pattern matching is case-sensitive by default
 - **Combines with Repository Filtering**: Works together with `--repos` for fine-grained control
 
-### Local Repository Management (Manual Change Detection)
+### Manual Repository Management (Manual Change Detection)
 
-Version 2.1.18+ introduces advanced local repository management that can automatically detect and handle manual changes to local repositories. This is particularly useful in environments where RPM packages are manually copied to local repositories outside of the script's normal processing workflow.
+Version 2.3.0+ introduces advanced manual repository management that can automatically detect and handle manual changes to individual manual repositories within the repository tree. This is particularly useful in environments where RPM packages are manually copied to specific repositories (like `ol9_edge`) outside of the script's normal processing workflow.
 
 #### Key Features:
 
-- **Dual-Tier Metadata Strategy**: Regular repositories only update metadata when packages are processed, while local repositories can detect manual changes even when no packages are processed during the current run.
+- **Dual-Tier Metadata Strategy**: Regular repositories only update metadata when packages are processed, while manual repositories (e.g., `ol9_edge`) can detect manual changes even when no packages are processed during the current run.
 - **Configurable Detection Methods**: Choose between FAST (timestamp-based) and ACCURATE (content-based) detection methods.
-- **Automatic Updates**: Local repositories are automatically checked for manual changes and metadata is updated accordingly.
+- **Automatic Updates**: Manual repositories are automatically checked for manual changes and metadata is updated accordingly.
 - **Sync-Only Mode Optimization**: Metadata updates are intelligently skipped during `--sync-only` mode for better performance.
 
 #### Configuration Options:
 
 ```bash
-# Enable automatic detection and update of local repository changes (1 = enabled, 0 = disabled)
-# When enabled, the script will check local repositories for manual changes even if no packages
+# Enable automatic detection and update of manual repository changes (1 = enabled, 0 = disabled)
+# When enabled, the script will check manual repositories for manual changes even if no packages
 # were processed during the current run. Useful for repositories where RPMs are manually copied.
-AUTO_UPDATE_LOCAL_REPOS=1
+AUTO_UPDATE_MANUAL_REPOS=1
 
-# Local repository metadata check method (FAST or ACCURATE)
+# Manual repository metadata check method (FAST or ACCURATE)
 # FAST: Uses timestamp comparison between RPM files and metadata (faster, good for most cases)
 # ACCURATE: Uses content comparison to detect count mismatches (more thorough but slower)
 # Default is FAST for optimal performance while still catching most manual changes.
@@ -248,7 +299,7 @@ LOCAL_REPO_CHECK_METHOD=FAST
 
 #### Use Cases:
 
-- **Manual Package Deployment**: When administrators manually copy RPM files to local repositories
+- **Manual Package Deployment**: When administrators manually copy RPM files to specific manual repositories (like `ol9_edge`)
 - **Airgapped Environments**: Where packages are transferred via external media and manually placed
 - **Mixed Workflows**: Environments where both automated and manual package management occur
 - **Development Environments**: Where local builds are frequently copied to test repositories
@@ -257,9 +308,9 @@ LOCAL_REPO_CHECK_METHOD=FAST
 
 ```bash
 # myrepo.cfg - Enable accurate detection for critical repositories
-AUTO_UPDATE_LOCAL_REPOS=1
+AUTO_UPDATE_MANUAL_REPOS=1
 LOCAL_REPO_CHECK_METHOD=ACCURATE
-LOCAL_REPOS="ol9_edge,custom_apps,local_builds"
+MANUAL_REPOS="ol9_edge,custom_apps,local_builds"
 ```
 
 This ensures that manually added packages are properly indexed and available through the repository metadata without requiring a full rebuild.
@@ -333,7 +384,123 @@ This parameter only affects the parallelism of metadata fetching, not the main p
 - **Configuration File (`myrepo.cfg`)**: Overrides default values in the script.
 - **Default Values**: Used when neither command-line arguments nor configuration file settings are provided.
 
+## Permissions and Directory Setup
+
+### Directory Requirements
+
+The script requires proper write access to all configured directory paths. Directory permissions are validated during startup to ensure proper operation.
+
+#### Required Directories
+
+1. **LOCAL_REPO_PATH** (Critical)
+   - Main local repository directory 
+   - Must exist and be writable
+   - All subdirectories must be writable
+   - Validation includes practical write tests
+
+2. **SHARED_REPO_PATH** (Warning if missing)
+   - Shared/synchronization repository directory
+   - Write access required for synchronization
+   - Missing access generates warnings but doesn't stop execution
+
+3. **LOG_DIR** (Auto-created)
+   - Directory for log files
+   - Created automatically if missing
+   - Must be writable for log output
+
+4. **RPMBUILD_PATH** (Optional)
+   - RPM build directory
+   - Validated but write access not strictly required
+
+#### Permission Validation
+
+The script performs comprehensive permission validation during startup:
+
+1. **Directory Existence Check**
+   - Verifies all configured paths exist and are directories
+   - Reports missing directories as errors (LOCAL_REPO_PATH) or warnings (others)
+
+2. **Write Permission Check**
+   - Tests basic write permissions using filesystem flags
+   - Performs practical write tests by creating temporary files
+   - Validates access to repository subdirectories (getPackage, repodata)
+
+3. **User Mode vs Root Mode**
+   - `USER_MODE=0` (Default): Script uses sudo for DNF operations and repository access. **Requires user to have sudo privileges.**
+   - `USER_MODE=1` (Advanced): Script runs without sudo, requires current user to have direct write access to all paths
+
+4. **Error Handling**
+   - LOCAL_REPO_PATH permission errors will cause script exit (critical)
+   - SHARED_REPO_PATH permission errors generate warnings only (non-critical)
+   - Subdirectory permission errors are reported with fix suggestions
+
+#### Setting Up Permissions
+
+**For User Mode (USER_MODE=1):**
+```bash
+# Make directories owned by current user
+sudo chown -R $(whoami):$(id -gn) /path/to/local/repo
+sudo chown -R $(whoami):$(id -gn) /path/to/shared/repo
+
+# Ensure write permissions
+chmod -R u+w /path/to/local/repo
+chmod -R u+w /path/to/shared/repo
+```
+
+**For Root Mode (USER_MODE=0):**
+```bash
+# Run script as root or with sudo
+sudo ./myrepo.sh
+
+# Or set up sudoers for specific operations
+echo "username ALL=(ALL) NOPASSWD: /usr/bin/dnf, /usr/bin/createrepo_c" >> /etc/sudoers.d/myrepo
+```
+
+#### Troubleshooting Permissions
+
+Common permission issues and solutions:
+
+1. **"LOCAL_REPO_PATH is not writable by current user"**
+   ```bash
+   sudo chown -R $(whoami):$(id -gn) /repo
+   ```
+
+2. **"Local repo directory not writable"**
+   ```bash
+   chmod -R u+w /repo/repository_name
+   ```
+
+3. **"Cannot create files in LOCAL_REPO_PATH"**
+   - Check if filesystem is read-only
+   - Verify disk space availability
+   - Check SELinux contexts if applicable
+
+4. **"Repository synchronization may fail"**
+   - Fix SHARED_REPO_PATH permissions:
+   ```bash
+   sudo chown -R $(whoami):$(id -gn) /mnt/shared/repos
+   ```
+
+#### Debug Output
+
+Use `DEBUG_LEVEL=3` to see detailed permission validation output:
+```bash
+./myrepo.sh --debug-level 3
+```
+
+This will show:
+- All permission checks being performed
+- Practical write test results
+- Detailed validation for each repository subdirectory
+- Permission error causes and suggested fixes
+
 ## Usage
+
+### Prerequisites
+
+**Important**: By default, `myrepo.sh` requires sudo privileges to run DNF operations and manage repository directories. Ensure you have sudo access before running the script.
+
+If you don't have sudo access, you must use `--user-mode` and manually configure directory permissions (see [Setting Up Permissions](#setting-up-permissions)).
 
 ### Running `myrepo.sh`
 
@@ -408,7 +575,7 @@ The script implements a sophisticated workflow that efficiently manages local pa
 
 5. **Dual-Tier Metadata Updates**: 
    - **Regular Repositories**: Updates metadata only when packages are processed during the current run
-   - **Local Repositories**: Checks for manual changes (using configurable FAST/ACCURATE methods) and updates metadata accordingly, even if no packages were processed automatically
+   - **Manual Repositories**: Checks for manual changes (using configurable FAST/ACCURATE methods) and updates metadata accordingly, even if no packages were processed automatically
 
 6. **Synchronization**: Uses rsync to efficiently synchronize the local repositories with shared storage, ensuring consistency across environments.
 
@@ -417,12 +584,12 @@ The script implements a sophisticated workflow that efficiently manages local pa
 ## Tips
 
 - **Dry Run Mode**: Use the `--dry-run` option to simulate the script's actions without making any changes.
-- **Debugging**: Increase the `DEBUG_MODE` to get more detailed output, which can help in troubleshooting.
-- **Log Level Control**: Adjust the `LOG_LEVEL` to control the verbosity of log messages.
+- **Debugging**: Increase the `DEBUG_LEVEL` to get more detailed output, which can help in troubleshooting.
+- **Debug Level Control**: Adjust the `DEBUG_LEVEL` to control the verbosity of log messages.
 - **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
 - **Efficient Filtering**: Use `--name-filter` combined with `--repos` for precise control over package processing and improved performance.
 - **Testing Filters**: Always test new name filter patterns with `--dry-run` first to verify they match the expected packages.
-- **Local Repository Management**: Enable `AUTO_UPDATE_LOCAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
+- **Manual Repository Management**: Enable `AUTO_UPDATE_MANUAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
 - **Performance Tuning**: Let adaptive tuning optimize performance automatically, or disable it and manually tune `BATCH_SIZE` and `PARALLEL` for specific environments.
 - **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
 - **User Mode**: Use `--user-mode` for non-root environments or when sudo access is restricted.

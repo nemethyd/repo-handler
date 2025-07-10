@@ -1,0 +1,87 @@
+[23:25:29] [I] Found configuration file in current directory: /home/nemethy/repo-handler/myrepo.cfg
+[23:25:29] [I] Loading configuration from /home/nemethy/repo-handler/myrepo.cfg
+[23:25:29] [I] Performing full rebuild: clearing processed‑package cache
+[23:25:29] [I] Starting myrepo.sh Version 2.2.0
+[23:25:29] [I] Adaptive performance tuning enabled (batch: 20-100, parallel: 2-16)
+[23:25:29] [I] Building local package cache for 1 repositories...
+[23:25:29] [I] This may take a moment while scanning local RPM files...
+[23:25:29] [I] Scanning repository 1/1: ol9_edge...
+[23:25:31] [I] Local package cache build completed for 1 repositories.
+[23:25:31] [I] Fetching list of installed packages...
+[23:25:31] [I] This may take a minute while querying DNF database...
+[23:25:37] [I] Fetched 2453 installed packages in 5s
+[23:25:37] [I] Fetching list of enabled repositories...
+[23:25:38] [I] Downloading repository metadata...
+[23:25:38] [I] Using parallel DNF mode with max 2 concurrent processes
+[23:25:38] [I] Caching metadata for all 14 enabled repositories
+[23:25:50] [I] All metadata fetch jobs finished.
+[23:25:50] [I] Repository metadata download completed in 12s
+[23:25:50] [I] Processing packages from all enabled repositories
+[23:25:50] [I] Processing installed packages...
+[23:26:06] [I] Processing final batch of 50 packages...
+[23:26:06] [I] Processing batch of 50 packages...
+[23:26:06] [I] Batch completed: 50 packages in 69ms (714 pkg/sec)
+[23:26:17] [I] Processing package 12/50: NetworkManager-config-server...
+[23:26:29] [I] Processing package 19/50: NetworkManager-wifi...
+[23:26:33] [I] Processing package 50/50: ansible...
+[32m[23:26:33] [I] ol9_appstream         : 26 packages already exist in repo (3-P).[0m
+[32m[23:26:33] [I] ol9_developer_EPEL    : 9 packages already exist in repo (a-S).[0m
+[32m[23:26:33] [I] ol9_baseos_latest     : 14 packages already exist in repo (a-N).[0m
+[32m[23:26:33] [I] ol9_edge              : 1 package already exists in repo (QConvergeConsoleCLI).[0m
+[23:26:34] [I] Package analysis complete. Removing uninstalled packages...
+[33m[23:26:34] [I] ol9_edge                    : Skipping uninstalled package removal for local repository[0m
+[90m[23:26:34] [I] ol9_appstream               : Checking for removed packages[0m
+[90m[23:26:34] [I] ol9_developer_EPEL          : Checking for removed packages[0m
+[90m[23:26:34] [I] ol9_baseos_latest           : Checking for removed packages[0m
+[23:26:34] [I] Still removing uninstalled packages, 3 jobs remaining...
+[90m[23:26:34] [I] ol9_appstream               : Found 1542 RPM packages to check[0m
+[90m[23:26:34] [I] ol9_developer_EPEL          : Found 169 RPM packages to check[0m
+[90m[23:26:34] [I] ol9_appstream               : Processing 1542 RPM packages (this may take a while for large repositories)[0m
+[90m[23:26:34] [I] ol9_baseos_latest           : Found 75 RPM packages to check[0m
+[90m[23:26:34] [I] ol9_developer_EPEL          : Processing 169 RPM packages (this may take a while for large repositories)[0m
+[90m[23:26:42] [I] ol9_baseos_latest           : Package comparison completed in 8s[0m
+[32m[23:26:42] [I] ol9_baseos_latest           : No uninstalled packages to remove.[0m
+[23:26:42] [I] ol9_baseos_latest           : Removal check completed in 8s
+[90m[23:26:42] [I] ol9_developer_EPEL          : Package comparison completed in 8s[0m
+[32m[23:26:42] [I] ol9_developer_EPEL          : No uninstalled packages to remove.[0m
+[23:26:42] [I] ol9_developer_EPEL          : Removal check completed in 8s
+[23:26:44] [I] Still removing uninstalled packages, 1 jobs remaining...
+[23:26:54] [I] Still removing uninstalled packages, 1 jobs remaining...
+[23:27:04] [I] Still removing uninstalled packages, 1 jobs remaining...
+[90m[23:27:06] [I] ol9_appstream               : Package comparison completed in 32s[0m
+[32m[23:27:06] [I] ol9_appstream               : No uninstalled packages to remove.[0m
+[23:27:06] [I] ol9_appstream               : Removal check completed in 32s
+[23:27:14] [I] All package removal operations completed in 40s
+
+[23:27:15] [I] Adaptive Performance Summary:
+[23:27:15] [I] Total execution time: 105s
+[23:27:15] [I] Total batches processed: 1
+[23:27:15] [I] Final configuration: BATCH_SIZE=50, PARALLEL=6
+[23:27:15] [I] Average batch time: 119ms
+[23:27:15] [I] Average packages per batch: 50
+[23:27:15] [I] Average batch throughput: 420 packages/sec
+
+[23:27:15] [I] Package Processing Summary:
+
+╔══════════════════════════════╤════════╤════════╤════════╤═════════╤══════════╤══════════╗
+║ Repository                   │    New │ Update │ Exists │ Skipped │   Module │ Status   ║
+╟──────────────────────────────┼────────┼────────┼────────┼─────────┼──────────┼──────────╢
+║ ol9_appstream                │      0 │      0 │     26 │       0 │        0 │ Clean    ║
+║ ol9_baseos_latest            │      4 │      0 │     10 │       0 │        0 │ Modified ║
+║ ol9_developer_EPEL           │      0 │      0 │      9 │       0 │        0 │ Clean    ║
+║ ol9_edge                     │      0 │      0 │      1 │       0 │        0 │ Clean    ║
+╟──────────────────────────────┼────────┼────────┼────────┼─────────┼──────────┼──────────╢
+║ TOTAL                        │      4 │      0 │     46 │       0 │        0 │ Summary  ║
+╚══════════════════════════════╧════════╧════════╧════════╧═════════╧══════════╧══════════╝
+
+
+[23:27:15] [I] Performance Analysis & Recommendations:
+[23:27:15] [I] Total packages processed: 50
+[23:27:15] [I] Total execution time: 106s
+[23:27:15] [I] Average throughput: 0 packages/sec
+[23:27:15] [W] Low throughput detected (0 pkg/sec). Consider:
+[23:27:15] [I]   - Increasing PARALLEL (current: 6, max: 16)
+[23:27:15] [I]   - Increasing BATCH_SIZE (current: 50, max: 100)
+[23:27:15] [I]   - Checking disk I/O performance
+[23:27:15] [I]   - Enabling USE_PARALLEL_COMPRESSION (current: 1)
+[23:27:15] [I] myrepo.sh Version 2.2.0 completed.
