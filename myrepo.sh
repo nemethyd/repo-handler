@@ -16,7 +16,7 @@
 # older package versions.
 
 # Script version
-VERSION=2.3.1
+VERSION=2.1.32
  # Default values for environment variables if not set
 : "${BATCH_SIZE:=50}"                  # Optimized starting point based on performance analysis
 : "${CONTINUE_ON_ERROR:=0}"
@@ -24,7 +24,8 @@ VERSION=2.3.1
 : "${FULL_REBUILD:=0}"
 : "${GROUP_OUTPUT:=1}"
 : "${IS_USER_MODE:=0}"                 # Default to elevated mode for DNF commands
-: "${DEBUG_LEVEL:=1}"                  # 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+: "${DEBUG_LEVEL:=2}"                  # VERBOSITY: 0=silent, 1=minimal, 2=normal, 3=verbose, 4=debug
+                                     # MESSAGE TYPES: 0=ERROR[E], 1=WARN[W], 2=INFO[I], 3=DEBUG[D], 4=TRACE[T]
 : "${MAX_PACKAGES:=0}"
 : "${PARALLEL:=6}"                     # Increased from 4
 : "${SYNC_ONLY:=0}"
@@ -32,6 +33,7 @@ VERSION=2.3.1
 
 # Repository filtering (empty means process all enabled repos)
 FILTER_REPOS=()
+EXCLUDED_REPOS=()  # Repositories to exclude from processing
 
 # Package name filtering (empty means process all packages)
 NAME_FILTER=""
@@ -81,6 +83,11 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${LOCAL_REPO_CHECK_METHOD:=FAST}"       # FAST (timestamp) or ACCURATE (content) detection
 : "${AUTO_UPDATE_MANUAL_REPOS:=1}"          # Enable automatic detection and update of manual repo changes
 
+# Progress feedback configuration defaults
+: "${PROGRESS_FEEDBACK_SECONDS:=15}"       # How often to show time-based progress feedback (seconds)
+: "${PROGRESS_FEEDBACK_PACKAGES:=100}"     # How often to show package-count-based progress feedback
+: "${DEBUG_PROGRESS_PACKAGES:=25}"         # Package interval for debug-level progress feedback
+
 # Log directory
 LOG_DIR="/var/log/myrepo"
 
@@ -109,6 +116,10 @@ declare -A available_repo_packages
 declare -A PROCESSED_PACKAGE_MAP
 
 declare -A repo_cache
+
+# Hash tables for performance optimization
+declare -A excluded_repos_hash     # Hash table for excluded repositories
+declare -A filter_repos_hash       # Hash table for repository filtering
 
 # Statistics tracking arrays
 declare -A stats_new_count
@@ -349,6 +360,29 @@ function analyze_performance() {
         fi
         log 2 "Current configuration: PARALLEL=$PARALLEL, BATCH_SIZE=$BATCH_SIZE"
     fi
+}
+
+# Build hash tables for fast repository filtering lookups
+function build_repo_filter_hash_tables() {
+    # Clear existing hash tables
+    excluded_repos_hash=()
+    filter_repos_hash=()
+    
+    # Build excluded repositories hash table from EXCLUDED_REPOS array
+    if [[ -n "${EXCLUDED_REPOS[*]:-}" ]]; then
+        for repo in "${EXCLUDED_REPOS[@]}"; do
+            excluded_repos_hash["$repo"]=1
+        done
+    fi
+    
+    # Build filter repositories hash table (if FILTER_REPOS is not empty)
+    if [[ ${#FILTER_REPOS[@]} -gt 0 ]]; then
+        for repo in "${FILTER_REPOS[@]}"; do
+            filter_repos_hash["$repo"]=1
+        done
+    fi
+    
+    log 3 "Built hash tables: ${#excluded_repos_hash[@]} excluded repos, ${#filter_repos_hash[@]} filter repos"
 }
 
 # Check if a repository needs metadata update using ACCURATE (content) method
@@ -994,7 +1028,7 @@ function download_repo_metadata() {
     done
     
     if [[ ${#repos_to_update[@]} -gt 0 ]]; then
-        log 2 "Downloading metadata for ${#repos_to_update[@]} repositories (${repos_to_update[*]})..."
+        log 3 "Downloading metadata for ${#repos_to_update[@]} repositories (${repos_to_update[*]})..."
         log 2 "This may take a few minutes, please wait..."
     fi
     
@@ -1034,7 +1068,7 @@ function download_repo_metadata() {
                         if [[ -n "${repo_versions[$repo]}" ]]; then
                             log 2 "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) in ${repo_duration}s [version: ${repo_versions[$repo]}]"
                         else
-                            log 2 "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) in ${repo_duration}s"
+                            log  2 "Cached metadata for $repo ($(echo "$repo_data" | wc -l) packages) in ${repo_duration}s"
                         fi
                         
                         # Track slow operations for adaptive parallelism using a temp file
@@ -1072,7 +1106,7 @@ function download_repo_metadata() {
                 fi
                 if (( wait_duration > 90 && slow_operations > 2 && max_parallel > 1 )); then
                     max_parallel=$((max_parallel - 1))
-                    log 3 "Reducing DNF parallelism to $max_parallel due to contention (slow operations: $slow_operations)"
+                    log 2 "Reducing DNF parallelism to $max_parallel due to contention (slow operations: $slow_operations)"
                 fi
                 
                 ((--running))
@@ -2275,17 +2309,17 @@ function process_packages() {
 
         pkg_key="${package_name}-${package_version}-${package_release}.${package_arch}"
         
-        # Progress feedback every 10 seconds or 50 packages
+        # Progress feedback based on configurable intervals
         ((package_count++))
         local current_time
         current_time=$(date +%s)
-        if ((current_time - last_feedback_time >= 10)) || ((package_count % 50 == 0)); then
+        if ((current_time - last_feedback_time >= PROGRESS_FEEDBACK_SECONDS)) || ((package_count % PROGRESS_FEEDBACK_PACKAGES == 0)); then
             log 2 "Processing package $package_count/${#packages[@]}: $package_name..."
             last_feedback_time=$current_time
         fi
         
-        # Additional progress for debug mode - show every 25 packages
-        if [[ $DEBUG_LEVEL -ge 3 && $((package_count % 25)) -eq 0 ]]; then
+        # Additional progress for debug mode based on configurable interval
+        if [[ $DEBUG_LEVEL -ge 3 && $((package_count % DEBUG_PROGRESS_PACKAGES)) -eq 0 ]]; then
             log 3 "Progress: $package_count/${#packages[@]} packages processed ($(( package_count * 100 / ${#packages[@]} ))%)"
         fi
         
@@ -2338,8 +2372,8 @@ function process_packages() {
                     exists_packages["$repo_name"]="${exists_packages[$repo_name]}, $package_name-$package_version-$package_release.$package_arch"
                 fi
             else
-                # Default behavior: log immediately
-                log 1 "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already exists in repo." "\e[32m" # Green
+                # Default behavior: log as INFO level for normal feedback  
+                log 2 "$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch already exists in repo." "\e[32m" # Green
             fi
             mark_processed "$pkg_key"
             ;;
@@ -2567,11 +2601,11 @@ function process_packages() {
                 fi
                 
                 if [[ $count -eq 1 ]]; then
-                    # Show individual messages for single packages
-                    log 1 "$(align_repo_name "$repo_name"): 1 package already exists in repo${first_letters}." "\e[32m" # Green
+                    # Show individual messages for single packages at INFO level for normal feedback  
+                    log 2 "$(align_repo_name "$repo_name"): 1 package already exists in repo${first_letters}." "\e[32m" # Green
                 elif [[ $count -gt 5 ]]; then
-                    # Show summary for larger counts to reduce noise
-                    log 1 "$(align_repo_name "$repo_name"): $count packages already exist in repo${first_letters}." "\e[32m" # Green
+                    # Show summary for larger counts at INFO level for normal feedback
+                    log 2 "$(align_repo_name "$repo_name"): $count packages already exist in repo${first_letters}." "\e[32m" # Green
                 else
                     # For small counts (2-5), show in debug mode only
                     [[ "${DEBUG_LEVEL:-0}" -ge 1 ]] && log 3 "$(align_repo_name "$repo_name"): $count packages already exist in repo${first_letters}." "\e[32m" # Green
@@ -3067,16 +3101,16 @@ function traverse_all_repos() {
                 fi
             fi
             
-            # Skip if the package is in the excluded list
+            # Skip if the package is in the excluded list using hash table lookup
             # Normalize the repository name for comparison
             local normalized_package_repo="${package_repo#@}"
-            if [[ " ${EXCLUDED_REPOS[*]} " == *" ${package_repo} "* ]] || [[ " ${EXCLUDED_REPOS[*]} " == *" ${normalized_package_repo} "* ]]; then
+            if [[ -n "${excluded_repos_hash[$package_repo]:-}" ]] || [[ -n "${excluded_repos_hash[$normalized_package_repo]:-}" ]]; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && log 3 "Skipping package $package_name from excluded repository: $package_repo"
                 continue
             fi
             
-            # Skip if repository filtering is enabled and this repo is not in the filter list
-            if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${package_repo}\  ]] && [[ ! " ${FILTER_REPOS[*]} " =~ \ ${normalized_package_repo}\  ]]; then
+            # Skip if repository filtering is enabled and this repo is not in the filter list using hash table lookup
+            if [[ ${#FILTER_REPOS[@]} -gt 0 ]] && [[ -z "${filter_repos_hash[$package_repo]:-}" ]] && [[ -z "${filter_repos_hash[$normalized_package_repo]:-}" ]]; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && log 3 "Skipping package $package_name from non-filtered repository: $package_repo"
                 continue
             fi
@@ -3131,10 +3165,10 @@ function traverse_all_repos() {
             fi
             ((package_counter++))
             
-            # Progress feedback every 30 seconds or 100 packages
+            # Progress feedback based on configurable intervals
             local current_main_time
             current_main_time=$(date +%s)
-            if ((current_main_time - last_main_feedback_time >= 30)) || ((package_counter % 100 == 0)); then
+            if ((current_main_time - last_main_feedback_time >= PROGRESS_FEEDBACK_SECONDS)) || ((package_counter % PROGRESS_FEEDBACK_PACKAGES == 0)); then
                 local elapsed_main=$((current_main_time - main_loop_start_time))
                 local rate=$((package_counter * 60 / (elapsed_main + 1)))  # packages per minute
                 log 2 "Progress: $package_counter/${#package_lines[@]} packages analyzed ($rate pkg/min), batch size: ${#batch_packages[@]}"
@@ -3682,6 +3716,7 @@ adaptive_initialize_performance_tracking
 populate_repo_cache
 set_parallel_downloads
 remove_excluded_repos
+build_repo_filter_hash_tables
 traverse_all_repos
 update_and_sync_repos
 cleanup_metadata_cache

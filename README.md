@@ -8,7 +8,15 @@ The `repo-handler` project provides a bash script designed to manage, clean, and
 
 ### Repository Architecture
 
-The script manages a **LOCAL_REPO_PATH** (typically `/repo`) that contains two types of repositories:
+The script manages a **LOCAL_REPO_PATH** (typic| `--|| `--log-d| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup; only run `createrepo` + `rsync`.         |
+| `--user-mode`       | *(flag)*                   | *off*                 | Run entire script with sudo (advanced mode).                    |
+| `--refresh-metadata`| *(flag)*                   | *off*                 | Force a refresh of DNF metadata cache.                          |
+| `--dnf-serial`      | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.        |`         | *PATH*                     | `/var/log/myrepo`     | Where to write `process_package.log`, `myrepo.err`, etc.        |
+| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
+| `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern.                    |
+| `--parallel`        | *INT*                      | `6`                   | Maximum concurrent download or processing jobs.                 |
+| `--repos`           | *CSV*                      | *all enabled*         | Comma-separated list of repositories to process.                |
+| `--set-permissions` | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.              |manual-repos`    | *CSV*                      | `ol9_edge`            | Comma‑separated list of manual repositories.                    |ebug`           | *0‒4*                      | `1`                   | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose). |lly `/repo`) that contains two types of repositories:
 
 1. **Internet-sourced repositories**: These contain a reduced subset of official internet repositories, including only the packages that are actually installed on the local "golden copy" system. This creates much smaller repositories compared to the original internet repositories.
 
@@ -35,7 +43,7 @@ The script helps:
 - **Customizable Output**: Aligns repository names in output messages for better readability.
 - **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
 - **Debugging Options**: Includes a `DEBUG_LEVEL` for controlling output verbosity during script execution.
-- **Debug Level Control**: Allows setting the verbosity of log messages using the `DEBUG_LEVEL` option (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE).
+- **Verbosity Control**: Allows setting the verbosity of log messages using the `DEBUG_LEVEL` option (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose). Message types determine display symbols: [E]rror, [W]arning, [S]uccess, [I]nfo, [P]rogress, [A]ction, [U]pdate, [D]ebug.
 - **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
@@ -69,17 +77,21 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 
 ### User Permissions
 
+**Important**: Both modes require the user to have sudo privileges. The difference is how sudo is used:
+
 **Default Mode (USER_MODE=0 - Recommended):**
-- **Sudo Access Required**: The user must have sudo privileges to run DNF operations and access repository directories
-- The script will automatically use `sudo` when needed for operations like:
-  - Running DNF commands (`dnf download`, `dnf list`, etc.)
-  - Creating and updating repository metadata (`createrepo_c`)
-  - Writing to system directories
+- **Automatic Sudo Usage**: The script automatically prefixes necessary commands with `sudo`
+- **User runs script normally**: `./myrepo.sh` (without sudo)
+- The script will internally use `sudo` when needed for operations like:
+  - Running DNF commands (`sudo dnf download`, `sudo dnf list`, etc.)
+  - Creating and updating repository metadata (`sudo createrepo_c`)
+  - Writing to system directories and fixing permissions
 
 **User Mode (USER_MODE=1 - Advanced):**
-- **Direct Write Access Required**: The user must have direct write access to all repository paths
-- No sudo is used, but all directories must be owned/writable by the current user
-- Requires manual permission setup (see [Setting Up Permissions](#setting-up-permissions))
+- **Manual Sudo Usage**: User must run the entire script with elevated privileges
+- **User runs script with sudo**: `sudo ./myrepo.sh --user-mode`
+- The script assumes it already has elevated privileges and won't prefix commands with `sudo`
+- All operations run with the elevated permissions of the sudo session
 
 ### Installation of Required Tools
 
@@ -88,9 +100,7 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 sudo dnf install createrepo_c rsync dnf-utils
 ```
 
-**Important**: If you don't have sudo access on your system, you cannot run this script in the default mode. Either:
-1. Obtain sudo privileges, or
-2. Use `--user-mode` and manually configure all directory permissions
+**Important**: If you don't have sudo access on your system, you cannot run this script. The script requires sudo privileges in both modes - the only difference is whether you run the script normally (default mode) and let it use `sudo` internally, or run the entire script with `sudo` (user mode).
 
 ## Configuration
 
@@ -109,7 +119,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
    For example, to change the `DEBUG_LEVEL` to `3`:
 
    ```bash
-   # Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
+   # Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
    DEBUG_LEVEL=3
    ```
 
@@ -134,7 +144,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Set the RPM build path
 # RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 
-# Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
+# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
 # DEBUG_LEVEL=2
 
 # Set maximum number of packages to process (0 = no limit)
@@ -196,19 +206,41 @@ EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 
 ### Log Level Control
 
-The `DEBUG_LEVEL` option allows you to control the verbosity of log messages. Available levels are:
+The logging system uses two concepts:
 
-- `0` (ERROR): Logs only critical errors.
-- `1` (WARN): Logs warnings and errors.
-- `2` (INFO): Logs informational messages, warnings, and errors (default).
-- `3` (DEBUG): Logs detailed debugging information, along with all other levels.
-- `4` (TRACE): Logs very detailed trace information for troubleshooting.
+1. **Verbosity Level** (`DEBUG_LEVEL`): Controls how much output is shown
+2. **Message Types**: Determine the display symbol and semantic meaning
 
-To set the debug level, modify the `DEBUG_LEVEL` option in `myrepo.cfg`:
+#### Verbosity Levels
+
+The `DEBUG_LEVEL` option controls the verbosity of log output:
+
+- `0` (Critical): Shows only critical errors that prevent script execution
+- `1` (Important): Shows important messages like warnings, progress, and success notifications  
+- `2` (Normal): Shows normal informational messages and all above levels (default)
+- `3` (Verbose): Shows detailed debugging information and all above levels
+- `4` (Very Verbose): Shows very detailed trace information for troubleshooting
+
+#### Message Types and Display Symbols
+
+Messages are displayed with symbols that indicate their semantic meaning:
+
+- `[E]` Error: Critical issues that may stop execution
+- `[W]` Warning: Issues that need attention but don't stop execution  
+- `[S]` Success: Successful completion of operations
+- `[I]` Info: General informational messages
+- `[P]` Progress: Progress updates and status information
+- `[A]` Action: Actions being performed
+- `[U]` Update: Update operations
+- `[D]` Debug: Detailed debugging information
+
+#### Configuration
+
+To set the verbosity level, modify the `DEBUG_LEVEL` option in `myrepo.cfg`:
 
 ```bash
-# Set debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)
-DEBUG_LEVEL=3
+# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
+DEBUG_LEVEL=2
 ```
 
 You can also set it via command line using `--debug LEVEL`.
@@ -426,8 +458,8 @@ The script performs comprehensive permission validation during startup:
    - Validates access to repository subdirectories (getPackage, repodata)
 
 3. **User Mode vs Root Mode**
-   - `USER_MODE=0` (Default): Script uses sudo for DNF operations and repository access. **Requires user to have sudo privileges.**
-   - `USER_MODE=1` (Advanced): Script runs without sudo, requires current user to have direct write access to all paths
+   - `USER_MODE=0` (Default): User runs script normally (`./myrepo.sh`), script uses `sudo` internally for elevated operations
+   - `USER_MODE=1` (Advanced): User runs entire script with sudo (`sudo ./myrepo.sh --user-mode`), script assumes elevated privileges
 
 4. **Error Handling**
    - LOCAL_REPO_PATH permission errors will cause script exit (critical)
@@ -436,24 +468,20 @@ The script performs comprehensive permission validation during startup:
 
 #### Setting Up Permissions
 
-**For User Mode (USER_MODE=1):**
+**For Default Mode (USER_MODE=0) - Recommended:**
 ```bash
-# Make directories owned by current user
-sudo chown -R $(whoami):$(id -gn) /path/to/local/repo
-sudo chown -R $(whoami):$(id -gn) /path/to/shared/repo
-
-# Ensure write permissions
-chmod -R u+w /path/to/local/repo
-chmod -R u+w /path/to/shared/repo
+# Simply ensure your user has sudo privileges
+# The script will automatically use sudo for necessary operations
+./myrepo.sh
 ```
 
-**For Root Mode (USER_MODE=0):**
+**For User Mode (USER_MODE=1) - Advanced:**
 ```bash
-# Run script as root or with sudo
-sudo ./myrepo.sh
+# Run the entire script with sudo
+sudo ./myrepo.sh --user-mode
 
-# Or set up sudoers for specific operations
-echo "username ALL=(ALL) NOPASSWD: /usr/bin/dnf, /usr/bin/createrepo_c" >> /etc/sudoers.d/myrepo
+# Or configure sudoers for passwordless sudo
+echo "$(whoami) ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/myrepo-user
 ```
 
 #### Troubleshooting Permissions
@@ -483,9 +511,9 @@ Common permission issues and solutions:
 
 #### Debug Output
 
-Use `DEBUG_LEVEL=3` to see detailed permission validation output:
+Use `DEBUG_LEVEL=3` (verbose) to see detailed permission validation output:
 ```bash
-./myrepo.sh --debug-level 3
+./myrepo.sh --debug 3
 ```
 
 This will show:
@@ -494,13 +522,46 @@ This will show:
 - Detailed validation for each repository subdirectory
 - Permission error causes and suggested fixes
 
+#### Automatic Permission Fixing
+
+The `--set-permissions` option enables automatic fixing of permission issues when they are detected:
+
+```bash
+# Automatically fix permission issues during script execution
+./myrepo.sh --set-permissions
+
+# Combine with debug output to see what's being fixed
+./myrepo.sh --set-permissions --debug 2
+```
+
+**How it works:**
+- When permission issues are detected, the script attempts to fix them automatically
+- Uses `sudo chown` to set correct ownership and `chmod` to set write permissions
+- Only attempts fixes when the user has appropriate sudo privileges
+- Reports success or failure of permission fixes
+- Continues script execution after attempting fixes
+
+**Use cases:**
+- New repository setup where permissions haven't been configured yet
+- Environments where directory ownership changes (e.g., after system updates)
+- Troubleshooting permission issues without manual intervention
+- Automated deployment scenarios
+
+**Safety notes:**
+- Only modifies permissions on directories configured in the script
+- Requires sudo privileges to modify directory ownership
+- Will not attempt fixes if sudo access is not available
+
 ## Usage
 
 ### Prerequisites
 
-**Important**: By default, `myrepo.sh` requires sudo privileges to run DNF operations and manage repository directories. Ensure you have sudo access before running the script.
+**Important**: The script requires sudo privileges in all modes. You must have sudo access to run DNF operations and manage repository directories.
 
-If you don't have sudo access, you must use `--user-mode` and manually configure directory permissions (see [Setting Up Permissions](#setting-up-permissions)).
+- **Default Mode**: Run script normally, it will use `sudo` internally when needed
+- **User Mode**: Run entire script with `sudo ./myrepo.sh --user-mode`
+
+If you don't have sudo access, the script cannot function.
 
 ### Running `myrepo.sh`
 
@@ -551,14 +612,20 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 # Full rebuild with verbose debugging
 ./myrepo.sh --full-rebuild --debug 2
 
-# User mode for non-root environments
-./myrepo.sh --user-mode --local-repo-path "$HOME/myrepo"
+# User mode for environments where you want to run the entire script with sudo
+sudo ./myrepo.sh --user-mode --local-repo-path /repo
 
 # Force metadata refresh before processing
 ./myrepo.sh --refresh-metadata --debug 1
 
 # Process specific repositories with custom parallel settings
 ./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4 --batch-size 80
+
+# Automatically fix permission issues when detected
+./myrepo.sh --set-permissions --debug 2
+
+# User mode with permission auto-fix
+sudo ./myrepo.sh --user-mode --set-permissions --local-repo-path /repo
 ```
 
 ### How It Works
@@ -585,14 +652,15 @@ The script implements a sophisticated workflow that efficiently manages local pa
 
 - **Dry Run Mode**: Use the `--dry-run` option to simulate the script's actions without making any changes.
 - **Debugging**: Increase the `DEBUG_LEVEL` to get more detailed output, which can help in troubleshooting.
-- **Debug Level Control**: Adjust the `DEBUG_LEVEL` to control the verbosity of log messages.
+- **Verbosity Control**: Adjust the `DEBUG_LEVEL` to control how much output is shown (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose).
 - **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
 - **Efficient Filtering**: Use `--name-filter` combined with `--repos` for precise control over package processing and improved performance.
 - **Testing Filters**: Always test new name filter patterns with `--dry-run` first to verify they match the expected packages.
 - **Manual Repository Management**: Enable `AUTO_UPDATE_MANUAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
 - **Performance Tuning**: Let adaptive tuning optimize performance automatically, or disable it and manually tune `BATCH_SIZE` and `PARALLEL` for specific environments.
 - **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
-- **User Mode**: Use `--user-mode` for non-root environments or when sudo access is restricted.
+- **User Mode**: Use `--user-mode` when you prefer to run the entire script with sudo (`sudo ./myrepo.sh --user-mode`) rather than letting the script use sudo internally.
+- **Permission Fixes**: Use `--set-permissions` to automatically fix directory permission issues when detected, useful for new setups or troubleshooting.
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
 - **Monitoring**: Check the performance statistics output to understand processing efficiency and identify potential bottlenecks.
 
