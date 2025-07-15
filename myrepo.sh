@@ -13,10 +13,11 @@
 # Current function order has some inconsistencies but reordering would be a large change.
 # All shellcheck issues have been resolved as of 2025-07-09.
 # Performance optimizations applied to remove_uninstalled_packages function in v2.1.21.
+# Verbosity level adjustments in v2.1.33 to reduce normal output noise.
 # older package versions.
 
 # Script version
-VERSION=2.1.32
+VERSION=2.1.33
  # Default values for environment variables if not set
 : "${BATCH_SIZE:=50}"                  # Optimized starting point based on performance analysis
 : "${CONTINUE_ON_ERROR:=0}"
@@ -84,8 +85,8 @@ RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
 : "${AUTO_UPDATE_MANUAL_REPOS:=1}"          # Enable automatic detection and update of manual repo changes
 
 # Progress feedback configuration defaults
-: "${PROGRESS_FEEDBACK_SECONDS:=15}"       # How often to show time-based progress feedback (seconds)
-: "${PROGRESS_FEEDBACK_PACKAGES:=100}"     # How often to show package-count-based progress feedback
+: "${PROGRESS_FEEDBACK_SECONDS:=30}"       # How often to show time-based progress feedback (seconds)
+: "${PROGRESS_FEEDBACK_PACKAGES:=200}"     # How often to show package-count-based progress feedback
 : "${DEBUG_PROGRESS_PACKAGES:=25}"         # Package interval for debug-level progress feedback
 
 # Log directory
@@ -250,7 +251,7 @@ function adaptive_tune_performance() {
     
     # Apply changes if they make sense
     if [[ $new_batch_size -ne $BATCH_SIZE ]] || [[ $new_parallel -ne $PARALLEL ]]; then
-        [[ $DEBUG_LEVEL -ge 1 ]] && log 1 "Adaptive tuning: batch_size $BATCH_SIZE→$new_batch_size, parallel $PARALLEL→$new_parallel (efficiency: $current_efficiency)"
+        [[ $DEBUG_LEVEL -ge 1 ]] && log 2 "Adaptive tuning: batch_size $BATCH_SIZE→$new_batch_size, parallel $PARALLEL→$new_parallel (efficiency: $current_efficiency)"
         BATCH_SIZE=$new_batch_size
         PARALLEL=$new_parallel
         
@@ -801,7 +802,7 @@ function detect_module_info() {
         echo "${module_name}:${stream}:${platform}:${version}:${context}:${package_arch}"
         return 0
     fi
-    
+
     return 1  # Not a module package
 }
 
@@ -909,7 +910,7 @@ function download_packages() {
                     DNF_COMMAND="sudo $DNF_COMMAND"
                 fi
 
-                [[ DEBUG_LEVEL -ge 2 ]] && log 2 "Executing: $DNF_COMMAND"
+                [[ DEBUG_LEVEL -ge 2 ]] && log 3 "Executing: $DNF_COMMAND"
                 if ! $DNF_COMMAND 1>>"$PROCESS_LOG_FILE" 2>>"$MYREPO_ERR_FILE"; then
 
                     log_to_temp_file "Failed to download packages: ${repo_packages[$repo_path]}"
@@ -1925,7 +1926,7 @@ function log() {
 }
 
 function log_to_temp_file() {
-    [[ $DEBUG_LEVEL -ge 1 ]] && echo "$1"
+    [[ $DEBUG_LEVEL -ge 3 ]] && echo "$1"
     echo "$1" >>"$TEMP_FILE"
 }
 
@@ -2233,7 +2234,7 @@ function process_batch() {
         local batch_start_time
         batch_start_time=$(date +%s%3N)
         
-        log 2 "Processing batch of ${#batch_packages[@]} packages..."
+        log 3 "Processing batch of ${#batch_packages[@]} packages..."
         [[ "${DEBUG_LEVEL:-0}" -ge 3 ]] && log 3 "Batch details: ${#batch_packages[@]} packages with $PARALLEL parallel processes"
         process_packages \
             "$DEBUG_LEVEL" \
@@ -2314,7 +2315,7 @@ function process_packages() {
         local current_time
         current_time=$(date +%s)
         if ((current_time - last_feedback_time >= PROGRESS_FEEDBACK_SECONDS)) || ((package_count % PROGRESS_FEEDBACK_PACKAGES == 0)); then
-            log 2 "Processing package $package_count/${#packages[@]}: $package_name..."
+            log 3 "Processing package $package_count/${#packages[@]}: $package_name..."
             last_feedback_time=$current_time
         fi
         
@@ -2361,7 +2362,7 @@ function process_packages() {
         case $package_status in
         "EXISTS")
             # Track statistics
-            ((stats_exists_count["$repo_name"]++))
+            stats_exists_count["$repo_name"]=$((${stats_exists_count["$repo_name"]:-0} + 1))
             
             if [[ $GROUP_OUTPUT -eq 1 ]]; then
                 # Collect for batch summary
@@ -2450,7 +2451,7 @@ function process_packages() {
             ;;
         "UPDATE")
             # Track statistics
-            ((stats_update_count["$repo_name"]++))
+            stats_update_count["$repo_name"]=$((${stats_update_count["$repo_name"]:-0} + 1))
             
             if [[ ! " ${manual_repos[*]} " == *" ${repo_name} "* ]]; then
                 # First, try to find a local cached copy before downloading the update
@@ -3171,7 +3172,7 @@ function traverse_all_repos() {
             if ((current_main_time - last_main_feedback_time >= PROGRESS_FEEDBACK_SECONDS)) || ((package_counter % PROGRESS_FEEDBACK_PACKAGES == 0)); then
                 local elapsed_main=$((current_main_time - main_loop_start_time))
                 local rate=$((package_counter * 60 / (elapsed_main + 1)))  # packages per minute
-                log 2 "Progress: $package_counter/${#package_lines[@]} packages analyzed ($rate pkg/min), batch size: ${#batch_packages[@]}"
+                log 3 "Progress: $package_counter/${#package_lines[@]} packages analyzed ($rate pkg/min), batch size: ${#batch_packages[@]}"
                 last_main_feedback_time=$current_main_time
             fi
             
@@ -3179,7 +3180,7 @@ function traverse_all_repos() {
                 break
             fi
             if ((${#batch_packages[@]} >= BATCH_SIZE)); then
-                log 2 "Processing batch of ${#batch_packages[@]} packages..."
+                log 3 "Processing batch of ${#batch_packages[@]} packages..."
                 process_batch "${batch_packages[@]}"
                 batch_packages=()
             fi

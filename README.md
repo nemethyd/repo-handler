@@ -1,4 +1,4 @@
-# Repo Handler Script
+# Repo Handler Script (v2.1.32)
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with AI support (Claude Sonnet, ChatGPT-4)
 
@@ -8,15 +8,7 @@ The `repo-handler` project provides a bash script designed to manage, clean, and
 
 ### Repository Architecture
 
-The script manages a **LOCAL_REPO_PATH** (typic| `--|| `--log-d| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup; only run `createrepo` + `rsync`.         |
-| `--user-mode`       | *(flag)*                   | *off*                 | Run entire script with sudo (advanced mode).                    |
-| `--refresh-metadata`| *(flag)*                   | *off*                 | Force a refresh of DNF metadata cache.                          |
-| `--dnf-serial`      | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.        |`         | *PATH*                     | `/var/log/myrepo`     | Where to write `process_package.log`, `myrepo.err`, etc.        |
-| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
-| `--name-filter`     | *REGEX*                    | *empty*               | Filter packages by name using regex pattern.                    |
-| `--parallel`        | *INT*                      | `6`                   | Maximum concurrent download or processing jobs.                 |
-| `--repos`           | *CSV*                      | *all enabled*         | Comma-separated list of repositories to process.                |
-| `--set-permissions` | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.              |manual-repos`    | *CSV*                      | `ol9_edge`            | Comma‑separated list of manual repositories.                    |ebug`           | *0‒4*                      | `1`                   | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose). |lly `/repo`) that contains two types of repositories:
+The script manages a **LOCAL_REPO_PATH** (typically `/repo`) that contains two types of repositories:
 
 1. **Internet-sourced repositories**: These contain a reduced subset of official internet repositories, including only the packages that are actually installed on the local "golden copy" system. This creates much smaller repositories compared to the original internet repositories.
 
@@ -64,6 +56,7 @@ These are additional repositories (e.g., `ol9_edge`) that:
 **Key concepts:**
 - **LOCAL_REPO_PATH**: Base directory (`/repo`) containing the complete repository tree structure
 - **MANUAL_REPOS**: Specific repository names within LOCAL_REPO_PATH that receive special manual management treatment
+- **getPackage**: Subdirectory within each repository where RPM packages are stored
 
 ## Requirements
 
@@ -574,25 +567,26 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 ## CLI Options
 
-| Option              | Argument                   | Default               | Purpose                                                         |
-|---------------------|--------------------------- |-----------------------|-----------------------------------------------------------------|
-| `--batch-size`      | *INT*                      | `50`                  | Number of packages processed in one batch (optimized default). |
-| `--debug`           | *0‒2*                      | `0`                   | Extra runtime diagnostics (0 = off, 1 = basic, 2 = verbose).    |
-| `--dry-run`         | *(flag)*                   | *off*                 | Simulate all actions; make **no** changes on disk.              |
-| `--exclude-repos`   | *CSV*                      | *empty*               | Comma‑separated list of repo IDs that must **not** be mirrored. |
-| `--full-rebuild`    | *(flag)*                   | *off*                 | Clear the processed‑package cache and rescan **everything**.    |
-| `--local-repo-path` | *PATH*                     | `/repo`               | Root directory that holds the local mirrors.                    |
-| `--local-repos`     | *CSV*                      | `ol9_edge`            | Comma‑separated list of repos considered “local sources”.       |
-| `--log-dir`         | *PATH*                     | `/var/log/myrepo`     | Where to write `process_package.log`, `myrepo.err`, etc.        |
-| `--log-level`       | `ERROR\|WARN\|INFO\|DEBUG` | `INFO`                | Filter normal log messages by severity.                         |
-| `--max-packages`    | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).      |
-| `--parallel`        | *INT*                      | `2`                   | Maximum concurrent download or cleanup jobs.                    |
-| `--shared-repo-path`| *PATH*                     | `/mnt/hgfs/ol9_repos` | Destination folder that receives the rsync’ed copy.             |
-| `--sync-only`       | *(flag)*                   | *off*                 | Skip download/cleanup; only run `createrepo` + `rsync`.         |
-| `--user-mode`       | *(flag)*                   | *off*                 | Run without `sudo`; helper files go under `$HOME/tmp`.          |
-| `--version`         | —                          | —                     | Print script version and exit.                                  |
-| `--help`            | —                          | —                     | Display built‑in usage synopsis.                                |
-
+| Option               | Values                     | Default               | Description                                                   |
+|----------------------|----------------------------|------------------------|---------------------------------------------------------------|
+| `--batch-size`       | *INT*                      | `50`                  | Number of packages per batch.                                 |
+| `--debug`            | *0‒4*                      | `1`                   | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose). |
+| `--dry-run`          | *(flag)*                   | *off*                 | Perform a dry run without making changes.                     |
+| `--exclude-repos`    | *CSV*                      | *empty*               | Comma-separated list of repos to exclude.                     |
+| `--full-rebuild`     | *(flag)*                   | *off*                 | Perform a full rebuild of the repository.                     |
+| `--local-repo-path`  | *PATH*                     | `/repo`               | Set local repository path.                                    |
+| `--log-dir`          | *PATH*                     | `/var/log/myrepo`     | Where to write `process_package.log`, `myrepo.err`, etc.      |
+| `--manual-repos`     | *CSV*                      | `ol9_edge`            | Comma‑separated list of manual repositories.                  |
+| `--max-packages`     | *INT*                      | `0`                   | Limit the total number of packages scanned (0 = no limit).    |
+| `--name-filter`      | *REGEX*                    | *empty*               | Filter packages by name using regex pattern.                  |
+| `--parallel`         | *INT*                      | `6`                   | Maximum concurrent download or processing jobs.               |
+| `--repos`            | *CSV*                      | *all enabled*         | Comma-separated list of repositories to process.              |
+| `--set-permissions`  | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.            |
+| `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
+| `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run `createrepo` + `rsync`.       |
+| `--user-mode`        | *(flag)*                   | *off*                 | Run entire script with sudo (advanced mode).                  |
+| `--refresh-metadata` | *(flag)*                   | *off*                 | Force a refresh of DNF metadata cache.                        |
+| `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
 
 #### Examples:
 
@@ -669,6 +663,14 @@ The script implements a sophisticated workflow that efficiently manages local pa
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Contributing
+
+Feel free to submit issues or pull requests to improve the functionality or performance of the scripts.
+
+## Conclusion
+
+The `repo-handler` script provides a comprehensive and intelligent solution for managing local package repositories in isolated environments. With features like adaptive performance tuning, dual-tier metadata management, intelligent local repository change detection, and flexible filtering options, it offers both power and ease of use. The script automatically optimizes its performance while ensuring that your repositories remain current and contain only the necessary packages for your specific environment.
+
+The combination of configuration file support, extensive command-line options, and automatic optimization makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
 
 Feel free to submit issues or pull requests to improve the functionality or performance of the scripts.
 
