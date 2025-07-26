@@ -14,12 +14,13 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.0"
+VERSION="2.2.4"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 MANUAL_REPOS=("ol9_edge")
+LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
 MAX_PACKAGES=${MAX_PACKAGES:-0}
@@ -35,10 +36,29 @@ LOG_DIR=${LOG_DIR:-"/var/log/myrepo"}
 SET_PERMISSIONS=${SET_PERMISSIONS:-0}
 REFRESH_METADATA=${REFRESH_METADATA:-0}
 DNF_SERIAL=${DNF_SERIAL:-0}
-ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=use sudo for commands, 0=run commands directly
+# ELEVATE_COMMANDS is now automatically detected based on execution context:
+# - When running as root (EUID=0): Uses 'dnf' directly 
+# - When running under sudo (SUDO_USER set): Uses 'dnf' directly
+# - When running as user: Uses 'sudo dnf' automatically
+# - Manual override in config: Set to 0 to disable sudo usage (not recommended unless running as root)
+# - The script intelligently detects multiple privilege escalation scenarios
+ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=auto-detect (default), 0=never use sudo
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
 CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
 USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
+
+# Timeout configuration (in seconds)
+DNF_QUERY_TIMEOUT=${DNF_QUERY_TIMEOUT:-60}    # Timeout for basic DNF queries
+DNF_CACHE_TIMEOUT=${DNF_CACHE_TIMEOUT:-120}   # Timeout for DNF cache building operations
+SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
+
+# Performance and monitoring configuration
+PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-500}  # Report progress every N packages
+CONFIG_FILE_MAX_LINES=${CONFIG_FILE_MAX_LINES:-500}       # Maximum lines to read from config file
+MAX_PARALLEL_DOWNLOADS=${MAX_PARALLEL_DOWNLOADS:-8}       # DNF parallel downloads
+DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
+DEBUG_FILE_LIST_THRESHOLD=${DEBUG_FILE_LIST_THRESHOLD:-10} # Show file list if repo has fewer RPMs than this
+DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to show in debug list
 
 # Formatting constants (matching original script)
 PADDING_LENGTH=28
@@ -55,11 +75,21 @@ declare -A stats_new_count
 declare -A stats_update_count  
 declare -A stats_exists_count
 
-# Helper function to get the correct DNF command (with sudo if elevation needed)
+# Helper function to get the correct DNF command (automatically detects elevation need)
 function get_dnf_cmd() {
-    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+    # Auto-detect: check multiple ways to determine if we already have elevated privileges  
+    # 1. Check if running as root (EUID=0)
+    # 2. Check if already running under sudo (SUDO_USER is set)
+    # 3. Check if we can write to root-only locations without sudo
+    
+    if [[ $EUID -eq 0 ]] || [[ -n "$SUDO_USER" ]] || [[ -w /root ]]; then
+        # We already have elevated privileges, use dnf directly
+        echo "dnf"
+    elif [[ ${ELEVATE_COMMANDS:-1} -eq 1 ]]; then
+        # We need sudo elevation - return space-separated command for unquoted expansion
         echo "sudo dnf"
     else
+        # Manual override: no sudo
         echo "dnf"
     fi
 }
@@ -319,6 +349,10 @@ function load_config() {
                     # Convert comma-separated list to array
                     IFS=',' read -ra MANUAL_REPOS <<< "$value"
                     ;;
+                LOCAL_RPM_SOURCES)
+                    # Convert comma-separated list to array
+                    IFS=',' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                    ;;
                 DEBUG_LEVEL) DEBUG_LEVEL="$value" ;;
                 DRY_RUN) DRY_RUN="$value" ;;
                 MAX_PACKAGES) MAX_PACKAGES="$value" ;;
@@ -335,10 +369,19 @@ function load_config() {
                 CACHE_MAX_AGE) CACHE_MAX_AGE="$value" ;;
                 CLEANUP_UNINSTALLED) CLEANUP_UNINSTALLED="$value" ;;
                 USE_PARALLEL_COMPRESSION) USE_PARALLEL_COMPRESSION="$value" ;;
+                DNF_QUERY_TIMEOUT) DNF_QUERY_TIMEOUT="$value" ;;
+                DNF_CACHE_TIMEOUT) DNF_CACHE_TIMEOUT="$value" ;;
+                SUDO_TEST_TIMEOUT) SUDO_TEST_TIMEOUT="$value" ;;
+                PROGRESS_REPORT_INTERVAL) PROGRESS_REPORT_INTERVAL="$value" ;;
+                CONFIG_FILE_MAX_LINES) CONFIG_FILE_MAX_LINES="$value" ;;
+                MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
+                DNF_RETRIES) DNF_RETRIES="$value" ;;
+                DEBUG_FILE_LIST_THRESHOLD) DEBUG_FILE_LIST_THRESHOLD="$value" ;;
+                DEBUG_FILE_LIST_COUNT) DEBUG_FILE_LIST_COUNT="$value" ;;
             esac
             
             # Limit config file reading to prevent hanging on large files
-            if [[ $line_count -gt 500 ]]; then
+            if [[ $line_count -gt $CONFIG_FILE_MAX_LINES ]]; then
                 log "W" "Config file too large, stopping at line $line_count"
                 break
             fi
@@ -346,8 +389,20 @@ function load_config() {
         
         log "I" "Configuration loaded: LOCAL_REPO_PATH=$LOCAL_REPO_PATH"
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "MANUAL_REPOS: ${MANUAL_REPOS[*]}"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}"
     else
         log "I" "No configuration file found, using defaults"
+    fi
+    
+    # Set up default LOCAL_RPM_SOURCES if not configured
+    if [[ ${#LOCAL_RPM_SOURCES[@]} -eq 0 ]]; then
+        LOCAL_RPM_SOURCES=(
+            "$HOME/rpmbuild/RPMS"
+            "/var/cache/dnf"
+            "/var/cache/yum"
+            "/tmp"
+        )
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using default LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}"
     fi
 }
 
@@ -394,7 +449,10 @@ function build_repo_cache() {
     if [[ $cache_valid == true ]]; then
         local loaded_repos=0
         local enabled_repos
-        enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+        local dnf_cmd
+        dnf_cmd=$(get_dnf_cmd)
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command  
+        enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
         
         while IFS= read -r repo; do
             local cache_file="$cache_dir/${repo}.cache"
@@ -425,7 +483,10 @@ function build_repo_cache() {
     
     # Get list of all installed packages first
     local installed_packages
-    installed_packages=$(timeout 60 "$(get_dnf_cmd)" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
     
     if [[ -z "$installed_packages" ]]; then
         log "W" "No installed packages found"
@@ -438,7 +499,8 @@ function build_repo_cache() {
     
     # Get list of enabled repositories
     local enabled_repos
-    enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
     
     if [[ -z "$enabled_repos" ]]; then
         log "W" "No enabled repositories found"
@@ -463,7 +525,8 @@ function build_repo_cache() {
         done <<< "$unique_packages"
         
         # Query only for our installed packages in this repository (much faster!)
-        if timeout 120 "$(get_dnf_cmd)" repoquery -y --disablerepo="*" --enablerepo="$repo" \
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        if timeout "$DNF_CACHE_TIMEOUT" ${dnf_cmd} repoquery -y --disablerepo="*" --enablerepo="$repo" \
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>/dev/null > "$cache_file.tmp"; then
             mv "$cache_file.tmp" "$cache_file"
@@ -493,7 +556,10 @@ function is_repo_enabled() {
     
     # Check if repo is in enabled list
     local enabled_repos
-    enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
     
     while IFS= read -r enabled_repo; do
         if [[ "$repo_name" == "$enabled_repo" ]]; then
@@ -511,12 +577,12 @@ function determine_repo_from_installed() {
     local package_release="$3"
     local package_arch="$4"
     
-    # Try to get repository info from installed package
-    local full_package="${package_name}-${package_version}-${package_release}.${package_arch}"
-    
     # Method 1: Use dnf list installed to get repo info
     local repo_info
-    repo_info=$(sudo dnf list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    repo_info=$(${dnf_cmd} list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
     
     if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
         # Clean up repo name (remove @ prefix)
@@ -542,6 +608,40 @@ function determine_repo_from_installed() {
     fi
     
     # Method 3: Fallback - return empty to trigger repo search
+    return 1
+}
+
+# Locate local RPM files from configured sources
+function locate_local_rpm() {
+    local package_name="$1"
+    local package_version="$2"
+    local package_release="$3"
+    local package_arch="$4"
+    
+    local target_filename="${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+    
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Searching for local RPM: $target_filename"
+    
+    # Search in configured LOCAL_RPM_SOURCES directories
+    for search_path in "${LOCAL_RPM_SOURCES[@]}"; do
+        if [[ -d "$search_path" ]]; then
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Checking: $search_path"
+            
+            # Search recursively to find RPMs in subdirectories (like x86_64/, noarch/, etc.)
+            local rpm_path
+            rpm_path=$(find "$search_path" -type f -name "$target_filename" 2>/dev/null | head -n 1)
+            
+            if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Found local RPM: $rpm_path"
+                echo "$rpm_path"
+                return 0
+            fi
+        else
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Source directory not found: $search_path"
+        fi
+    done
+    
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "No local RPM found for: $target_filename"
     return 1
 }
 
@@ -587,17 +687,6 @@ function get_package_status() {
     
     [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking status for $exact_filename in $repo_path"
     
-    # DEBUG: Add extra logging for NetworkManager packages to debug the issue
-    if [[ "$package_name" == "NetworkManager"* && $DEBUG_LEVEL -ge 2 ]]; then
-        log "D" "=== DEBUG NetworkManager package ==="
-        log "D" "Package: $package_name"
-        log "D" "Expected: $exact_filename"
-        log "D" "Repo path: $repo_path"
-        log "D" "Full path: $repo_path/$exact_filename"
-        log "D" "Directory exists: $(test -d "$repo_path" && echo "YES" || echo "NO")"
-        log "D" "File exists: $(test -f "$repo_path/$exact_filename" && echo "YES" || echo "NO")"
-    fi
-    
     # Ensure repo path exists - if not, it's definitely NEW
     if [[ ! -d "$repo_path" ]]; then
         [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Repository directory doesn't exist: $repo_path -> NEW"
@@ -608,10 +697,6 @@ function get_package_status() {
     # Check for exact match first (EXISTS)
     if [[ -f "$repo_path/$exact_filename" ]]; then
         [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match: $exact_filename -> EXISTS"
-        # Extra debug for NetworkManager packages
-        if [[ "$package_name" == "NetworkManager"* && $DEBUG_LEVEL -ge 2 ]]; then
-            log "D" "NetworkManager file found - should return EXISTS"
-        fi
         echo "EXISTS"
         return 0
     fi
@@ -635,8 +720,8 @@ function get_package_status() {
         local total_rpms
         total_rpms=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
         log "D" "Repository $repo_path contains $total_rpms total RPM files"
-        if [[ $total_rpms -gt 0 && $total_rpms -lt 10 ]]; then
-            log "D" "Files in repository: $(find "$repo_path" -name "*.rpm" -type f -print0 2>/dev/null | xargs -0 basename | head -5)"
+        if [[ $total_rpms -gt 0 && $total_rpms -lt $DEBUG_FILE_LIST_THRESHOLD ]]; then
+            log "D" "Files in repository: $(find "$repo_path" -name "*.rpm" -type f -print0 2>/dev/null | xargs -0 basename | head -"$DEBUG_FILE_LIST_COUNT")"
         fi
     fi
     
@@ -649,6 +734,12 @@ function get_package_status() {
 # Get repository path for a repository name
 function get_repo_path() {
     local repo_name="$1"
+    
+    # Validate repository name to prevent creating getPackage directly under LOCAL_REPO_PATH
+    if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+        log "E" "Invalid repository name: '$repo_name' - this would create getPackage directly under $LOCAL_REPO_PATH"
+        return 1
+    fi
     
     # All repositories use getPackage subdirectory (both regular and manual)
     echo "$LOCAL_REPO_PATH/$repo_name/getPackage"
@@ -741,17 +832,16 @@ function batch_download_packages() {
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Packages: $packages"
             
             # Use optimized DNF with parallel downloads and performance settings
-            local dnf_output
             local dnf_cmd
             dnf_cmd=$(get_dnf_cmd)
             
             # Build DNF command with appropriate repository options
             local dnf_options=(
-                --setopt=max_parallel_downloads=8
+                --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
                 --setopt=fastestmirror=1
                 --setopt=deltarpm=0
-                --setopt=timeout=60
-                --setopt=retries=2
+                --setopt=timeout="$DNF_QUERY_TIMEOUT"
+                --setopt=retries="$DNF_RETRIES"
                 --destdir="$repo_path"
             )
             
@@ -761,12 +851,11 @@ function batch_download_packages() {
                 dnf_options+=(--enablerepo="$repo_name")
             fi
             
-            # shellcheck disable=SC2086 # Intentional word splitting for package list
-            if dnf_output=$($dnf_cmd download "${dnf_options[@]}" $packages 2>&1); then
+            # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
+            if ${dnf_cmd} download "${dnf_options[@]}" $packages >/dev/null 2>&1; then
                 log "I" "✓ Downloads completed for $repo_name"
             else
-                log "W" "✗ Some downloads failed for $repo_name"
-                [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   Error: $dnf_output"
+                log "W" "✗ Some downloads failed for $repo_name (check dnf logs for details)"
                 
                 # Try downloading packages one by one as fallback
                 log "I" "   Trying individual downloads as fallback..."
@@ -775,11 +864,12 @@ function batch_download_packages() {
                 # shellcheck disable=SC2086 # Intentional word splitting for package list
                 for pkg in $packages; do
                     ((total_count++))
-                    if $dnf_cmd download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+                    if ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                         ((success_count++))
-                        log "I" "   ✓ $pkg"
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ $pkg"
                     else
-                        log "W" "   ✗ $pkg"
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ $pkg"
                     fi
                 done
                 log "I" "   Fallback result: $success_count/$total_count packages downloaded"
@@ -971,6 +1061,36 @@ function update_manual_repository_metadata() {
     fi
 }
 
+# Validate repository structure and detect common issues
+function validate_repository_structure() {
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Validating repository structure..."
+    
+    # Check for invalid getPackage directory directly under LOCAL_REPO_PATH
+    if [[ -d "$LOCAL_REPO_PATH/getPackage" ]]; then
+        log "W" "⚠️  DETECTED BUG: Invalid getPackage directory found at $LOCAL_REPO_PATH/getPackage"
+        log "W" "   This is incorrect - getPackage should only exist as subdirectories under repository directories"
+        log "W" "   Example: $LOCAL_REPO_PATH/ol9_appstream/getPackage/ (correct)"
+        log "W" "   NOT: $LOCAL_REPO_PATH/getPackage/ (incorrect - this is the detected issue)"
+        
+        # Count files in the invalid directory
+        local file_count=0
+        if [[ -d "$LOCAL_REPO_PATH/getPackage" ]]; then
+            file_count=$(find "$LOCAL_REPO_PATH/getPackage" -name "*.rpm" -type f 2>/dev/null | wc -l)
+            if [[ $file_count -gt 0 ]]; then
+                log "W" "   The invalid directory contains $file_count RPM files that may need to be moved"
+                log "W" "   Manual intervention required to fix this issue"
+            else
+                log "I" "   The invalid directory appears to be empty - safe to remove"
+            fi
+        fi
+        
+        return 1  # Structure validation failed
+    fi
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Repository structure validation passed"
+    return 0
+}
+
 # Clean up uninstalled packages from local repositories (improved accuracy)
 function cleanup_uninstalled_packages() {
     log "I" "🧹 Checking for uninstalled packages to clean up..."
@@ -980,7 +1100,10 @@ function cleanup_uninstalled_packages() {
     installed_packages_file=$(mktemp)
     
     log "I" "📋 Building comprehensive installed packages list..."
-    if ! timeout 120 "$(get_dnf_cmd)" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    if ! timeout "$DNF_CACHE_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
          sed 's/(none)/0/g' | sort -u > "$installed_packages_file"; then
         log "W" "Could not get comprehensive installed package list for cleanup"
         rm -f "$installed_packages_file"
@@ -1148,13 +1271,15 @@ function process_packages() {
     # Use the original script's efficient method with timeout
     if [[ -n "$NAME_FILTER" ]]; then
         # Get all packages first, then filter by package name (first field before |)
-        package_list=$(timeout 60 $dnf_cmd repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
             if [[ "$name" =~ $NAME_FILTER ]]; then
                 echo "$name|$rest"
             fi
         done)
     else
-        package_list=$(timeout 60 $dnf_cmd repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
     fi
     
     if [[ -z "$package_list" ]]; then
@@ -1190,8 +1315,8 @@ function process_packages() {
             continue
         fi
         
-        # Progress reporting every 200 packages (less frequent for speed)
-        if (( processed_packages % 200 == 0 )); then
+        # Progress reporting every N packages (configurable for better speed)
+        if (( processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
             local elapsed=$(($(date +%s) - start_time))
             local rate=0
             if [[ $elapsed -gt 0 ]]; then
@@ -1269,12 +1394,28 @@ function process_packages() {
             continue
         fi
         
+        # Additional validation to prevent empty repo names that could cause getPackage under LOCAL_REPO_PATH
+        if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+            log "W" "Invalid repository name detected for package $package_name: '$repo_name'"
+            log "W" "This could cause creation of invalid getPackage directory - skipping package"
+            continue
+        fi
+        
         local repo_path
         repo_path=$(get_repo_path "$repo_name")
         
+        # Additional safety check - ensure repo_path is valid
+        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
+            log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
+            continue
+        fi
+        
         # Ensure repository directory exists
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-            sudo mkdir -p "$repo_path" 2>/dev/null && sudo chown "$USER:$USER" "$repo_path" 2>/dev/null && sudo chmod 755 "$repo_path" 2>/dev/null || true
+            if sudo mkdir -p "$repo_path" 2>/dev/null; then
+                sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                sudo chmod 755 "$repo_path" 2>/dev/null || true
+            fi
         else
             mkdir -p "$repo_path" 2>/dev/null
         fi
@@ -1296,19 +1437,61 @@ function process_packages() {
                 echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    # Remove old version(s) first - improved logic like original script
-                    local old_packages
-                    old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
-                    if [[ -n "$old_packages" ]]; then
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+                    # First, try to find a local copy before downloading the update
+                    local rpm_path
+                    rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+                    
+                    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                        # Found local copy of the updated package - use it instead of downloading
+                        echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
+                        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                        
+                        # Remove old version(s) first
+                        local old_packages
+                        old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
+                        if [[ -n "$old_packages" ]]; then
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+                            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                                echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                            else
+                                echo "$old_packages" | xargs rm -f 2>/dev/null
+                            fi
+                        fi
+                        
+                        # Copy the local RPM to the repository
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                            if sudo cp "$rpm_path" "$repo_path/"; then
+                                echo -e "\e[32m   ✓ Updated from local source\e[0m"
+                            else
+                                echo -e "\e[31m   ✗ Failed to copy local RPM, trying download\e[0m"
+                                rpm_path=""  # Clear to trigger download fallback
+                            fi
                         else
-                            echo "$old_packages" | xargs rm -f 2>/dev/null
+                            if cp "$rpm_path" "$repo_path/"; then
+                                echo -e "\e[32m   ✓ Updated from local source\e[0m"
+                            else
+                                echo -e "\e[31m   ✗ Failed to copy local RPM, trying download\e[0m"
+                                rpm_path=""  # Clear to trigger download fallback
+                            fi
                         fi
                     fi
-                    # Add to update batch
-                    update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                    
+                    # If no local copy or copy failed, add to update batch for download
+                    if [[ -z "$rpm_path" ]]; then
+                        # Remove old version(s) first - improved logic like original script
+                        local old_packages
+                        old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
+                        if [[ -n "$old_packages" ]]; then
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+                            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                                echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                            else
+                                echo "$old_packages" | xargs rm -f 2>/dev/null
+                            fi
+                        fi
+                        # Add to update batch
+                        update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                    fi
                 fi
                 ;;
             "NEW")
@@ -1323,8 +1506,65 @@ function process_packages() {
                         break
                     else
                         ((new_packages_found++))
-                        # Add to new batch
-                        new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        
+                        # First, try to find a local copy before downloading
+                        local rpm_path
+                        rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+                        
+                        if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                            # Found local copy - use it instead of downloading
+                            echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"
+                            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                            
+                            # Copy the local RPM to the repository
+                            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                                if sudo cp "$rpm_path" "$repo_path/"; then
+                                    echo -e "\e[32m   ✓ Copied from local source\e[0m"
+                                else
+                                    echo -e "\e[31m   ✗ Failed to copy local RPM, trying download\e[0m"
+                                    rpm_path=""  # Clear to trigger download fallback
+                                fi
+                            else
+                                if cp "$rpm_path" "$repo_path/"; then
+                                    echo -e "\e[32m   ✓ Copied from local source\e[0m"
+                                else
+                                    echo -e "\e[31m   ✗ Failed to copy local RPM, trying download\e[0m"
+                                    rpm_path=""  # Clear to trigger download fallback
+                                fi
+                            fi
+                        fi
+                        
+                        # If no local copy or copy failed, download the package
+                        if [[ -z "$rpm_path" ]]; then
+                            local package_spec
+                            if [[ -n "$epoch" && "$epoch" != "0" && "$epoch" != "(none)" ]]; then
+                                package_spec="${package_name}-${epoch}:${package_version}-${package_release}.${package_arch}"
+                            else
+                                package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
+                            fi
+                            
+                            # Download the package with repository enablement check
+                            local dnf_cmd_local
+                            dnf_cmd_local=$(get_dnf_cmd)
+                            
+                            if ! is_repo_enabled "$repo_name"; then
+                                # Repository is disabled, enable it for this download
+                                echo -e "\e[33m   📥 Downloading: $package_spec (enabling $repo_name)\e[0m"
+                                if ${dnf_cmd_local} download --enablerepo="$repo_name" --destdir="$repo_path" "$package_spec" >/dev/null 2>&1; then
+                                    echo -e "\e[32m   ✓ Downloaded successfully\e[0m"
+                                else
+                                    echo -e "\e[31m   ✗ Download failed (check dnf logs)\e[0m"
+                                fi
+                            else
+                                # Repository is enabled, download normally
+                                echo -e "\e[33m   📥 Downloading: $package_spec\e[0m"
+                                if ${dnf_cmd_local} download --destdir="$repo_path" "$package_spec" >/dev/null 2>&1; then
+                                    echo -e "\e[32m   ✓ Downloaded successfully\e[0m"
+                                else
+                                    echo -e "\e[31m   ✗ Download failed (check dnf logs)\e[0m"
+                                fi
+                            fi
+                        fi
                     fi
                 fi
                 ;;
@@ -1398,8 +1638,11 @@ function sync_to_shared_repos() {
             local repo_name
             repo_name=$(basename "$repo_dir")
             
-            # Skip manual repos directory structure
+            # Skip and warn about invalid getPackage directory directly under LOCAL_REPO_PATH
             if [[ "$repo_name" == "getPackage" ]]; then
+                log "W" "Found invalid getPackage directory directly under $LOCAL_REPO_PATH - this is a bug!"
+                log "W" "   getPackage should only exist as subdirectories under repository directories"
+                log "W" "   Skipping sync for this invalid directory"
                 continue
             fi
             
@@ -1438,44 +1681,63 @@ function sync_to_shared_repos() {
     log "I" "Repository sync completed (disabled repositories excluded)"
 }
 
-# Check command elevation and privileges
+# Check command elevation and privileges (with auto-detection)
 function check_command_elevation() {
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking command elevation and privileges (ELEVATE_COMMANDS=$ELEVATE_COMMANDS, EUID=$EUID)"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking command elevation and privileges (ELEVATE_COMMANDS=$ELEVATE_COMMANDS, EUID=$EUID, SUDO_USER=${SUDO_USER:-unset})"
     
-    # If commands need elevation (ELEVATE_COMMANDS=1), verify sudo access
+    # Enhanced auto-detection for elevated privileges
+    if [[ $EUID -eq 0 ]] || [[ -n "$SUDO_USER" ]] || [[ -w /root ]]; then
+        if [[ $EUID -eq 0 ]]; then
+            log "I" "Running as root - DNF commands will run directly without sudo"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Root privileges detected (EUID=0)"
+        elif [[ -n "$SUDO_USER" ]]; then
+            log "I" "Running under sudo - DNF commands will run directly without additional sudo"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Sudo context detected (SUDO_USER=$SUDO_USER)"
+        else
+            log "I" "Elevated privileges detected - DNF commands will run directly"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Write access to /root detected"
+        fi
+        return 0
+    fi
+    
+    # Not running with elevated privileges - check if elevation is enabled
     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-        log "I" "Command elevation enabled - file operations will use sudo"
+        log "I" "Running as user (EUID=$EUID) - DNF commands will use sudo for elevation"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Auto-detected: user needs sudo for DNF operations"
         
-        # Test if sudo works
-        if ! sudo -n dnf --version >/dev/null 2>&1; then
+        # Test if sudo works (optional test to avoid surprises later)
+        local dnf_binary
+        if command -v dnf >/dev/null 2>&1; then
+            dnf_binary=$(command -v dnf)
+        else
+            dnf_binary="dnf"  # Let PATH resolve it
+        fi
+        
+        if ! sudo -n "$dnf_binary" --version >/dev/null 2>&1; then
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Passwordless sudo not available, testing with prompt..."
-            if ! timeout 10 sudo dnf --version >/dev/null 2>&1; then
-                log "E" "Command elevation requires sudo privileges for file operations. Please ensure:"
+            if ! timeout "$SUDO_TEST_TIMEOUT" sudo "$dnf_binary" --version >/dev/null 2>&1; then
+                log "E" "Auto-detected sudo requirement but sudo access failed. Please ensure:"
                 log "E" "1. Your user is in the sudoers group (wheel)"
-                log "E" "2. You can run 'sudo' commands for file operations"
-                log "E" "3. Or use --no-elevate to run commands directly (if script runs as root)"
+                log "E" "2. You can run 'sudo $dnf_binary' commands"
+                log "E" "3. Or run the script as root to avoid sudo requirement"
                 exit 1
             fi
         fi
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Sudo privileges verified successfully"
-    fi
-    
-    # If commands don't need elevation (ELEVATE_COMMANDS=0), run commands directly
-    if [[ $ELEVATE_COMMANDS -eq 0 ]]; then
-        log "I" "Command elevation disabled - file operations will run directly"
+        return 0
+    else
+        log "I" "Command elevation disabled - DNF commands will run directly"
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Running as user without elevation - some DNF operations may fail"
         
         # Test if user can run dnf directly
         if ! dnf --version >/dev/null 2>&1; then
-            log "E" "Direct command execution requires direct access to file operations. Please ensure:"
-            log "E" "1. DNF is installed and accessible in PATH"
-            log "E" "2. User has permission to run file operations (usually requires root)"
-            log "E" "3. Or use --elevate to run commands with sudo"
+            log "E" "Direct DNF execution failed. When running as non-root user, you usually need sudo."
+            log "E" "Consider: 1. Running script as root, or 2. Enabling elevation (ELEVATE_COMMANDS=1)"
             exit 1
         fi
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct file access verified successfully"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct DNF access verified (running without sudo)"
+        return 0
     fi
-    
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Command elevation check completed successfully"
 }
 
 # Main execution
@@ -1486,13 +1748,28 @@ function main() {
     # Check command elevation and privileges
     check_command_elevation
     
+    # Validate repository structure and detect issues
+    validate_repository_structure
+    
     log "I" "Starting MyRepo version $VERSION"
     
     # Handle refresh metadata option
     if [[ $REFRESH_METADATA -eq 1 ]]; then
         log "I" "Refreshing DNF metadata cache..."
-        $(get_dnf_cmd) clean metadata >/dev/null 2>&1 || true
+        local dnf_cmd
+        dnf_cmd=$(get_dnf_cmd)
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        ${dnf_cmd} clean metadata >/dev/null 2>&1 || true
         log "I" "DNF metadata cache refreshed"
+    fi
+    
+    # Show elevation status
+    if [[ $EUID -eq 0 ]]; then
+        log "I" "Privilege escalation: Running as root (auto-detected)"
+    elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        log "I" "Privilege escalation: Using sudo for DNF operations (auto-detected)"
+    else
+        log "I" "Privilege escalation: Disabled - running DNF directly as user"
     fi
     
     # Show active options
@@ -1664,14 +1941,6 @@ while [[ $# -gt 0 ]]; do
             SYNC_ONLY=1
             shift
             ;;
-        --elevate)
-            ELEVATE_COMMANDS=1
-            shift
-            ;;
-        --no-elevate)
-            ELEVATE_COMMANDS=0
-            shift
-            ;;
         --dnf-serial)
             DNF_SERIAL=1
             shift
@@ -1705,63 +1974,28 @@ while [[ $# -gt 0 ]]; do
             echo "  --set-permissions      Auto-fix file permissions"
             echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
             echo "  -s, --sync-only        Only sync repositories to shared location"
-            echo "  --elevate              Use sudo for DNF commands (default: enabled)"
-            echo "  --no-elevate           Run DNF commands directly (requires root or appropriate permissions)"
             echo "  --dnf-serial           Force serial DNF operations"
             echo "  -v, --verbose          Enable verbose output (debug level 2)"
             echo "  -h, --help             Show this help message"
             echo ""
-            echo "Command Elevation:"
-            echo "  --elevate    (default): Script uses 'sudo dnf' for package operations"
-            echo "  --no-elevate          : Script runs 'dnf' directly (requires root privileges)"
+            echo "Local RPM Sources:"
+            echo "  The script can use locally available RPM files before attempting downloads."
+            echo "  Configure LOCAL_RPM_SOURCES in myrepo.cfg to include directories like:"
+            echo "  - ~/rpmbuild/RPMS (your local builds)"
+            echo "  - /var/cache/dnf (DNF cached packages)"
+            echo "  - Custom build directories"
+            echo "  This helps avoid downloading packages you already have locally (like zstd)."
+            echo ""
+            echo "Automatic Privilege Detection:"
+            echo "  The script automatically detects if it's running as root (EUID=0) or as a regular user."
+            echo "  - When running as root: Uses 'dnf' directly (no sudo needed)"
+            echo "  - When running as user: Uses 'sudo dnf' automatically"
+            echo "  - Override via config: Set ELEVATE_COMMANDS=0 in myrepo.cfg to disable auto-sudo"
             echo ""
             echo "Examples:"
-            echo "  $0                     # Run with default settings (uses sudo)"
-            echo "  sudo $0 --no-elevate  # Run as root without sudo elevation"
-            echo "  $0 --elevate           # Run as user with sudo elevation (default)"
+            echo "  $0                     # Run as user (auto-detects and uses sudo dnf)"
+            echo "  sudo $0                # Run as root (auto-detects and uses dnf directly)"
             echo "  $0 --dry-run --verbose # Preview changes with detailed output"
-            exit 0
-            echo "  --parallel-compression Enable parallel compression for createrepo (default: enabled)"
-            echo "  --no-parallel-compression Disable parallel compression for createrepo"
-            echo "  --debug 0-4           Debug level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)"
-            echo "  --dnf-serial          Use serial DNF mode to prevent database lock contention"
-            echo "  --dry-run             Dry run mode (no changes)"
-            echo "  --exclude-repos CSV   Comma-separated list of repositories to exclude"
-            echo "  --full-rebuild        Perform a full rebuild of the repository"
-            echo "  --local-repo-path PATH Set local repository path (default: $LOCAL_REPO_PATH)"
-            echo "  --log-dir PATH        Where to write log files (default: $LOG_DIR)"
-            echo "  --manual-repos CSV    Comma-separated list of manual repositories"
-            echo "  --max-packages INT    Limit total packages processed (includes [E]xisting, [N]ew, [U]pdate - 0 = no limit)"
-            echo "  --max-new-packages INT Limit only [N]ew packages downloaded (excludes existing/updates - 0 = no limit)"
-            echo "  --name-filter REGEX   Filter packages by name using regex pattern"
-            echo "  --parallel INT        Maximum concurrent jobs (default: $PARALLEL)"
-            echo "  --refresh-metadata    Force a refresh of DNF metadata cache and rebuild repository cache"
-            echo "  --repos CSV          Comma-separated list of repositories to process"
-            echo "  --set-permissions     Automatically fix permission issues when detected"
-            echo "  --shared-repo-path PATH Set shared repository path (default: $SHARED_REPO_PATH)"
-            echo "  -s, --sync-only      Only sync to shared repos, skip package processing"
-            echo "  --user-mode          Run entire script with sudo (advanced mode)"
-            echo "  -v, --verbose        Verbose output (same as --debug 2)"
-            echo "  -h, --help           Show this help"
-            echo
-            echo "Cache Management:"
-            echo "  The script caches repository metadata for performance. Cache is valid for"
-            echo "  $CACHE_MAX_AGE seconds (4 hours) by default. Use --refresh-metadata to force rebuild."
-            echo
-            echo "Uninstalled Package Cleanup:"
-            echo "  By default, packages that are no longer installed are automatically removed"
-            echo "  from local repositories. Use --no-cleanup-uninstalled to disable this."
-            echo
-            echo "Examples:"
-            echo "  $0 --repos ol9_appstream --name-filter 'firefox.*' --dry-run"
-            echo "  $0 --exclude-repos code,copr --max-packages 100"
-            echo "  $0 --debug 3 --batch-size 25 --parallel 4"
-            echo "  $0 --full-rebuild --set-permissions --debug 2"
-            echo "  $0 --refresh-metadata --dnf-serial"
-            echo "  $0 --cache-max-age 3600  # 1 hour cache validity"
-            echo "  $0 --max-packages 50 --dry-run  # Test with 50 packages"
-            echo "  $0 --no-cleanup-uninstalled  # Keep all packages, don't clean up"
-            echo "  $0 --no-parallel-compression  # Use single-threaded createrepo"
             exit 0
             ;;
         *)

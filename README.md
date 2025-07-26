@@ -72,23 +72,25 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 - **Package Manager**: DNF (Dandified YUM)
 - **Tools**: `createrepo_c`, `rsync`, `bash` (version 4.0+)
 
-### User Permissions
+### Automatic Privilege Detection
 
-**Important**: Both modes require the user to have sudo privileges. The difference is how sudo is used:
+The script now **automatically detects** whether it's running as root or as a regular user and adapts accordingly:
 
-**Default Mode (ELEVATE_COMMANDS=1 - Recommended):**
+**When running as regular user** (`./myrepo.sh`):
 - **Automatic Sudo Usage**: The script automatically prefixes necessary commands with `sudo`
 - **User runs script normally**: `./myrepo.sh` (without sudo)
-- The script will internally use `sudo` when needed for operations like:
+- The script detects EUID≠0 and internally uses `sudo` when needed for operations like:
   - Running DNF commands (`sudo dnf download`, `sudo dnf list`, etc.)
   - Creating and updating repository metadata (`sudo createrepo_c`)
   - Writing to system directories and fixing permissions
 
-**Direct Mode (ELEVATE_COMMANDS=0 - Advanced):**
-- **No Sudo Usage**: Script runs commands directly without `sudo`
-- **User must run script as root**: `sudo ./myrepo.sh --no-elevate`
-- The script assumes it already has elevated privileges and won't prefix commands with `sudo`
+**When running as root** (`sudo ./myrepo.sh`):
+- **Direct Command Usage**: Script runs commands directly without `sudo`
+- **User runs script as root**: `sudo ./myrepo.sh`
+- The script detects EUID=0 and assumes it already has elevated privileges
 - All operations run with the elevated permissions of the root session
+
+**Configuration Override**: You can still override this behavior by setting `ELEVATE_COMMANDS=0` in `myrepo.cfg` to disable automatic sudo usage (advanced users only).
 
 ### Installation of Required Tools
 
@@ -97,7 +99,7 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 sudo dnf install createrepo_c rsync dnf-utils
 ```
 
-**Important**: If you don't have sudo access on your system, you cannot run this script. The script requires sudo privileges in both modes - the only difference is whether you run the script normally (default mode) and let it use `sudo` internally, or run the entire script as root (direct mode).
+**Important**: If you don't have sudo access on your system, you cannot run this script as a regular user. The script requires sudo privileges when not running as root - it will automatically detect your privilege level and adapt accordingly.
 
 ## Configuration
 
@@ -571,8 +573,6 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | `--set-permissions`  | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.            |
 | `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
 | `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run sync to shared repos.         |
-| `--elevate`          | *(flag)*                   | *on*                  | Use sudo for DNF commands (default mode).                     |
-| `--no-elevate`       | *(flag)*                   | *off*                 | Run DNF commands directly (requires root, advanced mode).     |
 | `--refresh-metadata` | *(flag)*                   | *off*                 | Force refresh of DNF metadata cache and rebuild repo cache.   |
 | `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
 
