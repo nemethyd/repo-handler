@@ -35,8 +35,10 @@ LOG_DIR=${LOG_DIR:-"/var/log/myrepo"}
 SET_PERMISSIONS=${SET_PERMISSIONS:-0}
 REFRESH_METADATA=${REFRESH_METADATA:-0}
 DNF_SERIAL=${DNF_SERIAL:-0}
-USER_MODE=${USER_MODE:-0}
+ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=use sudo for commands, 0=run commands directly
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
+CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
+USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
 
 # Formatting constants (matching original script)
 PADDING_LENGTH=28
@@ -53,6 +55,15 @@ declare -A stats_new_count
 declare -A stats_update_count  
 declare -A stats_exists_count
 
+# Helper function to get the correct DNF command (with sudo if elevation needed)
+function get_dnf_cmd() {
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        echo "sudo dnf"
+    else
+        echo "dnf"
+    fi
+}
+
 # Simple logging function with colors
 function log() {
     local level="$1"
@@ -66,7 +77,8 @@ function log() {
         "D") color="\e[36m" ;;  # Cyan for debug
     esac
     
-    echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m"
+    # Send log output to stderr to avoid contaminating function return values
+    echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
 }
 
 # Align repository names like the original script
@@ -319,8 +331,10 @@ function load_config() {
                 SET_PERMISSIONS) SET_PERMISSIONS="$value" ;;
                 REFRESH_METADATA) REFRESH_METADATA="$value" ;;
                 DNF_SERIAL) DNF_SERIAL="$value" ;;
-                USER_MODE) USER_MODE="$value" ;;
+                ELEVATE_COMMANDS) ELEVATE_COMMANDS="$value" ;;
                 CACHE_MAX_AGE) CACHE_MAX_AGE="$value" ;;
+                CLEANUP_UNINSTALLED) CLEANUP_UNINSTALLED="$value" ;;
+                USE_PARALLEL_COMPRESSION) USE_PARALLEL_COMPRESSION="$value" ;;
             esac
             
             # Limit config file reading to prevent hanging on large files
@@ -380,7 +394,7 @@ function build_repo_cache() {
     if [[ $cache_valid == true ]]; then
         local loaded_repos=0
         local enabled_repos
-        enabled_repos=$(dnf repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+        enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
         
         while IFS= read -r repo; do
             local cache_file="$cache_dir/${repo}.cache"
@@ -411,7 +425,7 @@ function build_repo_cache() {
     
     # Get list of all installed packages first
     local installed_packages
-    installed_packages=$(timeout 60 dnf repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+    installed_packages=$(timeout 60 "$(get_dnf_cmd)" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
     
     if [[ -z "$installed_packages" ]]; then
         log "W" "No installed packages found"
@@ -424,7 +438,7 @@ function build_repo_cache() {
     
     # Get list of enabled repositories
     local enabled_repos
-    enabled_repos=$(dnf repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
     
     if [[ -z "$enabled_repos" ]]; then
         log "W" "No enabled repositories found"
@@ -449,7 +463,7 @@ function build_repo_cache() {
         done <<< "$unique_packages"
         
         # Query only for our installed packages in this repository (much faster!)
-        if timeout 120 dnf repoquery -y --disablerepo="*" --enablerepo="$repo" \
+        if timeout 120 "$(get_dnf_cmd)" repoquery -y --disablerepo="*" --enablerepo="$repo" \
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>/dev/null > "$cache_file.tmp"; then
             mv "$cache_file.tmp" "$cache_file"
@@ -479,7 +493,7 @@ function is_repo_enabled() {
     
     # Check if repo is in enabled list
     local enabled_repos
-    enabled_repos=$(dnf repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    enabled_repos=$($(get_dnf_cmd) repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
     
     while IFS= read -r enabled_repo; do
         if [[ "$repo_name" == "$enabled_repo" ]]; then
@@ -490,65 +504,47 @@ function is_repo_enabled() {
     return 1  # Repository is not enabled
 }
 
-# Handle packages from disabled repositories (update local but don't sync)
-function handle_disabled_repo_package() {
+# Determine actual repository source for @System packages (like original script)
+function determine_repo_from_installed() {
     local package_name="$1"
-    local epoch="$2" 
-    local package_version="$3"
-    local package_release="$4"
-    local package_arch="$5"
-    local original_repo="$6"
+    local package_version="$2"
+    local package_release="$3"
+    local package_arch="$4"
     
-    # Use the original repository name (cleaned up)
-    local repo_name="${original_repo#@}"
-    local repo_path
-    repo_path=$(get_repo_path "$repo_name")
+    # Try to get repository info from installed package
+    local full_package="${package_name}-${package_version}-${package_release}.${package_arch}"
     
-    # Ensure repository directory exists (for disabled repos too)
-    mkdir -p "$repo_path" 2>/dev/null
+    # Method 1: Use dnf list installed to get repo info
+    local repo_info
+    repo_info=$(sudo dnf list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
     
-    # Get package status
-    local status
-    status=$(get_package_status "$package_name" "$package_version" "$package_release" "$package_arch" "$repo_path")
+    if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
+        # Clean up repo name (remove @ prefix)
+        local clean_repo="${repo_info#@}"
+        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Found installed repo via DNF: $clean_repo\e[0m"
+        echo "$clean_repo"
+        return 0
+    fi
     
-    # Handle the package but mark it as disabled repo
-    case "$status" in
-        "EXISTS")
-            ((stats_exists_count["$repo_name (disabled)"]++))
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m$(align_repo_name "$repo_name (disabled)"): $package_name-$package_version-$package_release.$package_arch\e[0m"
-            ;;
-        "UPDATE")
-            ((stats_update_count["$repo_name (disabled)"]++))
-            echo -e "\e[95m$(align_repo_name "$repo_name (disabled)"): $package_name-$package_version-$package_release.$package_arch\e[0m"
-            
-            if [[ $DRY_RUN -eq 0 ]]; then
-                # For disabled repos, try to download from any available source
-                if dnf download --destdir="$repo_path" "${package_name}-${package_version}-${package_release}.${package_arch}" >/dev/null 2>&1; then
-                    echo -e "\e[32m   ✓ Downloaded from available source\e[0m"
-                else
-                    echo -e "\e[33m   ⚠️ Package not available for download (disabled repo)\e[0m"
-                fi
-            fi
-            ;;
-        "NEW")
-            ((stats_new_count["$repo_name (disabled)"]++))
-            echo -e "\e[95m$(align_repo_name "$repo_name (disabled)"): $package_name-$package_version-$package_release.$package_arch\e[0m"
-            
-            if [[ $DRY_RUN -eq 0 ]]; then
-                # For disabled repos, try to download from any available source
-                if dnf download --destdir="$repo_path" "${package_name}-${package_version}-${package_release}.${package_arch}" >/dev/null 2>&1; then
-                    echo -e "\e[32m   ✓ Downloaded from available source\e[0m"
-                else
-                    echo -e "\e[33m   ⚠️ Package not available for download (disabled repo)\e[0m"
-                fi
-            fi
-            ;;
-    esac
+    # Method 2: Try rpm query for vendor/packager info
+    local rpm_info
+    rpm_info=$(rpm -qi "$package_name" 2>/dev/null | grep -E "^(Vendor|Packager|URL)" | head -1)
     
-    return 0
+    if [[ "$rpm_info" == *"Oracle"* ]]; then
+        # Try to guess Oracle repo based on package characteristics
+        case "$package_name" in
+            *kernel*|*glibc*|*systemd*) echo "ol9_baseos_latest" ;;
+            *devel*|*headers*) echo "ol9_codeready_builder" ;;
+            *EPEL*|*epel*) echo "ol9_developer_EPEL" ;;
+            *) echo "ol9_appstream" ;;
+        esac
+        return 0
+    fi
+    
+    # Method 3: Fallback - return empty to trigger repo search
+    return 1
 }
 
-# Determine actual repository source for @System packages (like original script)
 function determine_repo_source() {
     local package_name="$1"
     local epoch_version="$2"
@@ -589,23 +585,63 @@ function get_package_status() {
     local exact_filename="${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
     local name_arch_pattern="${package_name}-*-*.${package_arch}.rpm"
     
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking status for $exact_filename in $repo_path"
+    
+    # DEBUG: Add extra logging for NetworkManager packages to debug the issue
+    if [[ "$package_name" == "NetworkManager"* && $DEBUG_LEVEL -ge 2 ]]; then
+        log "D" "=== DEBUG NetworkManager package ==="
+        log "D" "Package: $package_name"
+        log "D" "Expected: $exact_filename"
+        log "D" "Repo path: $repo_path"
+        log "D" "Full path: $repo_path/$exact_filename"
+        log "D" "Directory exists: $(test -d "$repo_path" && echo "YES" || echo "NO")"
+        log "D" "File exists: $(test -f "$repo_path/$exact_filename" && echo "YES" || echo "NO")"
+    fi
+    
+    # Ensure repo path exists - if not, it's definitely NEW
+    if [[ ! -d "$repo_path" ]]; then
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Repository directory doesn't exist: $repo_path -> NEW"
+        echo "NEW"
+        return 0
+    fi
+    
     # Check for exact match first (EXISTS)
     if [[ -f "$repo_path/$exact_filename" ]]; then
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match: $exact_filename -> EXISTS"
+        # Extra debug for NetworkManager packages
+        if [[ "$package_name" == "NetworkManager"* && $DEBUG_LEVEL -ge 2 ]]; then
+            log "D" "NetworkManager file found - should return EXISTS"
+        fi
         echo "EXISTS"
         return 0
     fi
     
     # Check for same package name/arch but different version (UPDATE needed)
     local existing_files
-    existing_files=$(find "$repo_path" -maxdepth 1 -name "$name_arch_pattern" -type f 2>/dev/null | head -1)
+    existing_files=$(find "$repo_path" -maxdepth 1 -name "$name_arch_pattern" -type f 2>/dev/null)
     
     if [[ -n "$existing_files" ]]; then
         # Found same package with different version - need UPDATE
+        local existing_count
+        existing_count=$(echo "$existing_files" | wc -l)
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count existing version(s) of $package_name -> UPDATE"
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Example existing file: $(echo "$existing_files" | head -1 | xargs basename)"
         echo "UPDATE"
         return 0
     fi
     
+    # Debug: Show what files ARE in the repository
+    if [[ $DEBUG_LEVEL -ge 3 ]]; then
+        local total_rpms
+        total_rpms=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
+        log "D" "Repository $repo_path contains $total_rpms total RPM files"
+        if [[ $total_rpms -gt 0 && $total_rpms -lt 10 ]]; then
+            log "D" "Files in repository: $(find "$repo_path" -name "*.rpm" -type f -print0 2>/dev/null | xargs -0 basename | head -5)"
+        fi
+    fi
+    
     # No existing package found - this is NEW
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "No existing package found for $package_name -> NEW"
     echo "NEW"
     return 0
 }
@@ -614,16 +650,8 @@ function get_package_status() {
 function get_repo_path() {
     local repo_name="$1"
     
-    # Check if it's a manual repo
-    for manual_repo in "${MANUAL_REPOS[@]}"; do
-        if [[ "$repo_name" == "$manual_repo" ]]; then
-            echo "$LOCAL_REPO_PATH/$repo_name/getPackage"
-            return 0
-        fi
-    done
-    
-    # It's a regular repo
-    echo "$LOCAL_REPO_PATH/$repo_name"
+    # All repositories use getPackage subdirectory (both regular and manual)
+    echo "$LOCAL_REPO_PATH/$repo_name/getPackage"
     return 0
 }
 
@@ -674,9 +702,9 @@ function should_process_package() {
     return 0
 }
 
-# Fast batch download with parallel processing and better DNF options
 function batch_download_packages() {
     local -A repo_packages
+    local -A repo_status  # Track which repos are enabled/disabled
     
     # Group packages by repository for batch downloading
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
@@ -692,6 +720,13 @@ function batch_download_packages() {
         fi
         
         repo_packages["$repo_path"]+="$package_spec "
+        
+        # Check if repository is enabled
+        if is_repo_enabled "$repo_name"; then
+            repo_status["$repo_path"]="enabled"
+        else
+            repo_status["$repo_path"]="disabled"
+        fi
     done
     
     # Download batches per repository with optimized DNF settings
@@ -699,46 +734,388 @@ function batch_download_packages() {
         local packages="${repo_packages[$repo_path]}"
         if [[ -n "$packages" ]]; then
             local repo_name
-            repo_name=$(basename "$repo_path")
-            echo -e "\e[36m📦 Fast downloading packages to $repo_name...\e[0m"
+            repo_name=$(basename "$(dirname "$repo_path")")  # Get repo name from path
+            log "I" "📦 Fast downloading packages to $repo_name..."
             
             # Debug: show what we're trying to download
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Packages: $packages\e[0m"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Packages: $packages"
             
             # Use optimized DNF with parallel downloads and performance settings
             local dnf_output
+            local dnf_cmd
+            dnf_cmd=$(get_dnf_cmd)
+            
+            # Build DNF command with appropriate repository options
+            local dnf_options=(
+                --setopt=max_parallel_downloads=8
+                --setopt=fastestmirror=1
+                --setopt=deltarpm=0
+                --setopt=timeout=60
+                --setopt=retries=2
+                --destdir="$repo_path"
+            )
+            
+            # If repository is disabled, enable it for this download
+            if [[ "${repo_status[$repo_path]}" == "disabled" ]]; then
+                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Enabling disabled repository: $repo_name"
+                dnf_options+=(--enablerepo="$repo_name")
+            fi
+            
             # shellcheck disable=SC2086 # Intentional word splitting for package list
-            if dnf_output=$(dnf download \
-                --setopt=max_parallel_downloads=8 \
-                --setopt=fastestmirror=1 \
-                --setopt=deltarpm=0 \
-                --setopt=timeout=60 \
-                --setopt=retries=2 \
-                --destdir="$repo_path" \
-                $packages 2>&1); then
-                echo -e "\e[32m✓ Downloads completed for $repo_name\e[0m"
+            if dnf_output=$($dnf_cmd download "${dnf_options[@]}" $packages 2>&1); then
+                log "I" "✓ Downloads completed for $repo_name"
             else
-                echo -e "\e[31m✗ Some downloads failed for $repo_name\e[0m"
-                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[31m   Error: $dnf_output\e[0m"
+                log "W" "✗ Some downloads failed for $repo_name"
+                [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   Error: $dnf_output"
                 
                 # Try downloading packages one by one as fallback
-                echo -e "\e[33m   Trying individual downloads as fallback...\e[0m"
+                log "I" "   Trying individual downloads as fallback..."
                 local success_count=0
                 local total_count=0
                 # shellcheck disable=SC2086 # Intentional word splitting for package list
                 for pkg in $packages; do
                     ((total_count++))
-                    if dnf download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                    if $dnf_cmd download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                         ((success_count++))
-                        echo -e "\e[32m   ✓ $pkg\e[0m"
+                        log "I" "   ✓ $pkg"
                     else
-                        echo -e "\e[31m   ✗ $pkg\e[0m"
+                        log "W" "   ✗ $pkg"
                     fi
                 done
-                echo -e "\e[33m   Fallback result: $success_count/$total_count packages downloaded\e[0m"
+                log "I" "   Fallback result: $success_count/$total_count packages downloaded"
             fi
         fi
     done
+}
+
+# Update repository metadata using createrepo_c
+function update_repository_metadata() {
+    local repo_name="$1"
+    local repo_path="$2"
+    
+    if [[ ! -d "$repo_path" ]]; then
+        log "W" "Repository path does not exist: $repo_path"
+        return 1
+    fi
+    
+    # Check if there are any RPM files to create metadata for
+    local rpm_count
+    rpm_count=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
+    
+    if [[ $rpm_count -eq 0 ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$repo_name"): No RPM files found, skipping metadata update"
+        return 0
+    fi
+    
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "I" "🔍 $(align_repo_name "$repo_name"): Would update repository metadata (createrepo_c --update)"
+        return 0
+    fi
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating repository metadata..."
+    
+    # Fix permissions if needed (like original script)
+    if [[ $EUID -eq 0 ]]; then
+        if [[ -d "$repo_path/repodata" ]]; then
+            chown -R "$USER:$USER" "$repo_path/repodata" 2>/dev/null || true
+        fi
+        chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+        chmod 755 "$repo_path" 2>/dev/null || true
+    fi
+    
+    # Build createrepo command with parallel compression
+    local createrepo_cmd=""
+    if command -v createrepo_c >/dev/null 2>&1; then
+        createrepo_cmd="createrepo_c --update"
+        # Use parallel workers if enabled and available
+        if [[ $USE_PARALLEL_COMPRESSION -eq 1 ]]; then
+            createrepo_cmd+=" --workers $PARALLEL"
+        fi
+    elif command -v createrepo >/dev/null 2>&1; then
+        log "W" "createrepo_c not found, falling back to createrepo (slower)"
+        createrepo_cmd="createrepo --update"
+    else
+        log "E" "Neither createrepo_c nor createrepo found - cannot update repository metadata"
+        return 1
+    fi
+    createrepo_cmd+=" \"$repo_path\""
+    
+    # Add sudo if elevation is enabled
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        createrepo_cmd="sudo $createrepo_cmd"
+    fi
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Running: $createrepo_cmd"
+    
+    # Execute createrepo command
+    if eval "$createrepo_cmd" >/dev/null 2>&1; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Repository metadata updated successfully"
+        return 0
+    else
+        log "E" "❌ $(align_repo_name "$repo_name"): Failed to update repository metadata"
+        return 1
+    fi
+}
+
+# Update metadata for all repositories that had package changes
+function update_all_repository_metadata() {
+    if [[ $SYNC_ONLY -eq 1 ]]; then
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "Sync-only mode: skipping metadata updates"
+        return 0
+    fi
+    
+    log "I" "🔄 Updating repository metadata for all modified repositories..."
+    
+    local updated_repos=0
+    local failed_repos=0
+    
+    # Get list of all repositories that should have metadata updated
+    for repo_dir in "$LOCAL_REPO_PATH"/*; do
+        if [[ -d "$repo_dir" ]]; then
+            local repo_name
+            repo_name=$(basename "$repo_dir")
+            
+            # Skip if this repo should not be processed
+            if ! should_process_repo "$repo_name"; then
+                continue
+            fi
+            
+            local repo_path
+            repo_path=$(get_repo_path "$repo_name")
+            
+            if [[ -d "$repo_path" ]]; then
+                if update_repository_metadata "$repo_name" "$repo_path"; then
+                    ((updated_repos++))
+                else
+                    ((failed_repos++))
+                fi
+            fi
+        fi
+    done
+    
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "I" "🔍 DRY RUN: Would update metadata for $((updated_repos + failed_repos)) repositories"
+    else
+        log "I" "✅ Metadata update completed: $updated_repos successful, $failed_repos failed"
+        if [[ $failed_repos -gt 0 ]]; then
+            log "W" "Some repositories failed metadata update - they may not function correctly"
+        fi
+    fi
+}
+
+# Update metadata for manual repositories that may have had manual changes
+function update_manual_repository_metadata() {
+    if [[ ${#MANUAL_REPOS[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    log "I" "🔍 Checking manual repositories for metadata updates..."
+    
+    local updated_manual=0
+    
+    for manual_repo in "${MANUAL_REPOS[@]}"; do
+        local repo_dir="$LOCAL_REPO_PATH/$manual_repo"
+        
+        if [[ ! -d "$repo_dir" ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): Manual repository directory not found"
+            continue
+        fi
+        
+        # Check if there are RPM files
+        local rpm_count
+        rpm_count=$(find "$repo_dir" -name "*.rpm" -type f 2>/dev/null | wc -l)
+        
+        if [[ $rpm_count -eq 0 ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): No RPM files in manual repository"
+            continue
+        fi
+        
+        # Simple timestamp-based check: if any RPM is newer than metadata, update
+        local needs_update=false
+        
+        if [[ ! -d "$repo_dir/repodata" ]]; then
+            needs_update=true
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): No metadata directory found"
+        else
+            # Find newest RPM file
+            local newest_rpm
+            newest_rpm=$(find "$repo_dir" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+            
+            if [[ -n "$newest_rpm" ]]; then
+                local rpm_time
+                rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
+                local metadata_time
+                metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
+                
+                if [[ $rpm_time -gt $metadata_time ]]; then
+                    needs_update=true
+                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): RPM files newer than metadata"
+                fi
+            fi
+        fi
+        
+        if [[ $needs_update == true ]]; then
+            log "I" "🔄 $(align_repo_name "$manual_repo"): Manual repository needs metadata update"
+            if update_repository_metadata "$manual_repo" "$repo_dir"; then
+                ((updated_manual++))
+            fi
+        else
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): Manual repository metadata is up to date"
+        fi
+    done
+    
+    if [[ $updated_manual -gt 0 ]]; then
+        log "I" "✅ Updated metadata for $updated_manual manual repositories"
+    else
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "✅ All manual repository metadata is up to date"
+    fi
+}
+
+# Clean up uninstalled packages from local repositories (improved accuracy)
+function cleanup_uninstalled_packages() {
+    log "I" "🧹 Checking for uninstalled packages to clean up..."
+    
+    # Get comprehensive list of installed packages with full metadata (like original script)
+    local installed_packages_file
+    installed_packages_file=$(mktemp)
+    
+    log "I" "📋 Building comprehensive installed packages list..."
+    if ! timeout 120 "$(get_dnf_cmd)" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
+         sed 's/(none)/0/g' | sort -u > "$installed_packages_file"; then
+        log "W" "Could not get comprehensive installed package list for cleanup"
+        rm -f "$installed_packages_file"
+        return 1
+    fi
+    
+    local installed_count
+    installed_count=$(wc -l < "$installed_packages_file")
+    log "I" "📦 Found $installed_count installed packages to check against"
+    
+    if [[ $installed_count -eq 0 ]]; then
+        log "W" "No installed packages found, skipping cleanup"
+        rm -f "$installed_packages_file"
+        return 1
+    fi
+    
+    local total_removed=0
+    local total_would_remove=0
+    local repos_cleaned=0
+    
+    # Check each repository for packages that are no longer installed
+    for repo_dir in "$LOCAL_REPO_PATH"/*; do
+        if [[ -d "$repo_dir" ]]; then
+            local repo_name
+            repo_name=$(basename "$repo_dir")
+            
+            # Skip if this repo should not be processed
+            if ! should_process_repo "$repo_name"; then
+                continue
+            fi
+            
+            # Skip manual repositories (like original script)
+            local is_manual=false
+            for manual_repo in "${MANUAL_REPOS[@]}"; do
+                if [[ "$repo_name" == "$manual_repo" ]]; then
+                    is_manual=true
+                    break
+                fi
+            done
+            
+            if [[ $is_manual == true ]]; then
+                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Skipping cleanup for manual repository"
+                continue
+            fi
+            
+            local repo_path
+            repo_path=$(get_repo_path "$repo_name")
+            
+            if [[ ! -d "$repo_path" ]]; then
+                continue
+            fi
+            
+            local removed_count=0
+            local would_remove_count=0
+            local total_rpms
+            total_rpms=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
+            
+            if [[ $total_rpms -eq 0 ]]; then
+                continue
+            fi
+            
+            [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Checking $total_rpms packages for removal"
+            
+            # Process each RPM file and check if it's still installed (like original script)
+            while IFS= read -r rpm_file; do
+                if [[ -n "$rpm_file" ]]; then
+                    # Extract RPM metadata using rpm command (more accurate than filename parsing)
+                    local rpm_metadata
+                    if rpm_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
+                        
+                        # Normalize epoch (replace (none) with 0)
+                        rpm_metadata="${rpm_metadata//(none)/0}"
+                        
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking: $rpm_metadata"
+                        
+                        # Check if this exact package metadata is in the installed list
+                        if ! grep -qxF "$rpm_metadata" "$installed_packages_file"; then
+                            local package_name
+                            package_name=$(echo "$rpm_metadata" | cut -d'|' -f1)
+                            
+                            if [[ $DRY_RUN -eq 1 ]]; then
+                                log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)"
+                                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
+                                ((would_remove_count++))
+                                ((total_would_remove++))
+                            else
+                                log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)"
+                                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
+                                # Use sudo for file removal if elevation is enabled
+                                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                                    sudo rm -f "$rpm_file"
+                                else
+                                    rm -f "$rpm_file"
+                                fi
+                                ((removed_count++))
+                                ((total_removed++))
+                            fi
+                        fi
+                    else
+                        # If we can't read RPM metadata, log warning but don't remove
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Could not read metadata from: $(basename "$rpm_file")"
+                    fi
+                fi
+            done < <(find "$repo_path" -name "*.rpm" -type f 2>/dev/null)
+            
+            if [[ $DRY_RUN -eq 1 ]]; then
+                if [[ $would_remove_count -gt 0 ]]; then
+                    ((repos_cleaned++))
+                    echo -e "\e[35m$(align_repo_name "$repo_name"): Would remove $would_remove_count uninstalled packages (dry-run)\e[0m"
+                fi
+            else
+                if [[ $removed_count -gt 0 ]]; then
+                    ((repos_cleaned++))
+                    echo -e "\e[33m$(align_repo_name "$repo_name"): Removed $removed_count uninstalled packages\e[0m"
+                fi
+            fi
+        fi
+    done
+    
+    # Cleanup temporary file
+    rm -f "$installed_packages_file"
+    
+    if [[ $DRY_RUN -eq 1 ]]; then
+        if [[ $total_would_remove -gt 0 ]]; then
+            log "I" "🔍 DRY RUN: Would remove $total_would_remove uninstalled packages from $repos_cleaned repositories"
+        else
+            log "I" "🔍 DRY RUN: No uninstalled packages found to remove"
+        fi
+    else
+        if [[ $total_removed -gt 0 ]]; then
+            log "I" "✅ Cleanup completed: $total_removed uninstalled packages removed from $repos_cleaned repositories"
+        else
+            log "I" "✅ No uninstalled packages found to remove"
+        fi
+    fi
 }
 
 # Simple package processing with efficient batch downloading
@@ -755,18 +1132,29 @@ function process_packages() {
     local update_packages=()
     
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    echo -e "\e[32m🚀 MyRepo Simple v3.0.0 - Starting package processing...\e[0m"
+    echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
+    
+    # Show legend for status markers
+    echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
+    echo
     
     # Get installed packages using dnf (like original script) - this includes repo info!
     echo -e "\e[33m📦 Getting list of installed packages with repository information...\e[0m"
     local package_list
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
     
     # Use the original script's efficient method with timeout
     if [[ -n "$NAME_FILTER" ]]; then
-        package_list=$(timeout 60 dnf repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | grep -E "^[^|]*${NAME_FILTER}[^|]*\|")
+        # Get all packages first, then filter by package name (first field before |)
+        package_list=$(timeout 60 $dnf_cmd repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
+            if [[ "$name" =~ $NAME_FILTER ]]; then
+                echo "$name|$rest"
+            fi
+        done)
     else
-        package_list=$(timeout 60 dnf repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+        package_list=$(timeout 60 $dnf_cmd repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
     fi
     
     if [[ -z "$package_list" ]]; then
@@ -817,32 +1205,58 @@ function process_packages() {
         
         # Determine actual repository for @System packages (like original script)
         if [[ "$repo_name" == "System" || "$repo_name" == "@System" || "$repo_name" == "@commandline" ]]; then
+            local original_repo_name="$repo_name"
             repo_name=$(determine_repo_source "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch")
-            [[ $DEBUG_LEVEL -ge 3 ]] && echo -e "\e[37m   Determined repo for $package_name: $repo_name\e[0m"
+            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   $original_repo_name → $repo_name: $package_name\e[0m"
             
-            # If package not found in enabled repos, handle as disabled repo package
+            # If package not found in enabled repos, try to determine from installed package
             if [[ "$repo_name" == "Invalid" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m   Package from disabled/unavailable repository: $package_name\e[0m"
-                # Try to determine original repo from package release string or use heuristic
-                local fallback_repo="unknown_disabled"
+                # First, try to determine repo from installed package info
+                local discovered_repo
+                discovered_repo=$(determine_repo_from_installed "$package_name" "$package_version" "$package_release" "$package_arch")
                 
-                # Smart guessing based on package release patterns
-                if [[ "$package_release" =~ PGDG ]]; then
-                    fallback_repo="pgdg-common"
-                elif [[ "$package_release" =~ el9 ]]; then
-                    fallback_repo="unknown_disabled_el9"
+                if [[ -n "$discovered_repo" ]]; then
+                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found via installed package: $package_name ($discovered_repo - will enable for download)\e[0m"
+                    repo_name="$discovered_repo"
+                else
+                    # Fallback to guessing based on package name patterns
+                    local found_repo=""
+                    case "$package_name" in
+                        *SFCGAL*|*sfcgal*)
+                            # SFCGAL is typically in developer/EPEL repos
+                            for repo in "ol9_developer_EPEL" "ol9_developer" "ol9_oraclelinux_developer_EPEL"; do
+                                if [[ " ${REPOSITORIES[*]} " == *" $repo "* ]]; then
+                                    found_repo="$repo"
+                                    break
+                                fi
+                            done
+                            ;;
+                        *)
+                            # Try to guess the most likely disabled repository
+                            for repo in "${REPOSITORIES[@]}"; do
+                                if ! is_repo_enabled "$repo"; then
+                                    found_repo="$repo"
+                                    break
+                                fi
+                            done
+                            ;;
+                    esac
+                    
+                    if [[ -n "$found_repo" ]]; then
+                        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Guessing repo: $package_name ($found_repo disabled, attempting download anyway)\e[0m"
+                        repo_name="$found_repo"
+                    else
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unavailable: $package_name (not found in any repository)\e[0m"
+                        continue
+                    fi
                 fi
-                
-                handle_disabled_repo_package "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$fallback_repo"
-                continue
             fi
         else
             # For non-@System repositories, check if repository is enabled
             local clean_repo_name="${repo_name#@}"  # Remove @ prefix if present
             
             if ! is_repo_enabled "$clean_repo_name"; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m   Package from disabled repository: $package_name ($clean_repo_name)\e[0m"
-                handle_disabled_repo_package "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch" "$clean_repo_name"
+                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping disabled: $package_name ($clean_repo_name disabled)\e[0m"
                 continue
             fi
             
@@ -859,7 +1273,11 @@ function process_packages() {
         repo_path=$(get_repo_path "$repo_name")
         
         # Ensure repository directory exists
-        mkdir -p "$repo_path" 2>/dev/null
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo mkdir -p "$repo_path" 2>/dev/null && sudo chown "$USER:$USER" "$repo_path" 2>/dev/null && sudo chmod 755 "$repo_path" 2>/dev/null || true
+        else
+            mkdir -p "$repo_path" 2>/dev/null
+        fi
         
         # Get package status using our simple, reliable method
         local status
@@ -870,16 +1288,25 @@ function process_packages() {
             "EXISTS")
                 ((exists_count++))
                 ((stats_exists_count["$repo_name"]++))
-                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch\e[0m"
+                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 ;;
             "UPDATE")
                 ((update_count++))
                 ((stats_update_count["$repo_name"]++))
-                echo -e "\e[36m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch\e[0m"
+                echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    # Remove old version(s) first
-                    find "$repo_path" -name "${package_name}-*-*.${package_arch}.rpm" -delete 2>/dev/null
+                    # Remove old version(s) first - improved logic like original script
+                    local old_packages
+                    old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
+                    if [[ -n "$old_packages" ]]; then
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+                        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                            echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                        else
+                            echo "$old_packages" | xargs rm -f 2>/dev/null
+                        fi
+                    fi
                     # Add to update batch
                     update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                 fi
@@ -887,7 +1314,7 @@ function process_packages() {
             "NEW")
                 ((new_count++))
                 ((stats_new_count["$repo_name"]++))
-                echo -e "\e[33m$(align_repo_name "$repo_name"): $package_name-$package_version-$package_release.$package_arch\e[0m"
+                echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
                     # Check if we've hit the MAX_NEW_PACKAGES limit
@@ -902,7 +1329,7 @@ function process_packages() {
                 fi
                 ;;
             *)
-                echo -e "\e[31m$(align_repo_name "$repo_name"): ✗ Unknown status '$status' for $package_name\e[0m"
+                echo -e "\e[31m$(align_repo_name "$repo_name"): [?] Unknown status '$status' for $package_name\e[0m"
                 ;;
         esac
         
@@ -931,7 +1358,7 @@ function process_packages() {
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     echo -e "\e[32m✓ Processing completed in ${elapsed}s\e[0m"
     echo -e "\e[36m  Processed: $processed_packages packages at $rate pkg/sec\e[0m"
-    echo -e "\e[33m  Results: \e[32m$new_count new\e[0m, \e[33m$update_count updates\e[0m, \e[90m$exists_count existing\e[0m"
+    echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -940,6 +1367,19 @@ function process_packages() {
     
     # Generate the beautiful summary table
     generate_summary_table
+    
+    # Clean up uninstalled packages after processing (if enabled)
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        cleanup_uninstalled_packages
+    else
+        log "I" "Cleanup of uninstalled packages disabled"
+    fi
+    
+    # Update repository metadata for all modified repositories
+    update_all_repository_metadata
+    
+    # Update metadata for manual repositories if they have changes
+    update_manual_repository_metadata
 }
 
 # Sync local repositories to shared location (excluding disabled repos)
@@ -972,14 +1412,20 @@ function sync_to_shared_repos() {
             
             local shared_repo_dir="$SHARED_REPO_PATH/$repo_name"
             
-            log "I" "Syncing $repo_name..."
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Syncing $repo_name..."
             
             # Create shared repo directory if it doesn't exist
             mkdir -p "$shared_repo_dir" 2>/dev/null
             
             # Use rsync for efficient sync
             if command -v rsync >/dev/null 2>&1; then
-                rsync -av --delete "$repo_dir/" "$shared_repo_dir/"
+                if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                    # Verbose sync for debug mode
+                    rsync -av --delete "$repo_dir/" "$shared_repo_dir/"
+                else
+                    # Quiet sync for normal operation
+                    rsync -a --delete "$repo_dir/" "$shared_repo_dir/" >/dev/null 2>&1
+                fi
             else
                 # Fallback to cp
                 cp -r "$repo_dir/"* "$shared_repo_dir/" 2>/dev/null
@@ -992,23 +1438,60 @@ function sync_to_shared_repos() {
     log "I" "Repository sync completed (disabled repositories excluded)"
 }
 
-# Main execution
-function main() {
-    # Check if script is run as root first
-    if [[ $EUID -ne 0 ]]; then
-        log "E" "This script must be run as root or with sudo privileges."
-        exit 1
+# Check command elevation and privileges
+function check_command_elevation() {
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking command elevation and privileges (ELEVATE_COMMANDS=$ELEVATE_COMMANDS, EUID=$EUID)"
+    
+    # If commands need elevation (ELEVATE_COMMANDS=1), verify sudo access
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        log "I" "Command elevation enabled - file operations will use sudo"
+        
+        # Test if sudo works
+        if ! sudo -n dnf --version >/dev/null 2>&1; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Passwordless sudo not available, testing with prompt..."
+            if ! timeout 10 sudo dnf --version >/dev/null 2>&1; then
+                log "E" "Command elevation requires sudo privileges for file operations. Please ensure:"
+                log "E" "1. Your user is in the sudoers group (wheel)"
+                log "E" "2. You can run 'sudo' commands for file operations"
+                log "E" "3. Or use --no-elevate to run commands directly (if script runs as root)"
+                exit 1
+            fi
+        fi
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Sudo privileges verified successfully"
     fi
     
-    # Load configuration first
+    # If commands don't need elevation (ELEVATE_COMMANDS=0), run commands directly
+    if [[ $ELEVATE_COMMANDS -eq 0 ]]; then
+        log "I" "Command elevation disabled - file operations will run directly"
+        
+        # Test if user can run dnf directly
+        if ! dnf --version >/dev/null 2>&1; then
+            log "E" "Direct command execution requires direct access to file operations. Please ensure:"
+            log "E" "1. DNF is installed and accessible in PATH"
+            log "E" "2. User has permission to run file operations (usually requires root)"
+            log "E" "3. Or use --elevate to run commands with sudo"
+            exit 1
+        fi
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct file access verified successfully"
+    fi
+    
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Command elevation check completed successfully"
+}
+
+# Main execution
+function main() {
+    # Load configuration first to check ELEVATE_COMMANDS
     load_config
     
-    log "I" "Starting myrepo simple version $VERSION"
+    # Check command elevation and privileges
+    check_command_elevation
+    
+    log "I" "Starting MyRepo version $VERSION"
     
     # Handle refresh metadata option
     if [[ $REFRESH_METADATA -eq 1 ]]; then
         log "I" "Refreshing DNF metadata cache..."
-        dnf clean metadata >/dev/null 2>&1 || true
+        $(get_dnf_cmd) clean metadata >/dev/null 2>&1 || true
         log "I" "DNF metadata cache refreshed"
     fi
     
@@ -1022,8 +1505,15 @@ function main() {
     if [[ $DNF_SERIAL -eq 1 ]]; then
         log "I" "DNF serial mode enabled"
     fi
-    if [[ $USER_MODE -eq 1 ]]; then
-        log "I" "User mode enabled - assuming elevated privileges"
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        log "I" "Cleanup of uninstalled packages enabled"
+    else
+        log "I" "Cleanup of uninstalled packages disabled"
+    fi
+    if [[ $USE_PARALLEL_COMPRESSION -eq 1 ]]; then
+        log "I" "Parallel compression for metadata updates enabled"
+    else
+        log "I" "Parallel compression for metadata updates disabled"
     fi
     
     # Show active filters if any
@@ -1093,6 +1583,22 @@ while [[ $# -gt 0 ]]; do
             CACHE_MAX_AGE="$2"
             shift 2
             ;;
+        --cleanup-uninstalled)
+            CLEANUP_UNINSTALLED=1
+            shift
+            ;;
+        --no-cleanup-uninstalled)
+            CLEANUP_UNINSTALLED=0
+            shift
+            ;;
+        --parallel-compression)
+            USE_PARALLEL_COMPRESSION=1
+            shift
+            ;;
+        --no-parallel-compression)
+            USE_PARALLEL_COMPRESSION=0
+            shift
+            ;;
         --debug)
             DEBUG_LEVEL="$2"
             shift 2
@@ -1158,12 +1664,12 @@ while [[ $# -gt 0 ]]; do
             SYNC_ONLY=1
             shift
             ;;
-        --test-limit)
-            MAX_PACKAGES="$2"
-            shift 2
+        --elevate)
+            ELEVATE_COMMANDS=1
+            shift
             ;;
-        --user-mode)
-            USER_MODE=1
+        --no-elevate)
+            ELEVATE_COMMANDS=0
             shift
             ;;
         --dnf-serial)
@@ -1179,6 +1685,44 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --batch-size INT       Number of packages per batch (default: $BATCH_SIZE)"
             echo "  --cache-max-age SEC    Cache validity in seconds (default: $CACHE_MAX_AGE = 4h)"
+            echo "  --cleanup-uninstalled  Enable cleanup of uninstalled packages (default: enabled)"
+            echo "  --no-cleanup-uninstalled Disable cleanup of uninstalled packages"
+            echo "  --parallel-compression Enable parallel compression for createrepo (default: enabled)"
+            echo "  --no-parallel-compression Disable parallel compression"
+            echo "  --debug LEVEL          Debug level 1-3 (default: $DEBUG_LEVEL)"
+            echo "  --dry-run              Show what would be done without making changes"
+            echo "  --exclude-repos LIST   Comma-separated list of repositories to exclude"
+            echo "  --full-rebuild         Remove all packages first, then rebuild"
+            echo "  --local-repo-path PATH Local repository path (default: $LOCAL_REPO_PATH)"
+            echo "  --log-dir PATH         Log directory (default: $LOG_DIR)"
+            echo "  --manual-repos LIST    Comma-separated list of manual repositories"
+            echo "  --max-packages INT     Maximum packages to process total (includes existing, new, and updates - 0=unlimited)"
+            echo "  --max-new-packages INT Maximum new packages to download only (limits [N] packages - 0=unlimited)"
+            echo "  --name-filter REGEX    Process only packages matching regex"
+            echo "  --parallel INT         Number of parallel operations (default: $PARALLEL)"
+            echo "  --repos LIST           Process only specified repositories"
+            echo "  --refresh-metadata     Force refresh of DNF metadata cache"
+            echo "  --set-permissions      Auto-fix file permissions"
+            echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
+            echo "  -s, --sync-only        Only sync repositories to shared location"
+            echo "  --elevate              Use sudo for DNF commands (default: enabled)"
+            echo "  --no-elevate           Run DNF commands directly (requires root or appropriate permissions)"
+            echo "  --dnf-serial           Force serial DNF operations"
+            echo "  -v, --verbose          Enable verbose output (debug level 2)"
+            echo "  -h, --help             Show this help message"
+            echo ""
+            echo "Command Elevation:"
+            echo "  --elevate    (default): Script uses 'sudo dnf' for package operations"
+            echo "  --no-elevate          : Script runs 'dnf' directly (requires root privileges)"
+            echo ""
+            echo "Examples:"
+            echo "  $0                     # Run with default settings (uses sudo)"
+            echo "  sudo $0 --no-elevate  # Run as root without sudo elevation"
+            echo "  $0 --elevate           # Run as user with sudo elevation (default)"
+            echo "  $0 --dry-run --verbose # Preview changes with detailed output"
+            exit 0
+            echo "  --parallel-compression Enable parallel compression for createrepo (default: enabled)"
+            echo "  --no-parallel-compression Disable parallel compression for createrepo"
             echo "  --debug 0-4           Debug level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)"
             echo "  --dnf-serial          Use serial DNF mode to prevent database lock contention"
             echo "  --dry-run             Dry run mode (no changes)"
@@ -1187,8 +1731,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --local-repo-path PATH Set local repository path (default: $LOCAL_REPO_PATH)"
             echo "  --log-dir PATH        Where to write log files (default: $LOG_DIR)"
             echo "  --manual-repos CSV    Comma-separated list of manual repositories"
-            echo "  --max-packages INT    Limit number of packages processed (0 = no limit)"
-            echo "  --max-new-packages INT Limit number of new packages to download (0 = no limit)"
+            echo "  --max-packages INT    Limit total packages processed (includes [E]xisting, [N]ew, [U]pdate - 0 = no limit)"
+            echo "  --max-new-packages INT Limit only [N]ew packages downloaded (excludes existing/updates - 0 = no limit)"
             echo "  --name-filter REGEX   Filter packages by name using regex pattern"
             echo "  --parallel INT        Maximum concurrent jobs (default: $PARALLEL)"
             echo "  --refresh-metadata    Force a refresh of DNF metadata cache and rebuild repository cache"
@@ -1196,7 +1740,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --set-permissions     Automatically fix permission issues when detected"
             echo "  --shared-repo-path PATH Set shared repository path (default: $SHARED_REPO_PATH)"
             echo "  -s, --sync-only      Only sync to shared repos, skip package processing"
-            echo "  --test-limit NUM     Limit to NUM packages for testing (same as --max-packages)"
             echo "  --user-mode          Run entire script with sudo (advanced mode)"
             echo "  -v, --verbose        Verbose output (same as --debug 2)"
             echo "  -h, --help           Show this help"
@@ -1205,6 +1748,10 @@ while [[ $# -gt 0 ]]; do
             echo "  The script caches repository metadata for performance. Cache is valid for"
             echo "  $CACHE_MAX_AGE seconds (4 hours) by default. Use --refresh-metadata to force rebuild."
             echo
+            echo "Uninstalled Package Cleanup:"
+            echo "  By default, packages that are no longer installed are automatically removed"
+            echo "  from local repositories. Use --no-cleanup-uninstalled to disable this."
+            echo
             echo "Examples:"
             echo "  $0 --repos ol9_appstream --name-filter 'firefox.*' --dry-run"
             echo "  $0 --exclude-repos code,copr --max-packages 100"
@@ -1212,7 +1759,9 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --full-rebuild --set-permissions --debug 2"
             echo "  $0 --refresh-metadata --dnf-serial"
             echo "  $0 --cache-max-age 3600  # 1 hour cache validity"
-            echo "  $0 --test-limit 50 --dry-run  # Test with 50 packages"
+            echo "  $0 --max-packages 50 --dry-run  # Test with 50 packages"
+            echo "  $0 --no-cleanup-uninstalled  # Keep all packages, don't clean up"
+            echo "  $0 --no-parallel-compression  # Use single-threaded createrepo"
             exit 0
             ;;
         *)

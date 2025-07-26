@@ -76,7 +76,7 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 
 **Important**: Both modes require the user to have sudo privileges. The difference is how sudo is used:
 
-**Default Mode (USER_MODE=0 - Recommended):**
+**Default Mode (ELEVATE_COMMANDS=1 - Recommended):**
 - **Automatic Sudo Usage**: The script automatically prefixes necessary commands with `sudo`
 - **User runs script normally**: `./myrepo.sh` (without sudo)
 - The script will internally use `sudo` when needed for operations like:
@@ -84,11 +84,11 @@ Before running `myrepo.sh`, ensure the following requirements are met:
   - Creating and updating repository metadata (`sudo createrepo_c`)
   - Writing to system directories and fixing permissions
 
-**User Mode (USER_MODE=1 - Advanced):**
-- **Manual Sudo Usage**: User must run the entire script with elevated privileges
-- **User runs script with sudo**: `sudo ./myrepo.sh --user-mode`
+**Direct Mode (ELEVATE_COMMANDS=0 - Advanced):**
+- **No Sudo Usage**: Script runs commands directly without `sudo`
+- **User must run script as root**: `sudo ./myrepo.sh --no-elevate`
 - The script assumes it already has elevated privileges and won't prefix commands with `sudo`
-- All operations run with the elevated permissions of the sudo session
+- All operations run with the elevated permissions of the root session
 
 ### Installation of Required Tools
 
@@ -97,7 +97,7 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 sudo dnf install createrepo_c rsync dnf-utils
 ```
 
-**Important**: If you don't have sudo access on your system, you cannot run this script. The script requires sudo privileges in both modes - the only difference is whether you run the script normally (default mode) and let it use `sudo` internally, or run the entire script with `sudo` (user mode).
+**Important**: If you don't have sudo access on your system, you cannot run this script. The script requires sudo privileges in both modes - the only difference is whether you run the script normally (default mode) and let it use `sudo` internally, or run the entire script as root (direct mode).
 
 ## Configuration
 
@@ -159,8 +159,8 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Continue execution despite download errors (0 = halt on errors, 1 = continue despite errors)
 # CONTINUE_ON_ERROR=0
 
-# Run under the non-root user environment (1 = true, 0 = false)
-# IS_USER_MODE=0
+# Run with command elevation disabled (requires root privileges)
+# ELEVATE_COMMANDS=0
 
 # Define repositories that should be excluded from processing
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
@@ -435,9 +435,9 @@ The script performs comprehensive permission validation during startup:
    - Performs practical write tests by creating temporary files
    - Validates access to repository subdirectories (getPackage, repodata)
 
-3. **User Mode vs Root Mode**
-   - `USER_MODE=0` (Default): User runs script normally (`./myrepo.sh`), script uses `sudo` internally for elevated operations
-   - `USER_MODE=1` (Advanced): User runs entire script with sudo (`sudo ./myrepo.sh --user-mode`), script assumes elevated privileges
+3. **Command Elevation vs Direct Mode**
+   - `ELEVATE_COMMANDS=1` (Default): User runs script normally (`./myrepo.sh`), script uses `sudo` internally for elevated operations
+   - `ELEVATE_COMMANDS=0` (Advanced): User runs entire script as root (`sudo ./myrepo.sh --no-elevate`), script assumes elevated privileges
 
 4. **Error Handling**
    - LOCAL_REPO_PATH permission errors will cause script exit (critical)
@@ -446,19 +446,19 @@ The script performs comprehensive permission validation during startup:
 
 #### Setting Up Permissions
 
-**For Default Mode (USER_MODE=0) - Recommended:**
+**For Default Mode (ELEVATE_COMMANDS=1) - Recommended:**
 ```bash
 # Simply ensure your user has sudo privileges
 # The script will automatically use sudo for necessary operations
 ./myrepo.sh
 ```
 
-**For User Mode (USER_MODE=1) - Advanced:**
+**For Direct Mode (ELEVATE_COMMANDS=0) - Advanced:**
 ```bash
-# Run the entire script with sudo
-sudo ./myrepo.sh --user-mode
+# Run the entire script as root
+sudo ./myrepo.sh --no-elevate
 
-# Or configure sudoers for passwordless sudo
+# Or configure sudoers for passwordless sudo and run as root
 echo "$(whoami) ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/myrepo-user
 ```
 
@@ -537,7 +537,7 @@ The `--set-permissions` option enables automatic fixing of permission issues whe
 **Important**: The script requires sudo privileges in all modes. You must have sudo access to run DNF operations and manage repository directories.
 
 - **Default Mode**: Run script normally, it will use `sudo` internally when needed
-- **User Mode**: Run entire script with `sudo ./myrepo.sh --user-mode`
+- **Direct Mode**: Run entire script as root with `sudo ./myrepo.sh --no-elevate`
 
 If you don't have sudo access, the script cannot function.
 
@@ -571,8 +571,8 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | `--set-permissions`  | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.            |
 | `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
 | `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run sync to shared repos.         |
-| `--test-limit`       | *INT*                      | *same as max-packages*| Limit to NUM packages for testing (same as --max-packages).   |
-| `--user-mode`        | *(flag)*                   | *off*                 | Run entire script with sudo (advanced mode).                  |
+| `--elevate`          | *(flag)*                   | *on*                  | Use sudo for DNF commands (default mode).                     |
+| `--no-elevate`       | *(flag)*                   | *off*                 | Run DNF commands directly (requires root, advanced mode).     |
 | `--refresh-metadata` | *(flag)*                   | *off*                 | Force refresh of DNF metadata cache and rebuild repo cache.   |
 | `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
 
@@ -589,7 +589,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh --name-filter "nodejs" --dry-run --debug 1
 
 # Test with limited packages and show cache performance
-./myrepo.sh --test-limit 50 --dry-run --debug 2
+./myrepo.sh --max-packages 50 --dry-run --debug 2
 
 # Limit new package downloads to manage bandwidth/storage
 ./myrepo.sh --max-new-packages 100 --debug 1
@@ -603,8 +603,8 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 # Full rebuild with verbose debugging
 ./myrepo.sh --full-rebuild --debug 2
 
-# User mode for environments where you want to run the entire script with sudo
-sudo ./myrepo.sh --user-mode --local-repo-path /repo
+# Direct mode for environments where script runs as root
+sudo ./myrepo.sh --no-elevate --local-repo-path /repo
 
 # Force metadata refresh before processing (clears cache)
 ./myrepo.sh --refresh-metadata --debug 1
@@ -618,8 +618,8 @@ sudo ./myrepo.sh --user-mode --local-repo-path /repo
 # Automatically fix permission issues when detected
 ./myrepo.sh --set-permissions --debug 2
 
-# User mode with permission auto-fix
-sudo ./myrepo.sh --user-mode --set-permissions --local-repo-path /repo
+# Direct mode with permission auto-fix (run as root)
+sudo ./myrepo.sh --no-elevate --set-permissions --local-repo-path /repo
 ```
 
 ### How It Works
@@ -653,7 +653,7 @@ The script implements a sophisticated workflow that efficiently manages local pa
 - **Manual Repository Management**: Enable `AUTO_UPDATE_MANUAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
 - **Performance Tuning**: Let adaptive tuning optimize performance automatically, or disable it and manually tune `BATCH_SIZE` and `PARALLEL` for specific environments.
 - **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
-- **User Mode**: Use `--user-mode` when you prefer to run the entire script with sudo (`sudo ./myrepo.sh --user-mode`) rather than letting the script use sudo internally.
+- **Direct Mode**: Use `--no-elevate` when you prefer to run the entire script as root (`sudo ./myrepo.sh --no-elevate`) rather than letting the script use sudo internally.
 - **Permission Fixes**: Use `--set-permissions` to automatically fix directory permission issues when detected, useful for new setups or troubleshooting.
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
 - **Monitoring**: Check the performance statistics output to understand processing efficiency and identify potential bottlenecks.
