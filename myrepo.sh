@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.4"
+VERSION="2.2.2"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
