@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.3"
+VERSION="2.2.4"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -45,6 +45,7 @@ ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=auto-detect (default), 0=never use 
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
 CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
 USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
+SHARED_CACHE_PATH=${SHARED_CACHE_PATH:-"/var/cache/myrepo"}  # Shared cache directory for root/user access
 
 # Timeout configuration (in seconds)
 DNF_QUERY_TIMEOUT=${DNF_QUERY_TIMEOUT:-60}    # Timeout for basic DNF queries
@@ -144,7 +145,7 @@ function batch_download_packages() {
             # Count packages for better feedback
             local package_count
             package_count=$(echo "$packages" | wc -w)
-            log "I" "� Batch downloading $package_count packages to $repo_name..."
+            log "I" "📥 Batch downloading $package_count packages to $repo_name..."
             
             # Debug: show what we're trying to download
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Packages: $packages"
@@ -171,7 +172,7 @@ function batch_download_packages() {
             
             local download_start
             download_start=$(date +%s)
-            echo -e "\e[36m   ⏳ Starting DNF download for $repo_name... ($(date '+%H:%M:%S'))\e[0m"
+            log "I" "⏳ Starting DNF download for $repo_name..."
             # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
             if ${dnf_cmd} download "${dnf_options[@]}" $packages >/dev/null 2>&1; then
                 local download_end
@@ -203,41 +204,173 @@ function batch_download_packages() {
     done
 }
 
+# Clean up old cache directories from filesystem
+function cleanup_old_cache_directories() {
+    local old_cache_patterns=(
+        "/tmp/myrepo_cache_shared"
+        "/tmp/myrepo_cache"
+        "/tmp/myrepo_cache_*"
+        "$HOME/.cache/myrepo"
+        "$HOME/myrepo_cache_*"
+    )
+    
+    # First pass: check if any old directories exist
+    local old_dirs_found=0
+    
+    for pattern in "${old_cache_patterns[@]}"; do
+        # Handle patterns with wildcards
+        if [[ "$pattern" == *"*"* ]]; then
+            # Use find to handle wildcards safely
+            while IFS= read -r -d '' cache_dir; do
+                if [[ -d "$cache_dir" && "$cache_dir" != "$SHARED_CACHE_PATH" ]]; then
+                    ((old_dirs_found++))
+                    break 2  # Break out of both loops - we found at least one
+                fi
+            done < <(find "${pattern%/*}" -maxdepth 1 -name "${pattern##*/}" -type d -print0 2>/dev/null)
+        else
+            # Handle exact paths
+            if [[ -d "$pattern" && "$pattern" != "$SHARED_CACHE_PATH" ]]; then
+                ((old_dirs_found++))
+                break  # We found at least one
+            fi
+        fi
+    done
+    
+    # If no old directories found, return without cleanup
+    if [[ $old_dirs_found -eq 0 ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "No old cache directories detected, skipping cleanup"
+        return 1  # No cleanup needed
+    fi
+    
+    # Old directories found - perform cleanup
+    log "I" "🧹 Cleaning up old cache directories from filesystem..."
+    
+    local cleaned_count=0
+    
+    for pattern in "${old_cache_patterns[@]}"; do
+        # Handle patterns with wildcards
+        if [[ "$pattern" == *"*"* ]]; then
+            # Use find to handle wildcards safely
+            while IFS= read -r -d '' cache_dir; do
+                if [[ -d "$cache_dir" && "$cache_dir" != "$SHARED_CACHE_PATH" ]]; then
+                    log "I" "🗑️  Removing old cache directory: $cache_dir"
+                    if [[ $DRY_RUN -eq 1 ]]; then
+                        log "I" "🔍 DRY RUN: Would remove $cache_dir"
+                        ((cleaned_count++))
+                    else
+                        # Try removing without sudo first
+                        if rm -rf "$cache_dir" 2>/dev/null; then
+                            ((cleaned_count++))
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ Successfully removed: $cache_dir"
+                        elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo rm -rf "$cache_dir" 2>/dev/null; then
+                            ((cleaned_count++))
+                            log "I" "✓ Successfully removed with sudo: $cache_dir"
+                        else
+                            log "W" "Failed to remove: $cache_dir (permission denied even with sudo)"
+                        fi
+                    fi
+                fi
+            done < <(find "${pattern%/*}" -maxdepth 1 -name "${pattern##*/}" -type d -print0 2>/dev/null)
+        else
+            # Handle exact paths
+            if [[ -d "$pattern" && "$pattern" != "$SHARED_CACHE_PATH" ]]; then
+                log "I" "🗑️  Removing old cache directory: $pattern"
+                if [[ $DRY_RUN -eq 1 ]]; then
+                    log "I" "🔍 DRY RUN: Would remove $pattern"
+                    ((cleaned_count++))
+                else
+                    # Try removing without sudo first
+                    if rm -rf "$pattern" 2>/dev/null; then
+                        ((cleaned_count++))
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ Successfully removed: $pattern"
+                    elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo rm -rf "$pattern" 2>/dev/null; then
+                        ((cleaned_count++))
+                        log "I" "✓ Successfully removed with sudo: $pattern"
+                    else
+                        log "W" "Failed to remove: $pattern (permission denied even with sudo)"
+                    fi
+                fi
+            fi
+        fi
+    done
+    
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "I" "🔍 DRY RUN: Old cache cleanup simulation completed for $cleaned_count directories"
+    elif [[ $cleaned_count -gt 0 ]]; then
+        log "I" "✅ Old cache directories cleanup completed - cleaned up $cleaned_count directories"
+    else
+        log "W" "⚠️  Old directories detected but none could be cleaned (all permission attempts failed)"
+    fi
+    
+    # Show current shared cache location
+    log "I" "📁 Using shared cache: $SHARED_CACHE_PATH"
+    
+    return 0  # Cleanup was performed (or attempted)
+}
+
 # Build repository metadata cache (optimized - only for installed packages)
 function build_repo_cache() {
     log "I" "Building repository metadata cache for installed packages..."
     
-    # Try multiple cache directory locations based on permissions
-    local cache_dir_candidates=(
-        "/tmp/myrepo_cache"
-        "$HOME/.cache/myrepo"
-        "/tmp/myrepo_cache_$$"
-        "$HOME/myrepo_cache_$$"
-    )
+    # Use only the shared cache directory
+    local cache_dir="$SHARED_CACHE_PATH"
     
-    local cache_dir=""
-    for candidate in "${cache_dir_candidates[@]}"; do
-        if mkdir -p "$candidate" 2>/dev/null && [[ -w "$candidate" ]]; then
-            cache_dir="$candidate"
-            break
+    # Automatically handle shared cache directory creation and permissions
+    if [[ ! -d "$cache_dir" ]]; then
+        log "I" "Creating shared cache directory: $cache_dir"
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            # Create with sudo and set proper shared permissions
+            if sudo mkdir -p "$cache_dir" 2>/dev/null; then
+                sudo chown root:root "$cache_dir" 2>/dev/null || true
+                sudo chmod 1777 "$cache_dir" 2>/dev/null || true  # Sticky bit for shared temp-like access
+                log "I" "✓ Created shared cache directory with proper permissions (1777)"
+            else
+                log "W" "Failed to create shared cache with sudo, trying fallback..."
+                if mkdir -p "$HOME/.cache/myrepo" 2>/dev/null; then
+                    cache_dir="$HOME/.cache/myrepo"
+                    log "I" "✓ Using fallback cache directory: $cache_dir"
+                else
+                    log "E" "Cannot create any cache directory"
+                    exit 1
+                fi
+            fi
+        else
+            # Create without sudo (running as root or no elevation)
+            if mkdir -p "$cache_dir" 2>/dev/null; then
+                chmod 755 "$cache_dir" 2>/dev/null || true
+                log "I" "✓ Created cache directory: $cache_dir"
+            else
+                log "E" "Cannot create cache directory: $cache_dir"
+                exit 1
+            fi
         fi
-    done
-    
-    if [[ -z "$cache_dir" ]]; then
-        log "E" "Cannot create any cache directory, aborting cache build"
-        log "E" "Tried: ${cache_dir_candidates[*]}"
-        log "W" "Running permission diagnosis..."
-        diagnose_permissions
-        return 1
+    elif [[ ! -w "$cache_dir" ]]; then
+        # Directory exists but not writable - try to fix permissions
+        log "I" "Fixing permissions for existing cache directory: $cache_dir"
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            if sudo chmod 1777 "$cache_dir" 2>/dev/null; then
+                log "I" "✓ Fixed shared cache directory permissions"
+            else
+                log "W" "Failed to fix shared cache permissions, using fallback..."
+                if mkdir -p "$HOME/.cache/myrepo" 2>/dev/null; then
+                    cache_dir="$HOME/.cache/myrepo"
+                    log "I" "✓ Using fallback cache directory: $cache_dir"
+                else
+                    log "E" "Cannot access any writable cache directory"
+                    exit 1
+                fi
+            fi
+        else
+            if chmod 755 "$cache_dir" 2>/dev/null; then
+                log "I" "✓ Fixed cache directory permissions"
+            else
+                log "E" "Cannot fix permissions for cache directory: $cache_dir"
+                exit 1
+            fi
+        fi
     fi
     
     [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using cache directory: $cache_dir"
-    
-    # Automatically set proper permissions if we can
-    chmod 755 "$cache_dir" 2>/dev/null || true
-    if [[ $ELEVATE_COMMANDS -eq 1 && $EUID -ne 0 && -n "$USER" ]]; then
-        sudo chown "$USER:$USER" "$cache_dir" 2>/dev/null || true
-    fi
     
     # Cache validity check (4 hours by default, configurable)
     local cache_max_age=${CACHE_MAX_AGE:-14400}  # 4 hours in seconds
@@ -316,12 +449,14 @@ function build_repo_cache() {
     if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>&1); then
         log "E" "Failed to get installed packages list"
         [[ $DEBUG_LEVEL -ge 1 ]] && log "E" "DNF error: $installed_packages"
-        return 1
+        log "E" "Failed to build repository metadata cache"
+        exit 1
     fi
     
     if [[ -z "$installed_packages" ]]; then
         log "E" "No installed packages found in DNF query result"
-        return 1
+        log "E" "Failed to build repository metadata cache"
+        exit 1
     fi
     
     # Get unique package names for efficient querying
@@ -334,12 +469,14 @@ function build_repo_cache() {
     if ! enabled_repos=$(${dnf_cmd} repolist --enabled --quiet 2>&1 | awk 'NR>1 {print $1}' | grep -v "^$"); then
         log "E" "Failed to get enabled repositories list"
         [[ $DEBUG_LEVEL -ge 1 ]] && log "E" "DNF repolist error: $enabled_repos"
-        return 1
+        log "E" "Failed to build repository metadata cache"
+        exit 1
     fi
     
     if [[ -z "$enabled_repos" ]]; then
         log "W" "No enabled repositories found"
-        return 1
+        log "E" "Failed to build repository metadata cache"
+        exit 1
     fi
     
     local repo_count=0
@@ -366,6 +503,13 @@ function build_repo_cache() {
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>&1) && echo "$dnf_result" > "$cache_file.tmp"; then
             mv "$cache_file.tmp" "$cache_file"
+            
+            # Set proper permissions for shared cache files
+            chmod 644 "$cache_file" 2>/dev/null || true
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo chmod 644 "$cache_file" 2>/dev/null || true
+            fi
+            
             local package_count
             package_count=$(wc -l < "$cache_file")
             if [[ $package_count -gt 0 ]]; then
@@ -381,28 +525,34 @@ function build_repo_cache() {
         fi
     done <<< "$enabled_repos"
     
-    # Save cache timestamp with comprehensive error handling
+    # Save cache timestamp
     local timestamp_written=false
-    local timestamp_candidates=(
-        "$cache_dir/cache_timestamp"
-        "$cache_dir/timestamp_$$"
-        "$HOME/.cache/myrepo_timestamp_$$"
-    )
+    local timestamp_file="$cache_dir/cache_timestamp"
     
-    for timestamp_file in "${timestamp_candidates[@]}"; do
-        if echo "$current_time" > "$timestamp_file" 2>/dev/null; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache timestamp written to: $timestamp_file"
+    # Try with sudo if needed for shared cache
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        if echo "$current_time" | sudo tee "$timestamp_file" >/dev/null 2>&1; then
+            sudo chmod 644 "$timestamp_file" 2>/dev/null || true
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache timestamp written to shared location: $timestamp_file"
             timestamp_written=true
-            break
         fi
-    done
-    
-    if [[ $timestamp_written == false ]]; then
-        log "W" "Could not write cache timestamp to any location (permission issues)"
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Tried: ${timestamp_candidates[*]}"
     fi
     
-    log "I" "Repository metadata cache built successfully (optimized for installed packages)"
+    # Try direct write if sudo didn't work or wasn't used
+    if [[ $timestamp_written == false ]] && echo "$current_time" > "$timestamp_file" 2>/dev/null; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache timestamp written to: $timestamp_file"
+        timestamp_written=true
+    fi
+    
+    if [[ $timestamp_written == false ]]; then
+        log "W" "Could not write cache timestamp to: $timestamp_file"
+    fi
+    
+    # Inform user about shared cache behavior
+    log "I" "✅ Repository metadata cache built successfully (shared cache: $cache_dir)"
+    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "✓ Cache is shared between root and user modes"
+    
+    return 0  # Success
 }
 
 # Check command elevation and privileges (with auto-detection)
@@ -1091,6 +1241,7 @@ function load_config() {
                 DNF_SERIAL) DNF_SERIAL="$value" ;;
                 ELEVATE_COMMANDS) ELEVATE_COMMANDS="$value" ;;
                 CACHE_MAX_AGE) CACHE_MAX_AGE="$value" ;;
+                SHARED_CACHE_PATH) SHARED_CACHE_PATH="$value" ;;
                 CLEANUP_UNINSTALLED) CLEANUP_UNINSTALLED="$value" ;;
                 USE_PARALLEL_COMPRESSION) USE_PARALLEL_COMPRESSION="$value" ;;
                 DNF_QUERY_TIMEOUT) DNF_QUERY_TIMEOUT="$value" ;;
@@ -1192,6 +1343,10 @@ function parse_args() {
                 CACHE_MAX_AGE="$2"
                 shift 2
                 ;;
+            --shared-cache-path)
+                SHARED_CACHE_PATH="$2"
+                shift 2
+                ;;
             --cleanup-uninstalled)
                 CLEANUP_UNINSTALLED=1
                 shift
@@ -1291,6 +1446,7 @@ function parse_args() {
                 echo "Usage: $0 [options]"
                 echo "Options:"
                 echo "  --cache-max-age SEC    Cache validity in seconds (default: $CACHE_MAX_AGE = 4h)"
+                echo "  --shared-cache-path PATH Shared cache directory path (default: $SHARED_CACHE_PATH)"
                 echo "  --cleanup-uninstalled  Enable cleanup of uninstalled packages (default: enabled)"
                 echo "  --no-cleanup-uninstalled Disable cleanup of uninstalled packages"
                 echo "  --parallel-compression Enable parallel compression for createrepo (default: enabled)"
@@ -1322,6 +1478,13 @@ function parse_args() {
                 echo "  - /var/cache/dnf (DNF cached packages)"
                 echo "  - Custom build directories"
                 echo "  This helps avoid downloading packages you already have locally (like zstd)."
+                echo ""
+                echo "Shared Cache:"
+                echo "  The script uses a shared cache directory to avoid rebuilding cache when switching"
+                echo "  between user and root modes. The default location is $SHARED_CACHE_PATH."
+                echo "  - Permissions are automatically set for both root and user access"
+                echo "  - Fallback locations are used if shared cache is not accessible"
+                echo "  - Configure with SHARED_CACHE_PATH in myrepo.cfg or --shared-cache-path option"
                 echo ""
                 echo "Automatic Privilege Detection:"
                 echo "  The script automatically detects if it's running as root (EUID=0) or as a regular user."
@@ -1381,7 +1544,7 @@ function process_packages() {
             fi
         done)
     else
-        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        # shellcheck disable=SC2086
         package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
     fi
     
@@ -1642,7 +1805,7 @@ function process_packages() {
     
     # Second pass: batch download all NEW packages
     if [[ ${#new_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        echo -e "\e[33m📥 Batch downloading ${#new_packages[@]} new packages... ($(date '+%H:%M:%S'))\e[0m"
+        log "I" "📥 Batch downloading ${#new_packages[@]} new packages..."
         local batch_start_time
         local batch_end_time
         local batch_duration
@@ -1748,8 +1911,70 @@ function should_process_repo() {
     return 0
 }
 
+# Show runtime status and configuration
+function show_runtime_status() {
+    log "I" "Starting MyRepo version $VERSION"
+
+    # Handle refresh metadata option
+    if [[ $REFRESH_METADATA -eq 1 ]]; then
+        log "I" "Refreshing DNF metadata cache..."
+        local dnf_cmd
+        dnf_cmd=$(get_dnf_cmd)
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+        ${dnf_cmd} clean metadata >/dev/null 2>&1 || true
+        log "I" "DNF metadata cache refreshed"
+    fi
+
+    # Show elevation status
+    if [[ $EUID -eq 0 ]]; then
+        log "I" "Privilege escalation: Running as root (auto-detected)"
+    elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        log "I" "Privilege escalation: Using sudo for DNF operations (auto-detected)"
+    else
+        log "I" "Privilege escalation: Disabled - running DNF directly as user"
+    fi
+
+    # Show active options
+    if [[ $FULL_REBUILD -eq 1 ]]; then
+        log "I" "Full rebuild mode enabled - all packages will be removed first"
+    fi
+    if [[ $SET_PERMISSIONS -eq 1 ]]; then
+        log "I" "Permission auto-fix enabled"
+    fi
+    if [[ $DNF_SERIAL -eq 1 ]]; then
+        log "I" "DNF serial mode enabled"
+    fi
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        log "I" "Cleanup of uninstalled packages enabled"
+    else
+        log "I" "Cleanup of uninstalled packages disabled"
+    fi
+    if [[ $USE_PARALLEL_COMPRESSION -eq 1 ]]; then
+        log "I" "Parallel compression for metadata updates enabled"
+    else
+        log "I" "Parallel compression for metadata updates disabled"
+    fi
+
+    # Show active filters if any
+    if [[ -n "$REPOS" ]]; then
+        log "I" "Processing specific repositories: $REPOS"
+    fi
+    if [[ -n "$EXCLUDE_REPOS" ]]; then
+        log "I" "Excluding repositories: $EXCLUDE_REPOS"
+    fi
+    if [[ -n "$NAME_FILTER" ]]; then
+        log "I" "Package name filter: $NAME_FILTER"
+    fi
+}
+
 # Sync local repositories to shared location (excluding disabled repos)
 function sync_to_shared_repos() {
+    # Only sync if not in dry run mode and shared repo path exists
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "I" "🔍 DRY RUN: Would sync repositories to shared location if enabled"
+        return 0
+    fi
+    
     if [[ ! -d "$SHARED_REPO_PATH" ]]; then
         log "W" "Shared repository path does not exist: $SHARED_REPO_PATH"
         return 1
@@ -1990,6 +2215,36 @@ function update_repository_metadata() {
     fi
 }
 
+# Validate requirements and handle special execution modes
+function validate_and_handle_modes() {
+    # Validate basic requirements
+    if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
+        log "E" "Local repository path does not exist: $LOCAL_REPO_PATH"
+        exit 1
+    fi
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "I" "DRY RUN mode enabled - no changes will be made"
+    fi
+
+    # Handle sync-only mode (exits early if enabled)
+    if [[ $SYNC_ONLY -eq 1 ]]; then
+        log "I" "SYNC ONLY mode - skipping package processing, only syncing to shared repos"
+        sync_to_shared_repos
+        log "I" "Sync completed successfully"
+        exit 0
+    fi
+
+    # Show package limits if configured
+    if [[ $MAX_PACKAGES -gt 0 ]]; then
+        log "I" "Package limit: $MAX_PACKAGES packages"
+    fi
+
+    if [[ $MAX_NEW_PACKAGES -gt 0 ]]; then
+        log "I" "New packages limit: $MAX_NEW_PACKAGES packages"
+    fi
+}
+
 # Validate repository structure and detect common issues
 function validate_repository_structure() {
     [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Validating repository structure..."
@@ -2025,99 +2280,12 @@ load_config
 parse_args "$@"
 check_command_elevation
 validate_repository_structure
-
-log "I" "Starting MyRepo version $VERSION"
-
-# Handle refresh metadata option
-if [[ $REFRESH_METADATA -eq 1 ]]; then
-    log "I" "Refreshing DNF metadata cache..."
-    dnf_cmd=$(get_dnf_cmd)
-    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-    ${dnf_cmd} clean metadata >/dev/null 2>&1 || true
-    log "I" "DNF metadata cache refreshed"
-fi
-
-# Show elevation status
-if [[ $EUID -eq 0 ]]; then
-    log "I" "Privilege escalation: Running as root (auto-detected)"
-elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-    log "I" "Privilege escalation: Using sudo for DNF operations (auto-detected)"
-else
-    log "I" "Privilege escalation: Disabled - running DNF directly as user"
-fi
-
-# Show active options
-if [[ $FULL_REBUILD -eq 1 ]]; then
-    log "I" "Full rebuild mode enabled - all packages will be removed first"
-fi
-if [[ $SET_PERMISSIONS -eq 1 ]]; then
-    log "I" "Permission auto-fix enabled"
-fi
-if [[ $DNF_SERIAL -eq 1 ]]; then
-    log "I" "DNF serial mode enabled"
-fi
-if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
-    log "I" "Cleanup of uninstalled packages enabled"
-else
-    log "I" "Cleanup of uninstalled packages disabled"
-fi
-if [[ $USE_PARALLEL_COMPRESSION -eq 1 ]]; then
-    log "I" "Parallel compression for metadata updates enabled"
-else
-    log "I" "Parallel compression for metadata updates disabled"
-fi
-
-# Show active filters if any
-if [[ -n "$REPOS" ]]; then
-    log "I" "Processing specific repositories: $REPOS"
-fi
-if [[ -n "$EXCLUDE_REPOS" ]]; then
-    log "I" "Excluding repositories: $EXCLUDE_REPOS"
-fi
-if [[ -n "$NAME_FILTER" ]]; then
-    log "I" "Package name filter: $NAME_FILTER"
-fi
-
-# Validate basic requirements
-if [[ ! -d "$LOCAL_REPO_PATH" ]]; then
-    log "E" "Local repository path does not exist: $LOCAL_REPO_PATH"
-    exit 1
-fi
-
-if [[ $DRY_RUN -eq 1 ]]; then
-    log "I" "DRY RUN mode enabled - no changes will be made"
-fi
-
-if [[ $SYNC_ONLY -eq 1 ]]; then
-    log "I" "SYNC ONLY mode - skipping package processing, only syncing to shared repos"
-    sync_to_shared_repos
-    log "I" "Sync completed successfully"
-    exit 0
-fi
-
-if [[ $MAX_PACKAGES -gt 0 ]]; then
-    log "I" "Package limit: $MAX_PACKAGES packages"
-fi
-
-if [[ $MAX_NEW_PACKAGES -gt 0 ]]; then
-    log "I" "New packages limit: $MAX_NEW_PACKAGES packages"
-fi
-
-# Perform full rebuild if requested
+show_runtime_status
+validate_and_handle_modes
 full_rebuild_repos
-
-# Build repository metadata cache (like original script)
-if ! build_repo_cache; then
-    log "E" "Failed to build repository metadata cache"
-    exit 1
-fi
-
-# Start processing
+cleanup_old_cache_directories
+build_repo_cache
 process_packages
-
-# Sync to shared repositories after processing (if not in dry run mode)
-if [[ $DRY_RUN -eq 0 && -d "$SHARED_REPO_PATH" ]]; then
-    sync_to_shared_repos
-fi
+sync_to_shared_repos
 
 log "I" "Script completed successfully"
