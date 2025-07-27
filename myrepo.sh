@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.3.2"
+VERSION="2.3.3"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -61,6 +61,14 @@ DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
 DEBUG_FILE_LIST_THRESHOLD=${DEBUG_FILE_LIST_THRESHOLD:-10} # Show file list if repo has fewer RPMs than this
 DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to show in debug list
 
+# PERFORMANCE OPTIMIZATION 5: Repository Performance Tracking and Load Balancing
+REPO_PERF_CACHE_FILE="${SHARED_CACHE_PATH:-/var/cache/myrepo}/repo_performance.cache"
+REPO_PERF_MAX_AGE=${REPO_PERF_MAX_AGE:-86400}            # Performance data valid for 24 hours
+MIN_DOWNLOAD_RATE=${MIN_DOWNLOAD_RATE:-50}                # Minimum KB/s for "fast" repositories
+LOAD_BALANCE_THRESHOLD=${LOAD_BALANCE_THRESHOLD:-10}      # Start load balancing after this many packages per repo
+ADAPTIVE_BATCH_SIZE_MIN=${ADAPTIVE_BATCH_SIZE_MIN:-3}     # Minimum batch size for slow repos
+ADAPTIVE_BATCH_SIZE_MAX=${ADAPTIVE_BATCH_SIZE_MAX:-20}    # Maximum batch size for fast repos
+
 # Common Oracle Linux 9 repositories (for fallback repository detection)
 declare -a REPOSITORIES=(
     "ol9_baseos_latest"
@@ -91,6 +99,11 @@ declare -A stats_exists_count
 declare -A failed_downloads
 declare -A failed_download_reasons
 
+# PERFORMANCE OPTIMIZATION 5: Repository Performance Tracking
+declare -A repo_download_speeds       # Track download speeds per repository  
+declare -A repo_success_rates         # Track success rates per repository
+declare -A repo_last_batch_sizes      # Track optimal batch sizes per repository
+
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
 
@@ -100,10 +113,167 @@ function align_repo_name() {
     printf "%-${PADDING_LENGTH}s" "$repo_name"
 }
 
+# PERFORMANCE OPTIMIZATION 5: Repository Performance Tracking Functions
+
+# Load repository performance data from cache
+function load_repo_performance_cache() {
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Loading repository performance cache from $REPO_PERF_CACHE_FILE"
+    
+    if [[ ! -f "$REPO_PERF_CACHE_FILE" ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "No repository performance cache found, starting fresh"
+        return 0
+    fi
+    
+    # Check if cache is too old
+    local cache_age
+    cache_age=$(( $(date +%s) - $(stat -c %Y "$REPO_PERF_CACHE_FILE" 2>/dev/null || echo 0) ))
+    if [[ $cache_age -gt $REPO_PERF_MAX_AGE ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Repository performance cache is stale (${cache_age}s old), starting fresh"
+        return 0
+    fi
+    
+    # Load performance data
+    local loaded_count=0
+    while IFS='|' read -r repo_name download_speed success_rate last_batch_size; do
+        [[ -z "$repo_name" || "$repo_name" =~ ^[[:space:]]*# ]] && continue
+        
+        repo_download_speeds["$repo_name"]="$download_speed"
+        repo_success_rates["$repo_name"]="$success_rate"
+        repo_last_batch_sizes["$repo_name"]="$last_batch_size"
+        ((loaded_count++))
+    done < "$REPO_PERF_CACHE_FILE"
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Loaded performance data for $loaded_count repositories"
+}
+
+# Save repository performance data to cache
+function save_repo_performance_cache() {
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Saving repository performance cache to $REPO_PERF_CACHE_FILE"
+    
+    # Ensure cache directory exists
+    local cache_dir
+    cache_dir=$(dirname "$REPO_PERF_CACHE_FILE")
+    if [[ ! -d "$cache_dir" ]]; then
+        mkdir -p "$cache_dir" 2>/dev/null || {
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo mkdir -p "$cache_dir"
+                sudo chown "$USER:$USER" "$cache_dir" 2>/dev/null || true
+            fi
+        }
+    fi
+    
+    # Save performance data
+    local saved_count=0
+    {
+        echo "# Repository Performance Cache - Generated $(date)"
+        echo "# Format: repo_name|download_speed_kbps|success_rate_percent|last_batch_size"
+        
+        for repo_name in "${!repo_download_speeds[@]}"; do
+            local speed="${repo_download_speeds[$repo_name]:-0}"
+            local success="${repo_success_rates[$repo_name]:-100}"
+            local batch_size="${repo_last_batch_sizes[$repo_name]:-10}"
+            echo "$repo_name|$speed|$success|$batch_size"
+            ((saved_count++))
+        done
+    } > "$REPO_PERF_CACHE_FILE" 2>/dev/null || {
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            {
+                echo "# Repository Performance Cache - Generated $(date)"
+                echo "# Format: repo_name|download_speed_kbps|success_rate_percent|last_batch_size"
+                
+                for repo_name in "${!repo_download_speeds[@]}"; do
+                    local speed="${repo_download_speeds[$repo_name]:-0}"
+                    local success="${repo_success_rates[$repo_name]:-100}"
+                    local batch_size="${repo_last_batch_sizes[$repo_name]:-10}"
+                    echo "$repo_name|$speed|$success|$batch_size"
+                done
+            } | sudo tee "$REPO_PERF_CACHE_FILE" >/dev/null
+        fi
+    }
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Saved performance data for $saved_count repositories"
+}
+
+# Calculate adaptive batch size based on repository performance
+function get_adaptive_batch_size() {
+    local repo_name="$1"
+    local package_count="$2"
+    
+    # Get cached performance data
+    local download_speed="${repo_download_speeds[$repo_name]:-0}"
+    local success_rate="${repo_success_rates[$repo_name]:-100}"
+    local last_batch_size="${repo_last_batch_sizes[$repo_name]:-10}"
+    
+    # Start with last known good batch size or default
+    local adaptive_size="$last_batch_size"
+    
+    # Adjust based on download speed
+    if [[ $download_speed -gt $((MIN_DOWNLOAD_RATE * 3)) ]]; then
+        # Very fast repository - use larger batches
+        adaptive_size=$ADAPTIVE_BATCH_SIZE_MAX
+    elif [[ $download_speed -gt $MIN_DOWNLOAD_RATE ]]; then
+        # Fast repository - use medium batches
+        adaptive_size=$(( (ADAPTIVE_BATCH_SIZE_MAX + ADAPTIVE_BATCH_SIZE_MIN) / 2 ))
+    elif [[ $download_speed -gt 0 ]]; then
+        # Slow repository - use smaller batches
+        adaptive_size=$ADAPTIVE_BATCH_SIZE_MIN
+    fi
+    
+    # Adjust based on success rate
+    if [[ $success_rate -lt 80 ]]; then
+        # Low success rate - reduce batch size
+        adaptive_size=$(( adaptive_size / 2 ))
+        [[ $adaptive_size -lt $ADAPTIVE_BATCH_SIZE_MIN ]] && adaptive_size=$ADAPTIVE_BATCH_SIZE_MIN
+    fi
+    
+    # Don't exceed available packages
+    [[ $adaptive_size -gt $package_count ]] && adaptive_size="$package_count"
+    
+    echo "$adaptive_size"
+}
+
+# Prioritize repositories based on performance metrics
+function get_repository_priority() {
+    local repo_name="$1"
+    
+    local download_speed="${repo_download_speeds[$repo_name]:-0}"
+    local success_rate="${repo_success_rates[$repo_name]:-100}"
+    
+    # Calculate priority score (higher is better)
+    # Formula: (download_speed_factor * 10) + (success_rate_factor * 5)
+    local speed_factor=0
+    if [[ $download_speed -gt $((MIN_DOWNLOAD_RATE * 3)) ]]; then
+        speed_factor=10
+    elif [[ $download_speed -gt $((MIN_DOWNLOAD_RATE * 2)) ]]; then
+        speed_factor=7
+    elif [[ $download_speed -gt $MIN_DOWNLOAD_RATE ]]; then
+        speed_factor=5
+    elif [[ $download_speed -gt 0 ]]; then
+        speed_factor=2
+    fi
+    
+    local success_factor=0
+    if [[ $success_rate -ge 95 ]]; then
+        success_factor=5
+    elif [[ $success_rate -ge 85 ]]; then
+        success_factor=4
+    elif [[ $success_rate -ge 70 ]]; then
+        success_factor=3
+    elif [[ $success_rate -ge 50 ]]; then
+        success_factor=2
+    else
+        success_factor=1
+    fi
+    
+    local priority_score=$(( (speed_factor * 10) + (success_factor * 5) ))
+    echo "$priority_score"
+}
+
 # Log function with improved formatting and severity levels
 function batch_download_packages() {
     local -A repo_packages
     local -A repo_status  # Track which repos are enabled/disabled
+    local -A repo_priorities  # Repository priority scores for load balancing
     
     # Group packages by repository for batch downloading
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
@@ -147,78 +317,204 @@ function batch_download_packages() {
         else
             repo_status["$repo_path"]="disabled"
         fi
+        
+        # Calculate repository priority for load balancing
+        repo_priorities["$repo_path"]=$(get_repository_priority "$repo_name")
     done
     
-    # Download batches per repository with optimized DNF settings
-    for repo_path in "${!repo_packages[@]}"; do
+    # PERFORMANCE OPTIMIZATION 5: Load-balanced batch downloading with repository prioritization
+    log "I" "🔄 Applying intelligent repository prioritization and load balancing..."
+    
+    # Sort repositories by priority (highest first) for optimal download order
+    local -a sorted_repos
+    while IFS= read -r repo_path; do
+        sorted_repos+=("$repo_path")
+    done < <(
+        for repo_path in "${!repo_packages[@]}"; do
+            echo "${repo_priorities[$repo_path]}|$repo_path"
+        done | sort -rn -t'|' | cut -d'|' -f2
+    )
+    
+    # Track download performance for each repository
+    local load_balance_active=0
+    local total_repos=${#sorted_repos[@]}
+    
+    # Check if we need load balancing (repositories with many packages)
+    for repo_path in "${sorted_repos[@]}"; do
+        local package_count
+        package_count=$(echo "${repo_packages[$repo_path]}" | wc -w)
+        if [[ $package_count -gt $LOAD_BALANCE_THRESHOLD ]]; then
+            load_balance_active=1
+            break
+        fi
+    done
+    
+    [[ $load_balance_active -eq 1 ]] && log "I" "⚖️  Load balancing activated for repositories with >$LOAD_BALANCE_THRESHOLD packages"
+    
+    # Download batches per repository with optimized DNF settings and performance tracking
+    for repo_path in "${sorted_repos[@]}"; do
         local packages="${repo_packages[$repo_path]}"
         if [[ -n "$packages" ]]; then
             local repo_name
             repo_name=$(basename "$(dirname "$repo_path")")  # Get repo name from path
             
             # Count packages for better feedback
-            local package_count
-            package_count=$(echo "$packages" | wc -w)
-            log "I" "📥 Batch downloading $package_count packages to $repo_name..."
+            local total_package_count
+            total_package_count=$(echo "$packages" | wc -w)
             
-            # Debug: show what we're trying to download
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Packages: $packages"
+            # Get adaptive batch size based on repository performance
+            local batch_size
+            batch_size=$(get_adaptive_batch_size "$repo_name" "$total_package_count")
             
-            # Use optimized DNF with parallel downloads and performance settings
-            local dnf_cmd
-            dnf_cmd=$(get_dnf_cmd)
+            # Get repository priority for display
+            local priority="${repo_priorities[$repo_path]:-0}"
             
-            # Build DNF command with appropriate repository options
-            local dnf_options=(
-                --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
-                --setopt=fastestmirror=1
-                --setopt=deltarpm=0
-                --setopt=timeout="$DNF_QUERY_TIMEOUT"
-                --setopt=retries="$DNF_RETRIES"
-                --destdir="$repo_path"
-            )
+            log "I" "📥 Batch downloading $total_package_count packages to $repo_name (priority: $priority, batch size: $batch_size)..."
             
-            # If repository is disabled, enable it for this download
-            if [[ "${repo_status[$repo_path]}" == "disabled" ]]; then
-                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Enabling disabled repository: $repo_name"
-                dnf_options+=(--enablerepo="$repo_name")
-            fi
+            # Track performance metrics for this download session
+            local repo_start_time
+            local total_downloaded=0
+            local total_failed=0
+            local total_bytes=0
+            repo_start_time=$(date +%s)
             
-            local download_start
-            download_start=$(date +%s)
-            log "I" "⏳ Starting DNF download for $repo_name..."
-            # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
-            if ${dnf_cmd} download "${dnf_options[@]}" $packages >/dev/null 2>&1; then
-                local download_end
-                local download_duration
-                download_end=$(date +%s)
-                download_duration=$((download_end - download_start))
-                log "I" "✅ Successfully downloaded $package_count packages for $repo_name in ${download_duration}s"
-            else
-                log "W" "✗ Some downloads failed for $repo_name (check dnf logs for details)"
+            # Split packages into batches if load balancing is active
+            local -a package_array
+            read -ra package_array <<< "$packages"
+            
+            local batch_num=1
+            local processed_packages=0
+            
+            while [[ $processed_packages -lt $total_package_count ]]; do
+                # Create batch
+                local batch_packages=()
+                local batch_end=$(( processed_packages + batch_size ))
+                [[ $batch_end -gt $total_package_count ]] && batch_end=$total_package_count
                 
-                # Try downloading packages one by one as fallback
-                log "I" "   Trying individual downloads as fallback..."
-                local success_count=0
-                local total_count=0
-                # shellcheck disable=SC2086 # Intentional word splitting for package list
-                for pkg in $packages; do
-                    ((total_count++))
-                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                    if ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
-                        ((success_count++))
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ $pkg"
-                    else
-                        # Track failed download with detailed reason
-                        failed_downloads["$pkg"]="$repo_name"
-                        failed_download_reasons["$pkg"]="DNF download failed (package not available, network issue, or repository access denied)"
-                        [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   ✗ Failed: $pkg"
-                    fi
+                for ((i=processed_packages; i<batch_end; i++)); do
+                    batch_packages+=("${package_array[i]}")
                 done
-                log "I" "   Fallback result: $success_count/$total_count packages downloaded"
+                
+                local batch_package_count=${#batch_packages[@]}
+                
+                if [[ $load_balance_active -eq 1 && $total_repos -gt 1 ]]; then
+                    log "I" "   📦 Batch $batch_num: downloading $batch_package_count packages..."
+                fi
+                
+                # Debug: show what we're trying to download
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Batch packages: ${batch_packages[*]}"
+                
+                # Use optimized DNF with parallel downloads and performance settings
+                local dnf_cmd
+                dnf_cmd=$(get_dnf_cmd)
+                
+                # Build DNF command with appropriate repository options
+                local dnf_options=(
+                    --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
+                    --setopt=fastestmirror=1
+                    --setopt=deltarpm=0
+                    --setopt=timeout="$DNF_QUERY_TIMEOUT"
+                    --setopt=retries="$DNF_RETRIES"
+                    --destdir="$repo_path"
+                )
+                
+                # If repository is disabled, enable it for this download
+                if [[ "${repo_status[$repo_path]}" == "disabled" ]]; then
+                    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Enabling disabled repository: $repo_name"
+                    dnf_options+=(--enablerepo="$repo_name")
+                fi
+                
+                local batch_start_time
+                batch_start_time=$(date +%s)
+                
+                if [[ $load_balance_active -eq 1 && $total_repos -gt 1 ]]; then
+                    log "I" "⏳ Starting batch $batch_num DNF download for $repo_name..."
+                else
+                    log "I" "⏳ Starting DNF download for $repo_name..."
+                fi
+                
+                # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
+                if ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                    local batch_end_time
+                    local batch_duration
+                    batch_end_time=$(date +%s)
+                    batch_duration=$((batch_end_time - batch_start_time))
+                    total_downloaded=$((total_downloaded + batch_package_count))
+                    
+                    # Estimate download size (rough approximation: 2MB per package average)
+                    local estimated_bytes=$((batch_package_count * 2048))
+                    total_bytes=$((total_bytes + estimated_bytes))
+                    
+                    if [[ $load_balance_active -eq 1 && $total_repos -gt 1 ]]; then
+                        log "I" "✅ Batch $batch_num completed: $batch_package_count packages in ${batch_duration}s"
+                    else
+                        log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"
+                    fi
+                else
+                    log "W" "✗ Some downloads failed in batch $batch_num for $repo_name (check dnf logs for details)"
+                    
+                    # Try downloading packages one by one as fallback
+                    log "I" "   Trying individual downloads as fallback..."
+                    local success_count=0
+                    local failed_count=0
+                    
+                    for pkg in "${batch_packages[@]}"; do
+                        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+                        if ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                            ((success_count++))
+                            ((total_downloaded++))
+                            # Estimate download size
+                            total_bytes=$((total_bytes + 2048))
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ $pkg"
+                        else
+                            ((failed_count++))
+                            ((total_failed++))
+                            # Track failed download with detailed reason
+                            failed_downloads["$pkg"]="$repo_name"
+                            failed_download_reasons["$pkg"]="DNF download failed (package not available, network issue, or repository access denied)"
+                            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   ✗ Failed: $pkg"
+                        fi
+                    done
+                    log "I" "   Fallback result: $success_count/$batch_package_count packages downloaded"
+                fi
+                
+                processed_packages=$((processed_packages + batch_package_count))
+                ((batch_num++))
+                
+                # Small delay between batches for load balancing (only if multiple repos and load balancing active)
+                if [[ $load_balance_active -eq 1 && $total_repos -gt 1 && $processed_packages -lt $total_package_count ]]; then
+                    sleep 0.5
+                fi
+            done
+            
+            # Calculate and store repository performance metrics
+            local repo_end_time
+            local total_repo_duration
+            repo_end_time=$(date +%s)
+            total_repo_duration=$((repo_end_time - repo_start_time))
+            
+            if [[ $total_repo_duration -gt 0 && $total_bytes -gt 0 ]]; then
+                # Calculate download speed in KB/s
+                local download_speed_kbps=$((total_bytes / total_repo_duration))
+                repo_download_speeds["$repo_name"]="$download_speed_kbps"
+                
+                # Calculate success rate
+                local total_attempted=$((total_downloaded + total_failed))
+                if [[ $total_attempted -gt 0 ]]; then
+                    local success_rate=$(( (total_downloaded * 100) / total_attempted ))
+                    repo_success_rates["$repo_name"]="$success_rate"
+                fi
+                
+                # Store optimal batch size
+                repo_last_batch_sizes["$repo_name"]="$batch_size"
+                
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Performance: $repo_name - Speed: ${download_speed_kbps}KB/s, Success: ${success_rate:-0}%, Batch: $batch_size"
             fi
         fi
     done
+    
+    # Save performance data for future runs
+    save_repo_performance_cache
 }
 
 # Clean up old cache directories from filesystem
@@ -1588,6 +1884,10 @@ function process_packages() {
     echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     
+    # PERFORMANCE OPTIMIZATION 5: Load repository performance cache
+    log "I" "⚡ Loading repository performance cache for intelligent prioritization..."
+    load_repo_performance_cache
+    
     # PERFORMANCE OPTIMIZATION: Cache enabled repositories once at start
     log "I" "📋 Building enabled repositories cache for performance..."
     local dnf_cmd
@@ -1746,6 +2046,26 @@ function process_packages() {
     fi
     log "I" "   📦 Processing $final_count optimized packages"
     
+    # Show repository performance status summary
+    local fast_repos=0
+    local cached_repos=0
+    for repo_name in $(printf '%s\n' "$filtered_packages" | cut -d'|' -f6 | sort -u); do
+        [[ -z "$repo_name" ]] && continue
+        if [[ -n "${repo_download_speeds[$repo_name]}" ]]; then
+            ((cached_repos++))
+            local speed="${repo_download_speeds[$repo_name]}"
+            if [[ $speed -gt $MIN_DOWNLOAD_RATE ]]; then
+                ((fast_repos++))
+            fi
+        fi
+    done
+    
+    if [[ $cached_repos -gt 0 ]]; then
+        log "I" "⚡ Repository performance data: $cached_repos repositories cached, $fast_repos classified as fast"
+    else
+        log "I" "⚡ No cached repository performance data - will establish baseline during downloads"
+    fi
+
     # Update total packages count for accurate progress reporting
     total_packages=$final_count
     
