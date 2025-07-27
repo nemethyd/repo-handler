@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.4"
+VERSION="2.2.5"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -117,10 +117,11 @@ function batch_download_packages() {
             fi
         fi
         
-        # Build package spec (handle epoch properly)
+        # Build package spec (handle epoch properly for DNF download)
         local package_spec
         if [[ -n "$epoch" && "$epoch" != "0" && "$epoch" != "(none)" ]]; then
-            package_spec="${package_name}-${epoch}:${package_version}-${package_release}.${package_arch}"
+            # For DNF download, use epoch:name-version-release.arch format
+            package_spec="${epoch}:${package_name}-${package_version}-${package_release}.${package_arch}"
         else
             package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
         fi
@@ -781,7 +782,7 @@ function determine_repo_from_installed() {
     if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
         # Clean up repo name (remove @ prefix)
         local clean_repo="${repo_info#@}"
-        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Found installed repo via DNF: $clean_repo\e[0m"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Found installed repo via DNF: $clean_repo"
         echo "$clean_repo"
         return 0
     fi
