@@ -2,7 +2,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-07-26
+# Last Updated: 2025-07-27
 
 # MIT licensing
 # Purpose:
@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.3.3"
+VERSION="2.3.4"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -50,6 +50,7 @@ SHARED_CACHE_PATH=${SHARED_CACHE_PATH:-"/var/cache/myrepo"}  # Shared cache dire
 # Timeout configuration (in seconds)
 DNF_QUERY_TIMEOUT=${DNF_QUERY_TIMEOUT:-60}    # Timeout for basic DNF queries
 DNF_CACHE_TIMEOUT=${DNF_CACHE_TIMEOUT:-120}   # Timeout for DNF cache building operations
+DNF_DOWNLOAD_TIMEOUT=${DNF_DOWNLOAD_TIMEOUT:-1800}  # Timeout for DNF download operations (30 minutes)
 SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
 
 # Performance and monitoring configuration
@@ -325,6 +326,16 @@ function batch_download_packages() {
     # PERFORMANCE OPTIMIZATION 5: Load-balanced batch downloading with repository prioritization
     log "I" "🔄 Applying intelligent repository prioritization and load balancing..."
     
+    # Count total packages for progress tracking
+    local total_packages_to_download=0
+    for repo_path in "${!repo_packages[@]}"; do
+        local package_count
+        package_count=$(echo "${repo_packages[$repo_path]}" | wc -w)
+        total_packages_to_download=$((total_packages_to_download + package_count))
+    done
+    
+    log "I" "📦 Processing $total_packages_to_download packages across ${#repo_packages[@]} repositories..."
+    
     # Sort repositories by priority (highest first) for optimal download order
     local -a sorted_repos
     while IFS= read -r repo_path; do
@@ -351,10 +362,30 @@ function batch_download_packages() {
     
     [[ $load_balance_active -eq 1 ]] && log "I" "⚖️  Load balancing activated for repositories with >$LOAD_BALANCE_THRESHOLD packages"
     
+    # Calculate total packages across all repositories for global progress tracking
+    local total_packages_to_download=0
+    for repo_path in "${sorted_repos[@]}"; do
+        local packages="${repo_packages[$repo_path]}"
+        local package_count
+        package_count=$(echo "$packages" | wc -w)
+        total_packages_to_download=$((total_packages_to_download + package_count))
+    done
+    
+    # Enhanced progress reporting for large batches
+    if [[ $total_packages_to_download -gt 100 ]]; then
+        log "I" "🔄 Large batch detected ($total_packages_to_download packages) - enhanced progress reporting enabled"
+        log "I" "📊 Processing across $total_repos repositories with progress updates every 30s for large batches"
+    fi
+    
+    # Track global progress
+    local global_downloaded=0
+    local current_repo=0
+    
     # Download batches per repository with optimized DNF settings and performance tracking
     for repo_path in "${sorted_repos[@]}"; do
         local packages="${repo_packages[$repo_path]}"
         if [[ -n "$packages" ]]; then
+            ((current_repo++))
             local repo_name
             repo_name=$(basename "$(dirname "$repo_path")")  # Get repo name from path
             
@@ -369,7 +400,7 @@ function batch_download_packages() {
             # Get repository priority for display
             local priority="${repo_priorities[$repo_path]:-0}"
             
-            log "I" "📥 Batch downloading $total_package_count packages to $repo_name (priority: $priority, batch size: $batch_size)..."
+            log "I" "📥 Repository $current_repo/${#sorted_repos[@]}: Downloading $total_package_count packages from $repo_name (priority: $priority, batch size: $batch_size)..."
             
             # Track performance metrics for this download session
             local repo_start_time
@@ -433,8 +464,40 @@ function batch_download_packages() {
                     log "I" "⏳ Starting DNF download for $repo_name..."
                 fi
                 
+                # For large batches, show periodic progress during download
+                local show_periodic_progress=0
+                if [[ $batch_package_count -gt 50 || $total_packages_to_download -gt 200 ]]; then
+                    show_periodic_progress=1
+                fi
+                
                 # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
-                if ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                local download_success=0
+                if [[ $show_periodic_progress -eq 1 ]]; then
+                    # Start background progress monitor for large downloads
+                    (
+                        sleep 30
+                        while kill -0 $$ 2>/dev/null; do
+                            log "I" "🔄 Still downloading... ($batch_package_count packages from $repo_name, elapsed: $(($(date +%s) - batch_start_time))s)"
+                            sleep 30
+                        done
+                    ) &
+                    local progress_pid=$!
+                    
+                    if timeout "$DNF_DOWNLOAD_TIMEOUT" "${dnf_cmd}" download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                        download_success=1
+                    fi
+                    
+                    # Stop progress monitor
+                    kill $progress_pid 2>/dev/null || true
+                    wait $progress_pid 2>/dev/null || true
+                else
+                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command (e.g., "sudo dnf")
+                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                        download_success=1
+                    fi
+                fi
+                
+                if [[ $download_success -eq 1 ]]; then
                     local batch_end_time
                     local batch_duration
                     batch_end_time=$(date +%s)
@@ -450,6 +513,24 @@ function batch_download_packages() {
                     else
                         log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"
                     fi
+                    
+                    # Update global progress
+                    global_downloaded=$((global_downloaded + batch_package_count))
+                    if [[ $total_packages_to_download -gt 100 ]]; then
+                        local progress_percent=$(( (global_downloaded * 100) / total_packages_to_download ))
+                        local remaining_packages=$((total_packages_to_download - global_downloaded))
+                        
+                        # Calculate estimated time remaining based on current pace
+                        local elapsed_time=$(($(date +%s) - $(date -d "$(stat -c %Y "$PERFORMANCE_CACHE_FILE" 2>/dev/null || date)" +%s 2>/dev/null || echo 0)))
+                        if [[ $elapsed_time -gt 0 && $global_downloaded -gt 0 ]]; then
+                            local avg_time_per_package=$((elapsed_time / global_downloaded))
+                            local eta_seconds=$((remaining_packages * avg_time_per_package))
+                            local eta_minutes=$((eta_seconds / 60))
+                            log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%) - ETA: ${eta_minutes}m"
+                        else
+                            log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"
+                        fi
+                    fi
                 else
                     log "W" "✗ Some downloads failed in batch $batch_num for $repo_name (check dnf logs for details)"
                     
@@ -460,7 +541,7 @@ function batch_download_packages() {
                     
                     for pkg in "${batch_packages[@]}"; do
                         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                        if ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                             ((success_count++))
                             ((total_downloaded++))
                             # Estimate download size
@@ -1386,19 +1467,24 @@ function generate_summary_table() {
     # Only iterate over arrays that have content
     if [[ ${#stats_new_count[@]} -gt 0 ]]; then
         for repo in "${!stats_new_count[@]}"; do
-            all_repos+=("$repo")
+            # Skip empty or invalid repository names
+            if [[ -n "$repo" && "$repo" != "getPackage" ]]; then
+                all_repos+=("$repo")
+            fi
         done
     fi
     if [[ ${#stats_update_count[@]} -gt 0 ]]; then
         for repo in "${!stats_update_count[@]}"; do
-            if [[ ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+            # Skip empty or invalid repository names and duplicates
+            if [[ -n "$repo" && "$repo" != "getPackage" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
                 all_repos+=("$repo")
             fi
         done
     fi
     if [[ ${#stats_exists_count[@]} -gt 0 ]]; then
         for repo in "${!stats_exists_count[@]}"; do
-            if [[ ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
+            # Skip empty or invalid repository names and duplicates
+            if [[ -n "$repo" && "$repo" != "getPackage" && ! " ${all_repos[*]} " =~ \ ${repo}\  ]]; then
                 all_repos+=("$repo")
             fi
         done
@@ -1416,6 +1502,12 @@ function generate_summary_table() {
     draw_table_border_flex "middle"
     
     for repo in "${all_repos[@]}"; do
+        # Additional safety check - skip empty repo names in summary
+        if [[ -z "$repo" || "$repo" == "getPackage" ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping invalid repository name in summary: '$repo'"
+            continue
+        fi
+        
         local new_count="${stats_new_count[$repo]:-0}"
         local update_count="${stats_update_count[$repo]:-0}"
         local exists_count="${stats_exists_count[$repo]:-0}"
@@ -2008,7 +2100,7 @@ function process_packages() {
         local name_filtered_count=0
         
         while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
-            if [[ "$package_name" == *"$NAME_FILTER"* ]]; then
+            if [[ "$package_name" =~ $NAME_FILTER ]]; then
                 echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_name_filtered"
                 ((name_filtered_count++))
             fi
@@ -2264,12 +2356,18 @@ function process_packages() {
         case "$status" in
             "EXISTS")
                 ((exists_count++))
-                ((stats_exists_count["$repo_name"]++))
+                # Validate repo_name before using as array key
+                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
+                    ((stats_exists_count["$repo_name"]++))
+                fi
                 [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 ;;
             "UPDATE")
                 ((update_count++))
-                ((stats_update_count["$repo_name"]++))
+                # Validate repo_name before using as array key
+                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
+                    ((stats_update_count["$repo_name"]++))
+                fi
                 echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
@@ -2334,7 +2432,10 @@ function process_packages() {
                 
                 # Process the new package
                 ((new_count++))
-                ((stats_new_count["$repo_name"]++))
+                # Validate repo_name before using as array key
+                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
+                    ((stats_new_count["$repo_name"]++))
+                fi
                 echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
@@ -2380,7 +2481,17 @@ function process_packages() {
     
     # Second pass: batch download all NEW packages
     if [[ ${#new_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        log "I" "📥 Batch downloading ${#new_packages[@]} new packages..."
+        local total_new_packages=${#new_packages[@]}
+        
+        # Enhanced progress reporting for large downloads
+        if [[ $total_new_packages -gt 100 ]]; then
+            log "I" "📥 Batch downloading $total_new_packages new packages..."
+            log "I" "🔄 Large download detected - enhanced progress reporting will activate during processing"
+            log "I" "� Expect periodic progress updates every 30 seconds during large batch operations"
+        else
+            log "I" "�📥 Batch downloading $total_new_packages new packages..."
+        fi
+        
         local batch_start_time
         local batch_end_time
         local batch_duration
@@ -2389,12 +2500,26 @@ function process_packages() {
         batch_download_packages <<< "$(printf '%s\n' "${new_packages[@]}")"
         batch_end_time=$(date +%s)
         batch_duration=$((batch_end_time - batch_start_time))
-        log "I" "✅ New packages download completed in ${batch_duration}s"
+        
+        if [[ $total_new_packages -gt 100 ]]; then
+            log "I" "✅ New packages download completed in ${batch_duration}s ($total_new_packages packages processed)"
+        else
+            log "I" "✅ New packages download completed in ${batch_duration}s"
+        fi
     fi
     
     # Third pass: batch download all UPDATE packages
     if [[ ${#update_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        log "I" "🔄 Batch downloading ${#update_packages[@]} updated packages..."
+        local total_update_packages=${#update_packages[@]}
+        
+        # Enhanced progress reporting for large downloads
+        if [[ $total_update_packages -gt 100 ]]; then
+            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
+            log "I" "🔄 Large update batch detected - enhanced progress reporting active"
+        else
+            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
+        fi
+        
         local batch_start_time
         local batch_end_time
         local batch_duration
@@ -2403,7 +2528,12 @@ function process_packages() {
         batch_download_packages <<< "$(printf '%s\n' "${update_packages[@]}")"
         batch_end_time=$(date +%s)
         batch_duration=$((batch_end_time - batch_start_time))
-        log "I" "✅ Updated packages download completed in ${batch_duration}s"
+        
+        if [[ $total_update_packages -gt 100 ]]; then
+            log "I" "✅ Updated packages download completed in ${batch_duration}s ($total_update_packages packages processed)"
+        else
+            log "I" "✅ Updated packages download completed in ${batch_duration}s"
+        fi
     fi
     
     # Final statistics with colors
