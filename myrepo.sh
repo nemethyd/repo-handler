@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.6"
+VERSION="2.2.7"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -130,12 +130,9 @@ function batch_download_packages() {
         
         # Build package spec (handle epoch properly for DNF download)
         local package_spec
-        if [[ -n "$epoch" && "$epoch" != "0" && "$epoch" != "(none)" ]]; then
-            # For DNF download, use epoch:name-version-release.arch format
-            package_spec="${epoch}:${package_name}-${package_version}-${package_release}.${package_arch}"
-        else
-            package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
-        fi
+        # DNF download typically works better without epoch prefix
+        # The epoch is handled internally by DNF when resolving package names
+        package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
         
         repo_packages["$repo_path"]+="$package_spec "
         
@@ -702,47 +699,69 @@ function cleanup_uninstalled_packages() {
             
             [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Checking $total_rpms packages for removal"
             
-            # Process each RPM file and check if it's still installed (like original script)
+            # Build list of RPM files for batch processing
+            local rpm_files_array=()
             while IFS= read -r rpm_file; do
-                if [[ -n "$rpm_file" ]]; then
-                    # Extract RPM metadata using rpm command (more accurate than filename parsing)
-                    local rpm_metadata
-                    if rpm_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
-                        
-                        # Normalize epoch (replace (none) with 0)
-                        rpm_metadata="${rpm_metadata//(none)/0}"
-                        
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking: $rpm_metadata"
-                        
-                        # Check if this exact package metadata is in the installed list
-                        if ! grep -qxF "$rpm_metadata" "$installed_packages_file"; then
-                            local package_name
-                            package_name=$(echo "$rpm_metadata" | cut -d'|' -f1)
+                [[ -n "$rpm_file" ]] && rpm_files_array+=("$rpm_file")
+            done < <(find "$repo_path" -name "*.rpm" -type f 2>/dev/null)
+            
+            if [[ ${#rpm_files_array[@]} -eq 0 ]]; then
+                continue
+            fi
+            
+            # Process RPMs in batches for much better performance
+            local batch_size=50
+            local rpms_to_remove=()
+            
+            for ((i=0; i<${#rpm_files_array[@]}; i+=batch_size)); do
+                local batch_files=("${rpm_files_array[@]:i:batch_size}")
+                
+                # Extract metadata from batch of RPM files in one command
+                local batch_metadata
+                if batch_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n" "${batch_files[@]}" 2>/dev/null); then
+                    
+                    # Process each line and corresponding file
+                    local line_num=0
+                    while IFS= read -r rpm_metadata; do
+                        if [[ -n "$rpm_metadata" ]]; then
+                            # Normalize epoch (replace (none) with 0)
+                            rpm_metadata="${rpm_metadata//(none)/0}"
                             
-                            if [[ $DRY_RUN -eq 1 ]]; then
-                                log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)"
-                                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
-                                ((would_remove_count++))
-                                ((total_would_remove++))
-                            else
-                                log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)"
-                                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
-                                # Use sudo for file removal if elevation is enabled
-                                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                                    sudo rm -f "$rpm_file"
+                            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking: $rpm_metadata"
+                            
+                            # Check if this exact package metadata is in the installed list
+                            if ! grep -qxF "$rpm_metadata" "$installed_packages_file"; then
+                                local rpm_file="${batch_files[line_num]}"
+                                local package_name
+                                package_name=$(echo "$rpm_metadata" | cut -d'|' -f1)
+                                
+                                if [[ $DRY_RUN -eq 1 ]]; then
+                                    log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)"
+                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
+                                    ((would_remove_count++))
+                                    ((total_would_remove++))
                                 else
-                                    rm -f "$rpm_file"
+                                    log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)"
+                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Metadata: $rpm_metadata"
+                                    rpms_to_remove+=("$rpm_file")
+                                    ((removed_count++))
+                                    ((total_removed++))
                                 fi
-                                ((removed_count++))
-                                ((total_removed++))
                             fi
                         fi
-                    else
-                        # If we can't read RPM metadata, log warning but don't remove
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Could not read metadata from: $(basename "$rpm_file")"
-                    fi
+                        ((line_num++))
+                    done <<< "$batch_metadata"
                 fi
-            done < <(find "$repo_path" -name "*.rpm" -type f 2>/dev/null)
+            done
+            
+            # Remove all flagged RPMs in one batch operation
+            if [[ ${#rpms_to_remove[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
+                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                    sudo rm -f "${rpms_to_remove[@]}"
+                else
+                    rm -f "${rpms_to_remove[@]}"
+                fi
+            fi
             
             if [[ $DRY_RUN -eq 1 ]]; then
                 if [[ $would_remove_count -gt 0 ]]; then
