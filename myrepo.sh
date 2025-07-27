@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.8"
+VERSION="2.2.9"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -1582,7 +1582,41 @@ function process_packages() {
     done <<< "$enabled_repos_list"
     
     log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    [[ $DEBUG_LEVEL -ge 1 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    
+    # PERFORMANCE OPTIMIZATION 2: Pre-create all repository directories upfront
+    log "I" "📁 Pre-creating repository directories for performance..."
+    local created_dirs=0
+    local unique_repos
+    unique_repos=$(echo "$package_list" | cut -d'|' -f6 | sort -u)
+    
+    while IFS= read -r repo_name; do
+        [[ -z "$repo_name" ]] && continue
+        local repo_path
+        repo_path=$(get_repo_path "$repo_name")
+        
+        # Skip invalid repository paths
+        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
+            continue
+        fi
+        
+        # Create directory if it doesn't exist
+        if [[ ! -d "$repo_path" ]]; then
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                if sudo mkdir -p "$repo_path" 2>/dev/null; then
+                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                    sudo chmod 755 "$repo_path" 2>/dev/null || true
+                    ((created_dirs++))
+                fi
+            else
+                if mkdir -p "$repo_path" 2>/dev/null; then
+                    ((created_dirs++))
+                fi
+            fi
+        fi
+    done <<< "$unique_repos"
+    
+    log "I" "✓ Pre-created $created_dirs repository directories"
     
     # Show legend for status markers
     echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
@@ -1745,19 +1779,11 @@ function process_packages() {
         
         # Additional safety check - ensure repo_path is valid
         if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
+            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
             continue
         fi
         
-        # Ensure repository directory exists
-        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-            if sudo mkdir -p "$repo_path" 2>/dev/null; then
-                sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
-                sudo chmod 755 "$repo_path" 2>/dev/null || true
-            fi
-        else
-            mkdir -p "$repo_path" 2>/dev/null
-        fi
+        # Directory is already pre-created - no need to create it here
         
         # Get package status using simple, reliable method
         local status
