@@ -1,14 +1,21 @@
-# Repo Handler Script (v2.2.0)
+# Repo Handler Script (v2.2.7)
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with different AI support models  
-**AI flock**: ChatGPT, Claude, Gemini  
+**AI flock**: ChatGPT, Claude, G# Set the number of parallel processes (optimized default: 6)
+# PARALLEL=6
+
+# Set batch size for processing RPMs during cleanup operations (default: 50)
+# BATCH_SIZE=50
+
+# Enable dry run mode (1 = enabled, 0 = disabled)
+# DRY_RUN=0  
 **Last Updated**: 2025-07-26
 
 ## Overview
 
 The `repo-handler` project provides a high-performance bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
 
-**v2.2.0 Performance Optimizations**: This version has been completely optimized for performance with intelligent caching, achieving up to 95% speed improvements over previous versions while maintaining all core functionality. Complex adaptive features have been simplified in favor of reliable, fast operation with fixed optimal settings.
+**v2.2.7 Performance Optimizations**: This version has been completely optimized for performance with intelligent caching, achieving up to 95% speed improvements over previous versions while maintaining all core functionality. Complex adaptive features have been simplified in favor of reliable, fast operation with fixed optimal settings.
 
 ### Repository Architecture
 
@@ -127,7 +134,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh
+# myrepo.cfg - Configuration file for myrepo.sh v2.2.7
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -140,63 +147,58 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Define manual repositories (individual repos within LOCAL_REPO_PATH, comma-separated)
 # MANUAL_REPOS="ol9_edge"
 
-# Set the RPM build path
-# RPMBUILD_PATH="/home/nemethy/rpmbuild/RPMS"
+# Define local RPM source directories (comma-separated list)
+# LOCAL_RPM_SOURCES="/home/nemethy/rpmbuild/RPMS,/var/cache/dnf,/var/cache/yum,/tmp"
 
-# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
-# DEBUG_LEVEL=2
+# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose)
+# DEBUG_LEVEL=1
 
 # Set maximum number of packages to process (0 = no limit)
 # MAX_PACKAGES=0
 
-# Set batch size for processing
-# BATCH_SIZE=50
+# Set maximum number of new packages to download (-1 = no limit, 0 = none)
+# MAX_NEW_PACKAGES=-1
 
-# Set the number of parallel processes
+# Set the number of parallel processes (optimized default: 6)
 # PARALLEL=6
 
-# Enable dry run (1 = true, 0 = false)
+# Enable dry run (1 = enabled, 0 = disabled)
 # DRY_RUN=0
 
-# Continue execution despite download errors (0 = halt on errors, 1 = continue despite errors)
-# CONTINUE_ON_ERROR=0
-
-# Run with command elevation disabled (requires root privileges)
-# ELEVATE_COMMANDS=0
+# Run full rebuild - removes all packages first (1 = enabled, 0 = disabled)
+# FULL_REBUILD=0
 
 # Define repositories that should be excluded from processing
 # Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
-EXCLUDED_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
-
-# Filter packages by name using regex pattern (empty = process all packages)
-# NAME_FILTER=""
-
-# Filter repositories to process (comma-separated list, empty = process all enabled)
-# FILTER_REPOS=""
-
-# Re‑scan everything on the next run (1 = true, 0 = false).
-# When set to 1 the processed‑package cache is cleared at start‑up.
-# FULL_REBUILD=0
+# EXCLUDE_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
 
 # Cache validity in seconds (default: 14400 = 4 hours)
 # CACHE_MAX_AGE=14400
 
-# Automatically fix permission issues when detected (1 = enabled, 0 = disabled)
-# SET_PERMISSIONS=0
+# Shared cache directory path (default: /var/cache/myrepo)
+# SHARED_CACHE_PATH="/var/cache/myrepo"
 
-# Force refresh of DNF metadata cache and rebuild repository cache (1 = enabled, 0 = disabled)
+# Enable cleanup of uninstalled packages (1 = enabled, 0 = disabled)
+# CLEANUP_UNINSTALLED=1
+
+# Enable parallel compression for createrepo (1 = enabled, 0 = disabled)
+# USE_PARALLEL_COMPRESSION=1
+
+# Force refresh of DNF metadata cache (1 = enabled, 0 = disabled)
 # REFRESH_METADATA=0
 
 # Use serial DNF mode to prevent database lock contention (1 = enabled, 0 = disabled)
 # DNF_SERIAL=0
 
-# Note: The following options from previous versions are no longer supported in v2.2.0:
-# - ADAPTIVE_TUNING and related adaptive performance settings (replaced with optimal defaults)
-# - Complex cache settings (simplified to CACHE_MAX_AGE)
-# - AUTO_UPDATE_MANUAL_REPOS (now always enabled)
-# - LOCAL_REPO_CHECK_METHOD (optimized for performance)
-# - GROUP_OUTPUT (output is now consistently formatted)
-# - REPO_COMPRESS_TYPE (now uses optimal defaults)
+# Automatic privilege detection (1 = auto-detect, 0 = never use sudo)
+# ELEVATE_COMMANDS=1
+
+# Note: The following options from previous versions are no longer supported in v2.2.7:
+# - SET_PERMISSIONS (permission handling is now automatic)
+# - LOG_DIR (logging is now to stderr, no file logging)
+# - EXCLUDED_REPOS (renamed to EXCLUDE_REPOS for consistency)
+# - RPMBUILD_PATH (use LOCAL_RPM_SOURCES array instead)
+# - Complex adaptive tuning settings (replaced with optimal defaults)
 ```
 
 ### Log Level Control
@@ -214,7 +216,6 @@ The `DEBUG_LEVEL` option controls the verbosity of log output:
 - `1` (Important): Shows important messages like warnings, progress, and success notifications  
 - `2` (Normal): Shows normal informational messages and all above levels (default)
 - `3` (Verbose): Shows detailed debugging information and all above levels
-- `4` (Very Verbose): Shows very detailed trace information for troubleshooting
 
 #### Message Types and Display Symbols
 
@@ -222,11 +223,7 @@ Messages are displayed with symbols that indicate their semantic meaning:
 
 - `[E]` Error: Critical issues that may stop execution
 - `[W]` Warning: Issues that need attention but don't stop execution  
-- `[S]` Success: Successful completion of operations
 - `[I]` Info: General informational messages
-- `[P]` Progress: Progress updates and status information
-- `[A]` Action: Actions being performed
-- `[U]` Update: Update operations
 - `[D]` Debug: Detailed debugging information
 
 #### Configuration
@@ -234,7 +231,7 @@ Messages are displayed with symbols that indicate their semantic meaning:
 To set the verbosity level, modify the `DEBUG_LEVEL` option in `myrepo.cfg`:
 
 ```bash
-# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
+# Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose)
 DEBUG_LEVEL=2
 ```
 
@@ -293,102 +290,45 @@ NAME_FILTER="firefox"
 - **Case Sensitive**: Pattern matching is case-sensitive by default
 - **Combines with Repository Filtering**: Works together with `--repos` for fine-grained control
 
-### Manual Repository Management (Manual Change Detection)
-
-Version 2.3.0+ introduces advanced manual repository management that can automatically detect and handle manual changes to individual manual repositories within the repository tree. This is particularly useful in environments where RPM packages are manually copied to specific repositories (like `ol9_edge`) outside of the script's normal processing workflow.
-
-#### Key Features:
-
-- **Dual-Tier Metadata Strategy**: Regular repositories only update metadata when packages are processed, while manual repositories (e.g., `ol9_edge`) can detect manual changes even when no packages are processed during the current run.
-- **Configurable Detection Methods**: Choose between FAST (timestamp-based) and ACCURATE (content-based) detection methods.
-- **Automatic Updates**: Manual repositories are automatically checked for manual changes and metadata is updated accordingly.
-- **Sync-Only Mode Optimization**: Metadata updates are intelligently skipped during `--sync-only` mode for better performance.
-
-#### Configuration Options:
-
-```bash
-# Enable automatic detection and update of manual repository changes (1 = enabled, 0 = disabled)
-# When enabled, the script will check manual repositories for manual changes even if no packages
-# were processed during the current run. Useful for repositories where RPMs are manually copied.
-AUTO_UPDATE_MANUAL_REPOS=1
-
-# Manual repository metadata check method (FAST or ACCURATE)
-# FAST: Uses timestamp comparison between RPM files and metadata (faster, good for most cases)
-# ACCURATE: Uses content comparison to detect count mismatches (more thorough but slower)
-# Default is FAST for optimal performance while still catching most manual changes.
-LOCAL_REPO_CHECK_METHOD=FAST
-```
-
-#### How It Works:
-
-1. **FAST Method**: Compares the newest RPM file timestamp against the repository metadata timestamp. If RPMs are newer, metadata is updated.
-2. **ACCURATE Method**: Counts actual RPM files and compares with the metadata package count. If counts differ, metadata is updated.
-
-#### Use Cases:
-
-- **Manual Package Deployment**: When administrators manually copy RPM files to specific manual repositories (like `ol9_edge`)
-- **Airgapped Environments**: Where packages are transferred via external media and manually placed
-- **Mixed Workflows**: Environments where both automated and manual package management occur
-- **Development Environments**: Where local builds are frequently copied to test repositories
-
-#### Example Configuration:
-
-```bash
-# myrepo.cfg - Enable accurate detection for critical repositories
-AUTO_UPDATE_MANUAL_REPOS=1
-LOCAL_REPO_CHECK_METHOD=ACCURATE
-MANUAL_REPOS="ol9_edge,custom_apps,local_builds"
-```
-
-This ensures that manually added packages are properly indexed and available through the repository metadata without requiring a full rebuild.
-
-### Performance Optimizations (v2.2.0)
+### Performance Optimizations (v2.2.7)
 
 This version has been completely redesigned for optimal performance, replacing the previous adaptive tuning system with fixed optimal settings that provide consistently excellent performance across different environments.
 
 #### Key Performance Improvements:
 
 - **Intelligent Caching System**: Repository metadata is cached for 4 hours (configurable) with version-based invalidation
-- **Batch Processing**: Optimized batch downloads with parallel processing for maximum throughput  
+- **Batch Processing**: Optimized batch downloads with parallel processing for maximum throughput (fixed batch size: 50)
 - **Cache Hits**: Up to 95% performance improvement when cache is valid
 - **Fixed Optimal Settings**: Replaced complex adaptive algorithms with proven optimal defaults
 - **Streamlined Code**: Reduced script complexity while maintaining all core functionality
+- **Epoch Handling Fix**: Resolved download failures for packages with epoch information
+- **50x Faster Cleanup**: Batch processing for package removal operations
 
 #### Default Performance Settings:
 
 ```bash
 # Optimized defaults (fixed for reliability and performance)
-BATCH_SIZE=50              # Optimal batch size for most systems
+BATCH_SIZE=50              # Configurable batch size for cleanup operations
 PARALLEL=6                 # Optimal parallel processes for most systems  
 CACHE_MAX_AGE=14400        # 4-hour cache validity (in seconds)
+PROGRESS_REPORT_INTERVAL=50 # Report progress every 50 packages
 ```
 
 #### Cache Management:
 
-- **Version-Based Validation**: Cache automatically invalidates when repository metadata changes
+- **Shared Cache Directory**: Uses `/var/cache/myrepo` by default for root/user shared access
 - **Time-Based Fallback**: Cache expires after configurable time period (default: 4 hours)
 - **Force Refresh**: Use `--refresh-metadata` to force cache rebuild
 - **Intelligent Loading**: Only caches metadata for packages that are actually installed
 
-#### Benefits of v2.2.0 Optimizations:
+#### Benefits of v2.2.7 Optimizations:
 
 - **Predictable Performance**: Fixed optimal settings provide consistent results
 - **Reduced Complexity**: Simpler configuration with fewer variables to tune
 - **Better Reliability**: Eliminated complex adaptive logic that could cause unpredictable behavior
 - **Faster Startup**: Intelligent caching dramatically reduces initial metadata loading time
 - **Lower Resource Usage**: Optimized algorithms use less CPU and memory
-
-The adaptive tuning system is enabled by default with conservative settings that work well for most environments while providing room for optimization.
-
-### Configuration: Parallel Metadata Fetching
-
-- **REPOQUERY_PARALLEL**: Number of parallel jobs for repository metadata fetching (dnf repoquery). Default: 4. Increase for faster metadata updates if you have many enabled repositories and sufficient CPU/network resources. Lower if you experience resource contention. Set in `myrepo.cfg` as:
-
-  ```bash
-  REPOQUERY_PARALLEL=4
-  ```
-
-This parameter only affects the parallelism of metadata fetching, not the main package download or processing parallelism (see `PARALLEL` and `BATCH_SIZE`).
+- **Improved Error Handling**: Better recovery from DNF download failures
 
 ### Priority of Settings
 
@@ -464,84 +404,11 @@ sudo ./myrepo.sh --no-elevate
 echo "$(whoami) ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/myrepo-user
 ```
 
-#### Troubleshooting Permissions
-
-Common permission issues and solutions:
-
-1. **"LOCAL_REPO_PATH is not writable by current user"**
-   ```bash
-   sudo chown -R $(whoami):$(id -gn) /repo
-   ```
-
-2. **"Repository directory not writable"**
-   ```bash
-   chmod -R u+w /repo/repository_name
-   ```
-
-3. **"Cannot create files in LOCAL_REPO_PATH"**
-   - Check if filesystem is read-only
-   - Verify disk space availability
-   - Check SELinux contexts if applicable
-
-4. **"Repository synchronization may fail"**
-   - Fix SHARED_REPO_PATH permissions:
-   ```bash
-   sudo chown -R $(whoami):$(id -gn) /mnt/shared/repos
-   ```
-
-#### Debug Output
-
-Use `DEBUG_LEVEL=3` (verbose) to see detailed permission validation output:
-```bash
-./myrepo.sh --debug 3
-```
-
-This will show:
-- All permission checks being performed
-- Practical write test results
-- Detailed validation for each repository subdirectory
-- Permission error causes and suggested fixes
-
-#### Automatic Permission Fixing
-
-The `--set-permissions` option enables automatic fixing of permission issues when they are detected:
-
-```bash
-# Automatically fix permission issues during script execution
-./myrepo.sh --set-permissions
-
-# Combine with debug output to see what's being fixed
-./myrepo.sh --set-permissions --debug 2
-```
-
-**How it works:**
-- When permission issues are detected, the script attempts to fix them automatically
-- Uses `sudo chown` to set correct ownership and `chmod` to set write permissions
-- Only attempts fixes when the user has appropriate sudo privileges
-- Reports success or failure of permission fixes
-- Continues script execution after attempting fixes
-
-**Use cases:**
-- New repository setup where permissions haven't been configured yet
-- Environments where directory ownership changes (e.g., after system updates)
-- Troubleshooting permission issues without manual intervention
-- Automated deployment scenarios
-
-**Safety notes:**
-- Only modifies permissions on directories configured in the script
-- Requires sudo privileges to modify directory ownership
-- Will not attempt fixes if sudo access is not available
-
 ## Usage
 
 ### Prerequisites
 
-**Important**: The script requires sudo privileges in all modes. You must have sudo access to run DNF operations and manage repository directories.
-
-- **Default Mode**: Run script normally, it will use `sudo` internally when needed
-- **Direct Mode**: Run entire script as root with `sudo ./myrepo.sh --no-elevate`
-
-If you don't have sudo access, the script cannot function.
+**Important**: The script requires sudo privileges to run DNF operations and manage repository directories. You must have sudo access to run the script.
 
 ### Running `myrepo.sh`
 
@@ -556,43 +423,48 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 | Option               | Values                     | Default               | Description                                                   |
 |----------------------|----------------------------|------------------------|---------------------------------------------------------------|
-| `--batch-size`       | *INT*                      | `50`                  | Number of packages per batch.                                 |
+| `--batch-size`       | *INT*                      | `50`                  | Batch size for processing RPMs during cleanup operations.     |
 | `--cache-max-age`    | *INT*                      | `14400`               | Cache validity in seconds (14400 = 4 hours).                 |
+| `--shared-cache-path`| *PATH*                     | `/var/cache/myrepo`   | Shared cache directory path.                                  |
+| `--cleanup-uninstalled` | *(flag)*                | *on*                  | Enable cleanup of uninstalled packages.                      |
+| `--no-cleanup-uninstalled` | *(flag)*             | *off*                 | Disable cleanup of uninstalled packages.                     |
+| `--parallel-compression` | *(flag)*               | *on*                  | Enable parallel compression for createrepo.                  |
+| `--no-parallel-compression` | *(flag)*            | *off*                 | Disable parallel compression for createrepo.                 |
 | `--debug`            | *0‒3*                      | `1`                   | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose). |
 | `--dry-run`          | *(flag)*                   | *off*                 | Perform a dry run without making changes.                     |
 | `--exclude-repos`    | *CSV*                      | *empty*               | Comma-separated list of repos to exclude.                     |
 | `--full-rebuild`     | *(flag)*                   | *off*                 | Perform a full rebuild of the repository.                     |
 | `--local-repo-path`  | *PATH*                     | `/repo`               | Set local repository path.                                    |
-| `--log-dir`          | *PATH*                     | `/var/log/myrepo`     | Where to write log files (preserved for compatibility).       |
 | `--manual-repos`     | *CSV*                      | `ol9_edge`            | Comma‑separated list of manual repositories.                  |
 | `--max-packages`     | *INT*                      | `0`                   | Limit total number of packages processed (0 = no limit).      |
-| `--max-new-packages` | *INT*                      | `0`                   | Limit number of new packages to download (0 = no limit).      |
+| `--max-new-packages` | *INT*                      | `-1`                  | Limit number of new packages to download (-1 = no limit, 0 = none). |
 | `--name-filter`      | *REGEX*                    | *empty*               | Filter packages by name using regex pattern.                  |
 | `--parallel`         | *INT*                      | `6`                   | Maximum concurrent download or processing jobs.               |
 | `--repos`            | *CSV*                      | *all enabled*         | Comma-separated list of repositories to process.              |
-| `--set-permissions`  | *(flag)*                   | *off*                 | Automatically fix permission issues when detected.            |
 | `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
 | `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run sync to shared repos.         |
 | `--refresh-metadata` | *(flag)*                   | *off*                 | Force refresh of DNF metadata cache and rebuild repo cache.   |
 | `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
+| `-v, --verbose`      | *(flag)*                   | *off*                 | Set debug level to 2 (normal verbosity).                     |
+| `-h, --help`         | *(flag)*                   | *off*                 | Show help message and exit.                                   |
 
 #### Examples:
 
 ```bash
-# Basic usage with debugging and custom settings
-./myrepo.sh --debug 1 --batch-size 60 --repos ol9_edge,pgdg16 --local-repo-path /custom/repo
+# Basic usage with debugging
+./myrepo.sh --debug 2 --repos ol9_edge,ol9_appstream --local-repo-path /custom/repo
 
 # Process only Firefox packages from ol9_appstream repository
-./myrepo.sh --repos ol9_appstream --name-filter "firefox" --debug 1
+./myrepo.sh --repos ol9_appstream --name-filter "firefox" --debug 2
 
 # Process all NodeJS packages with dry-run to see what would happen
-./myrepo.sh --name-filter "nodejs" --dry-run --debug 1
+./myrepo.sh --name-filter "nodejs" --dry-run --debug 2
 
-# Test with limited packages and show cache performance
+# Test with limited packages and show performance
 ./myrepo.sh --max-packages 50 --dry-run --debug 2
 
-# Limit new package downloads to manage bandwidth/storage
-./myrepo.sh --max-new-packages 100 --debug 1
+# Limit new package downloads to manage bandwidth/storage  
+./myrepo.sh --max-new-packages 100 --debug 2
 
 # Use shorter cache validity for frequently changing repositories
 ./myrepo.sh --cache-max-age 3600 --debug 2  # 1 hour cache
@@ -601,25 +473,28 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh --sync-only
 
 # Full rebuild with verbose debugging
-./myrepo.sh --full-rebuild --debug 2
-
-# Direct mode for environments where script runs as root
-sudo ./myrepo.sh --no-elevate --local-repo-path /repo
+./myrepo.sh --full-rebuild --debug 3
 
 # Force metadata refresh before processing (clears cache)
-./myrepo.sh --refresh-metadata --debug 1
+./myrepo.sh --refresh-metadata --debug 2
 
 # Serial DNF mode for systems with database locking issues
-./myrepo.sh --dnf-serial --debug 1
+./myrepo.sh --dnf-serial --debug 2
 
-# Process specific repositories with custom parallel settings
-./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4 --batch-size 80
+# Process specific repositories with custom parallel settings and batch size
+./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4 --batch-size 100
 
-# Automatically fix permission issues when detected
-./myrepo.sh --set-permissions --debug 2
+# Use custom batch size for better performance on slower systems
+./myrepo.sh --batch-size 25 --debug 2
 
-# Direct mode with permission auto-fix (run as root)
-sudo ./myrepo.sh --no-elevate --set-permissions --local-repo-path /repo
+# Use shared cache path and enable cleanup
+./myrepo.sh --shared-cache-path /tmp/myrepo_cache --cleanup-uninstalled
+
+# Disable cleanup and use custom cache settings
+./myrepo.sh --no-cleanup-uninstalled --cache-max-age 7200
+
+# Run with parallel compression enabled (default behavior)
+./myrepo.sh --parallel-compression --debug 2
 ```
 
 ### How It Works
@@ -646,17 +521,14 @@ The script implements a sophisticated workflow that efficiently manages local pa
 
 - **Dry Run Mode**: Use the `--dry-run` option to simulate the script's actions without making any changes.
 - **Debugging**: Increase the `DEBUG_LEVEL` to get more detailed output, which can help in troubleshooting.
-- **Verbosity Control**: Adjust the `DEBUG_LEVEL` to control how much output is shown (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose).
-- **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDED_REPOS` to prevent unnecessary replication.
+- **Verbosity Control**: Adjust the `DEBUG_LEVEL` to control how much output is shown (0=critical, 1=important, 2=normal, 3=verbose).
+- **Repository Exclusion**: Ensure that unwanted repositories are listed in `EXCLUDE_REPOS` to prevent unnecessary replication.
 - **Efficient Filtering**: Use `--name-filter` combined with `--repos` for precise control over package processing and improved performance.
 - **Testing Filters**: Always test new name filter patterns with `--dry-run` first to verify they match the expected packages.
-- **Manual Repository Management**: Enable `AUTO_UPDATE_MANUAL_REPOS` and choose the appropriate `LOCAL_REPO_CHECK_METHOD` for environments with manual package deployment.
-- **Performance Tuning**: Let adaptive tuning optimize performance automatically, or disable it and manually tune `BATCH_SIZE` and `PARALLEL` for specific environments.
+- **Performance**: The script uses fixed optimal settings (batch size: 50, parallel: 6) for best performance.
 - **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
-- **Direct Mode**: Use `--no-elevate` when you prefer to run the entire script as root (`sudo ./myrepo.sh --no-elevate`) rather than letting the script use sudo internally.
-- **Permission Fixes**: Use `--set-permissions` to automatically fix directory permission issues when detected, useful for new setups or troubleshooting.
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
-- **Monitoring**: Check the performance statistics output to understand processing efficiency and identify potential bottlenecks.
+- **Cache Management**: The shared cache at `/var/cache/myrepo` provides optimal performance for both root and user executions.
 
 ## License
 
@@ -668,15 +540,7 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 
 ## Conclusion
 
-The `repo-handler` script provides a comprehensive and intelligent solution for managing local package repositories in isolated environments. With features like adaptive performance tuning, dual-tier metadata management, intelligent local repository change detection, and flexible filtering options, it offers both power and ease of use. The script automatically optimizes its performance while ensuring that your repositories remain current and contain only the necessary packages for your specific environment.
-
-The combination of configuration file support, extensive command-line options, and automatic optimization makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
-
-Feel free to submit issues or pull requests to improve the functionality or performance of the scripts.
-
-## Conclusion
-
-The `repo-handler` script provides a comprehensive and intelligent solution for managing local package repositories in isolated environments. With features like adaptive performance tuning, dual-tier metadata management, intelligent local repository change detection, and flexible filtering options, it offers both power and ease of use. The script automatically optimizes its performance while ensuring that your repositories remain current and contain only the necessary packages for your specific environment.
+The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. With features like intelligent caching, batch processing optimizations, and flexible filtering options, it offers both power and ease of use. The script automatically uses optimal performance settings while ensuring that your repositories remain current and contain only the necessary packages for your specific environment.
 
 The combination of configuration file support, extensive command-line options, and automatic optimization makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
 

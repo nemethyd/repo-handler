@@ -53,7 +53,8 @@ DNF_CACHE_TIMEOUT=${DNF_CACHE_TIMEOUT:-120}   # Timeout for DNF cache building o
 SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
 
 # Performance and monitoring configuration
-PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-500}  # Report progress every N packages
+BATCH_SIZE=${BATCH_SIZE:-50}                              # Batch size for processing RPMs (cleanup operations)
+PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-50}  # Report progress every N packages
 CONFIG_FILE_MAX_LINES=${CONFIG_FILE_MAX_LINES:-500}       # Maximum lines to read from config file
 MAX_PARALLEL_DOWNLOADS=${MAX_PARALLEL_DOWNLOADS:-8}       # DNF parallel downloads
 DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
@@ -710,7 +711,7 @@ function cleanup_uninstalled_packages() {
             fi
             
             # Process RPMs in batches for much better performance
-            local batch_size=50
+            local batch_size="$BATCH_SIZE"
             local rpms_to_remove=()
             
             for ((i=0; i<${#rpm_files_array[@]}; i+=batch_size)); do
@@ -1278,6 +1279,7 @@ function load_config() {
                 DNF_QUERY_TIMEOUT) DNF_QUERY_TIMEOUT="$value" ;;
                 DNF_CACHE_TIMEOUT) DNF_CACHE_TIMEOUT="$value" ;;
                 SUDO_TEST_TIMEOUT) SUDO_TEST_TIMEOUT="$value" ;;
+                BATCH_SIZE) BATCH_SIZE="$value" ;;
                 PROGRESS_REPORT_INTERVAL) PROGRESS_REPORT_INTERVAL="$value" ;;
                 CONFIG_FILE_MAX_LINES) CONFIG_FILE_MAX_LINES="$value" ;;
                 MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
@@ -1370,6 +1372,10 @@ function parse_args() {
     # Parse command-line options (overrides config file and defaults)
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --batch-size)
+                BATCH_SIZE="$2"
+                shift 2
+                ;;
             --cache-max-age)
                 CACHE_MAX_AGE="$2"
                 shift 2
@@ -1476,6 +1482,7 @@ function parse_args() {
             -h|--help)
                 echo "Usage: $0 [options]"
                 echo "Options:"
+                echo "  --batch-size INT       Batch size for processing RPMs (default: $BATCH_SIZE)"
                 echo "  --cache-max-age SEC    Cache validity in seconds (default: $CACHE_MAX_AGE = 4h)"
                 echo "  --shared-cache-path PATH Shared cache directory path (default: $SHARED_CACHE_PATH)"
                 echo "  --cleanup-uninstalled  Enable cleanup of uninstalled packages (default: enabled)"
