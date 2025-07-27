@@ -891,7 +891,7 @@ function cleanup_uninstalled_packages() {
                 if batch_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}|%{RELATIVEPATH}\n" "${batch_files[@]}" 2>/dev/null); then
                     
                     # Process the batch results
-                    while IFS='|' read -r pkg_name epoch version release arch relative_path; do
+                    while IFS='|' read -r pkg_name epoch version release arch _relative_path; do
                         # Skip empty lines
                         [[ -z "$pkg_name" ]] && continue
                         

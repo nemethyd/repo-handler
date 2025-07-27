@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.3)
+# Repo Handler Script (v2.3.5)
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with different AI support models  
 **AI flock**: ChatGPT, Claude, Gemini  
@@ -8,7 +8,7 @@
 
 The `repo-handler` project provides a high-performance bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
 
-**v2.3.3 Performance Optimizations**: This version features the complete five-optimization series including **Intelligent Repository Prioritization and Load Balancing**, achieving unprecedented speed improvements while maintaining all core functionality. The system learns repository performance characteristics and automatically optimizes download strategies for maximum efficiency.
+**v2.3.5 Performance Optimizations**: This version achieves maximum performance by removing complex adaptive features in favor of simple, reliable, fast operation. All major bottlenecks have been eliminated while preserving essential functionality and bug fixes, including proper progress update reporting and elimination of all hardcoded timeout values.
 
 ### Repository Architecture
 
@@ -127,7 +127,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.3
+# myrepo.cfg - Configuration file for myrepo.sh v2.3.5
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -162,8 +162,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # FULL_REBUILD=0
 
 # Define repositories that should be excluded from processing
-# Any packages from these repositories will not be mirrored or added to LOCAL_REPO_PATH
-# EXCLUDE_REPOS="copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly"
+# EXCLUDE_REPOS=""
 
 # Cache validity in seconds (default: 14400 = 4 hours)
 # CACHE_MAX_AGE=14400
@@ -186,18 +185,21 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Automatic privilege detection (1 = auto-detect, 0 = never use sudo)
 # ELEVATE_COMMANDS=1
 
-# === PERFORMANCE OPTIMIZATION 5: Repository Performance Tracking and Load Balancing ===
+# Progress update interval for download operations (in seconds, default: 30)
+# PROGRESS_UPDATE_INTERVAL=30
 
-# Repository performance cache file location (default: /var/cache/myrepo/repo_performance.cache)
-# REPO_PERF_CACHE_FILE="/var/cache/myrepo/repo_performance.cache"
+# Timeout settings (in seconds)
+# DNF_QUERY_TIMEOUT=60
+# DNF_CACHE_TIMEOUT=120
+# DNF_DOWNLOAD_TIMEOUT=1800
+# SUDO_TEST_TIMEOUT=10
 
-# Performance data validity in seconds (default: 86400 = 24 hours)
-# REPO_PERF_MAX_AGE=86400
-
-# Minimum download rate in KB/s to be considered "fast" (default: 50)
-# MIN_DOWNLOAD_RATE=50
-
-# Start load balancing when repositories have more than this many packages (default: 10)
+# Performance settings (optimized for speed)
+# SIMPLE_BATCH_SIZE=50
+# PROGRESS_REPORT_INTERVAL=50
+# MAX_PARALLEL_DOWNLOADS=8
+# DNF_RETRIES=2
+```
 # LOAD_BALANCE_THRESHOLD=10
 
 # Minimum adaptive batch size for slow repositories (default: 3)
@@ -214,77 +216,59 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # - Complex adaptive tuning settings (replaced with optimal defaults plus intelligent prioritization)
 ```
 
-### Performance Optimizations (v2.3.3)
+### Performance Optimizations (v2.3.5)
 
-This version completes the **five-optimization series** with the addition of **Intelligent Repository Prioritization and Load Balancing**, providing unprecedented performance improvements and adaptive learning capabilities.
-
-#### Complete Five-Optimization Series:
-
-1. **Repository Caching Optimization**: Intelligent metadata caching with 4-hour validity and shared access
-2. **Directory Pre-creation Optimization**: Pre-creates repository directories before downloads for faster processing  
-3. **Progress Reporting Optimization**: Real-time progress updates with performance metrics and ETA calculations
-4. **Smart Package Filtering**: Advanced deduplication and filtering with 2-second processing time
-5. **Intelligent Repository Prioritization and Load Balancing**: ⭐ **NEW in v2.3.3** ⭐
-
-#### NEW: Performance Optimization 5 - Intelligent Repository Prioritization and Load Balancing
-
-The fifth optimization introduces a sophisticated system that learns repository performance characteristics and automatically optimizes download strategies:
-
-**🧠 Performance Intelligence**:
-- Tracks download speeds (KB/s) per repository
-- Monitors success rates and optimal batch sizes
-- Builds performance cache for future runs
-- Establishes baseline metrics during first run
-
-**⚖️ Load Balancing**:
-- Automatically activates for repositories with >10 packages (configurable)
-- Distributes downloads across multiple repositories efficiently  
-- Prevents overwhelming single repositories with large batch requests
-- Small delays between batches for optimal throughput
-
-**🎯 Adaptive Batch Sizing**:
-- Dynamically adjusts batch sizes (3-20 packages) based on repository performance
-- Fast repositories (>150 KB/s): Large batches (20 packages)
-- Medium repositories (50-150 KB/s): Medium batches (11 packages)
-- Slow repositories (<50 KB/s): Small batches (3 packages)
-- Success rate adjustments for problematic repositories
-
-**🏆 Priority-Based Downloads**:
-- Calculates priority scores combining speed and success rate factors
-- Downloads from fastest, most reliable repositories first
-- Optimizes overall download time and success rate
-- Repository priority scores: (speed_factor × 10) + (success_factor × 5)
-
-**💾 Performance Cache Persistence**:
-- Saves performance data to `/var/cache/myrepo/repo_performance.cache`
-- 24-hour cache validity (configurable)
-- Shared between root and user modes
-- Gets faster with each run as it learns your environment
+This version focuses on **maximum performance through simplification**, removing complex adaptive features that were causing overhead while preserving all essential functionality.
 
 #### Key Performance Improvements:
 
-- **Intelligent Caching System**: Repository metadata cached with version-based invalidation
-- **Adaptive Batch Processing**: Performance-based batch downloads with load balancing
-- **Cache Hits**: Up to 95% performance improvement when cache is valid
-- **Learning System**: Performance improves over time as system learns repository characteristics
-- **Epoch Handling Fix**: Resolved download failures for packages with epoch information
-- **50x Faster Cleanup**: Batch processing for package removal operations
+1. **Fixed Progress Updates**: Resolved missing progress reports with configurable `PROGRESS_UPDATE_INTERVAL`
+2. **Eliminated Hardcoded Values**: All magic numbers replaced with configurable variables
+3. **Optimized Package Cleanup**: 20-50x faster cleanup with batch processing and hash table lookups
+4. **Simplified Batch Processing**: Removed complex load balancing for consistent high performance
+5. **Enhanced Error Handling**: Better timeout management and fallback mechanisms
+
+#### Performance Features:
+
+**🚀 Speed Optimizations**:
+- Simple fixed batch processing (SIMPLE_BATCH_SIZE=50) for optimal performance
+- Hash table lookups for O(1) package searches instead of O(n) linear searches
+- Batch RPM metadata extraction to reduce subprocess overhead
+- Optimized DNF queries with intelligent caching
+
+**📊 Progress Monitoring**:
+- Configurable progress update intervals (PROGRESS_UPDATE_INTERVAL=30s)
+- Real-time download progress with performance metrics
+- Background progress monitors for large operations
+- Detailed timing information for all operations
+
+**🧹 Cleanup Performance**:
+- Major performance improvement: 20-50x faster package cleanup
+- Batch file operations to minimize filesystem overhead
+- Early exit optimizations for empty repositories
+- Progress reporting for large cleanup operations
 
 #### Performance Settings:
 
 ```bash
-# Core performance settings (optimal defaults)
-BATCH_SIZE=50                    # Batch size for cleanup operations
-PARALLEL=6                       # Optimal parallel processes
-CACHE_MAX_AGE=14400             # 4-hour metadata cache validity
-PROGRESS_REPORT_INTERVAL=50      # Progress reports every 50 packages
+# Core performance settings (optimal fixed values)
+SIMPLE_BATCH_SIZE=50            # Fixed optimal batch size for all operations
+PARALLEL=6                      # Optimal parallel processes
+CACHE_MAX_AGE=14400            # 4-hour metadata cache validity
+PROGRESS_UPDATE_INTERVAL=30     # Progress update frequency (seconds)
+PROGRESS_REPORT_INTERVAL=50     # Report progress every N packages
 
-# NEW: Intelligent Repository Performance Settings
-REPO_PERF_MAX_AGE=86400         # 24-hour performance cache validity
-MIN_DOWNLOAD_RATE=50            # 50 KB/s threshold for "fast" repositories
-LOAD_BALANCE_THRESHOLD=10       # Activate load balancing after 10 packages per repo
-ADAPTIVE_BATCH_SIZE_MIN=3       # Minimum batch size for slow repos
-ADAPTIVE_BATCH_SIZE_MAX=20      # Maximum batch size for fast repos
+# Timeout configuration (all configurable, no hardcoded values)
+DNF_QUERY_TIMEOUT=60           # Basic DNF query timeout
+DNF_CACHE_TIMEOUT=120          # Cache building timeout  
+DNF_DOWNLOAD_TIMEOUT=1800      # Download operation timeout (30 minutes)
+SUDO_TEST_TIMEOUT=10           # Sudo verification timeout
+
+# Performance thresholds (eliminates all magic numbers)
+LARGE_BATCH_THRESHOLD=200      # Threshold for enhanced progress reporting
+PROGRESS_BATCH_THRESHOLD=50    # Threshold for periodic progress updates
+PACKAGE_LIST_THRESHOLD=100     # Threshold for package list display
+ETA_DISPLAY_THRESHOLD=60       # ETA display threshold in seconds
 ```
 
 ### Log Level Control
@@ -325,7 +309,7 @@ You can also set it via command line using `--debug LEVEL`.
 
 ### Repository Exclusion Feature
 
-Some repositories may contain packages installed on the golden-copy machine but are **not intended to be mirrored**. The `EXCLUDED_REPOS` setting ensures that these repositories are:
+Some repositories may contain packages installed on the golden-copy machine but are **not intended to be mirrored**. The `EXCLUDE_REPOS` setting ensures that these repositories are:
 
 1. **Skipped during processing** (packages from these repositories will not be added to the local repo).
 2. **Removed from the local repository path if already present**.
@@ -401,14 +385,10 @@ The script requires proper write access to all configured directory paths. Direc
    - Write access required for synchronization
    - Missing access generates warnings but doesn't stop execution
 
-3. **LOG_DIR** (Auto-created)
-   - Directory for log files
+3. **SHARED_CACHE_PATH** (Auto-created)
+   - Directory for shared cache files
    - Created automatically if missing
-   - Must be writable for log output
-
-4. **RPMBUILD_PATH** (Optional)
-   - RPM build directory
-   - Validated but write access not strictly required
+   - Must be writable for cache operations
 
 #### Permission Validation
 
