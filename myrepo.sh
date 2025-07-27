@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.3.0"
+VERSION="2.3.1"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -73,7 +73,7 @@ declare -a REPOSITORIES=(
 )
 
 # Formatting constants (matching original script)
-PADDING_LENGTH=28
+PADDING_LENGTH=30  # Default padding length for repository names
 
 # Summary table formatting constants
 TABLE_REPO_WIDTH=$PADDING_LENGTH  # Repository name column width
@@ -86,6 +86,10 @@ TABLE_STATUS_WIDTH=8              # Status column width
 declare -A stats_new_count
 declare -A stats_update_count  
 declare -A stats_exists_count
+
+# Failed downloads tracking arrays
+declare -A failed_downloads
+declare -A failed_download_reasons
 
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
@@ -205,7 +209,10 @@ function batch_download_packages() {
                         ((success_count++))
                         [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ $pkg"
                     else
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ $pkg"
+                        # Track failed download with detailed reason
+                        failed_downloads["$pkg"]="$repo_name"
+                        failed_download_reasons["$pkg"]="DNF download failed (package not available, network issue, or repository access denied)"
+                        [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   ✗ Failed: $pkg"
                     fi
                 done
                 log "I" "   Fallback result: $success_count/$total_count packages downloaded"
@@ -511,13 +518,33 @@ function build_repo_cache() {
         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
         if dnf_result=$(timeout "$DNF_CACHE_TIMEOUT" ${dnf_cmd} repoquery -y --disablerepo="*" --enablerepo="$repo" \
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
-            "${package_list[@]}" 2>&1) && echo "$dnf_result" > "$cache_file.tmp"; then
-            mv "$cache_file.tmp" "$cache_file"
+            "${package_list[@]}" 2>&1); then
             
-            # Set proper permissions for shared cache files
-            chmod 644 "$cache_file" 2>/dev/null || true
-            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            # Write directly to cache file, handling permissions properly
+            if echo "$dnf_result" > "$cache_file" 2>/dev/null; then
+                # Successfully wrote as current user
+                chmod 644 "$cache_file" 2>/dev/null || true
+            elif [[ $ELEVATE_COMMANDS -eq 1 ]] && echo "$dnf_result" | sudo tee "$cache_file" >/dev/null 2>&1; then
+                # Write with sudo and set proper permissions
                 sudo chmod 644 "$cache_file" 2>/dev/null || true
+            else
+                # Fallback: write to temp file with unique name and try to move
+                local temp_file="$cache_file.tmp.$$"
+                if echo "$dnf_result" > "$temp_file" 2>/dev/null; then
+                    if mv "$temp_file" "$cache_file" 2>/dev/null; then
+                        chmod 644 "$cache_file" 2>/dev/null || true
+                    elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo mv "$temp_file" "$cache_file" 2>/dev/null; then
+                        sudo chmod 644 "$cache_file" 2>/dev/null || true
+                    else
+                        # Clean up temp file if all attempts failed
+                        rm -f "$temp_file" 2>/dev/null || true
+                        log "W" "Failed to write cache file: $cache_file"
+                        continue
+                    fi
+                else
+                    log "W" "Failed to create temp cache file for: $repo"
+                    continue
+                fi
             fi
             
             local package_count
@@ -531,7 +558,6 @@ function build_repo_cache() {
         else
             log "W" "⚠️  Failed to cache metadata for repository: $repo"
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Error: $dnf_result"
-            rm -f "$cache_file.tmp"
         fi
     done <<< "$enabled_repos"
     
@@ -1582,13 +1608,13 @@ function process_packages() {
     done <<< "$enabled_repos_list"
     
     log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
-    [[ $DEBUG_LEVEL -ge 1 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
     
     # PERFORMANCE OPTIMIZATION 2: Pre-create all repository directories upfront
     log "I" "📁 Pre-creating repository directories for performance..."
     local created_dirs=0
     local unique_repos
-    unique_repos=$(echo "$package_list" | cut -d'|' -f6 | sort -u)
+    unique_repos=$(printf '%s\n' "$package_list" | cut -d'|' -f6 | sort -u)
     
     while IFS= read -r repo_name; do
         [[ -z "$repo_name" ]] && continue
@@ -1676,10 +1702,12 @@ function process_packages() {
         # Only increment processed_packages AFTER all filtering is done
         ((processed_packages++))
         
-        # Progress reporting every N packages (configurable for better speed)
+        # Progress reporting every N packages (OPTIMIZATION 3: Improved progress with ETA)
         if (( processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
             local elapsed=$(($(date +%s) - start_time))
             local rate_display=""
+            local eta_display=""
+            
             if [[ $elapsed -gt 0 ]]; then
                 # Use awk for decimal precision in rate calculation
                 local rate_decimal
@@ -1692,10 +1720,28 @@ function process_packages() {
                     sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
                     rate_display="${sec_per_pkg} sec/pkg"
                 fi
+                
+                # Calculate ETA for remaining packages
+                local remaining_packages=$((total_packages - processed_packages))
+                if [[ $remaining_packages -gt 0 ]]; then
+                    local eta_seconds
+                    eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining_packages / ($processed_packages / $elapsed)}")
+                    if [[ $eta_seconds -gt 60 ]]; then
+                        local eta_minutes=$((eta_seconds / 60))
+                        eta_display=" - ETA: ${eta_minutes}m"
+                    else
+                        eta_display=" - ETA: ${eta_seconds}s"
+                    fi
+                fi
             else
                 rate_display="calculating..."
             fi
-            echo -e "\e[36m⏱️  Progress: $processed_packages/$total_packages packages ($rate_display)\e[0m"
+            
+            # Show processing statistics
+            local progress_percent
+            progress_percent=$(awk "BEGIN {printf \"%.1f\", ($processed_packages * 100) / $total_packages}")
+            echo -e "\e[36m⏱️  Progress: $processed_packages/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
+            echo -e "\e[36m   📊 Stats: \e[33m$new_count new\e[0m, \e[36m$update_count updates\e[0m, \e[32m$exists_count existing\e[0m"
         fi
         
         # Normalize epoch
@@ -1914,23 +1960,25 @@ function process_packages() {
         local batch_end_time
         local batch_duration
         batch_start_time=$(date +%s)
-        printf '%s\n' "${new_packages[@]}" | batch_download_packages
+        # Use here-document to avoid subshell issue with pipeline
+        batch_download_packages <<< "$(printf '%s\n' "${new_packages[@]}")"
         batch_end_time=$(date +%s)
         batch_duration=$((batch_end_time - batch_start_time))
-        echo -e "\e[32m✅ New packages download completed in ${batch_duration}s ($(date '+%H:%M:%S'))\e[0m"
+        log "I" "✅ New packages download completed in ${batch_duration}s"
     fi
     
     # Third pass: batch download all UPDATE packages
     if [[ ${#update_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        echo -e "\e[36m🔄 Batch downloading ${#update_packages[@]} updated packages... ($(date '+%H:%M:%S'))\e[0m"
+        log "I" "🔄 Batch downloading ${#update_packages[@]} updated packages..."
         local batch_start_time
         local batch_end_time
         local batch_duration
         batch_start_time=$(date +%s)
-        printf '%s\n' "${update_packages[@]}" | batch_download_packages
+        # Use here-document to avoid subshell issue with pipeline
+        batch_download_packages <<< "$(printf '%s\n' "${update_packages[@]}")"
         batch_end_time=$(date +%s)
         batch_duration=$((batch_end_time - batch_start_time))
-        echo -e "\e[32m✅ Updated packages download completed in ${batch_duration}s ($(date '+%H:%M:%S'))\e[0m"
+        log "I" "✅ Updated packages download completed in ${batch_duration}s"
     fi
     
     # Final statistics with colors
@@ -1978,6 +2026,52 @@ function process_packages() {
     
     # Update metadata for manual repositories if they have changes
     update_manual_repository_metadata
+}
+
+# Report failed downloads at the end of script execution
+function report_failed_downloads() {
+    # Debug: Show array sizes
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Failed downloads array size: ${#failed_downloads[@]}"
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Failed download reasons array size: ${#failed_download_reasons[@]}"
+    
+    # Skip if no failures recorded
+    if [[ ${#failed_downloads[@]} -eq 0 ]]; then
+        log "I" "✅ All package downloads were successful - no failures to report"
+        return 0
+    fi
+    
+    echo
+    echo -e "\e[31m═══════════════════════════════════════════════════════════════\e[0m"
+    echo -e "\e[31m⚠️  FAILED DOWNLOADS REPORT\e[0m"
+    echo -e "\e[31m═══════════════════════════════════════════════════════════════\e[0m"
+    
+    local total_failures=0
+    
+    # Group failures by repository for better organization
+    declare -A repo_failures
+    for package_key in "${!failed_downloads[@]}"; do
+        local repo_name="${failed_downloads[$package_key]}"
+        repo_failures["$repo_name"]+="$package_key "
+        ((total_failures++))
+    done
+    
+    # Report failures by repository
+    for repo_name in $(printf '%s\n' "${!repo_failures[@]}" | sort); do
+        echo -e "\e[33m📦 Repository: $repo_name\e[0m"
+        
+        # Process each failed package in this repository
+        local packages="${repo_failures[$repo_name]}"
+        for package_key in $packages; do
+            local reason="${failed_download_reasons[$package_key]:-Unknown error}"
+            echo -e "\e[31m   ✗ $package_key\e[0m"
+            echo -e "\e[37m     Reason: $reason\e[0m"
+        done
+        echo
+    done
+    
+    echo -e "\e[31m📊 Total failed downloads: $total_failures packages\e[0m"
+    echo -e "\e[36m💡 Tip: Check if these packages are available in enabled repositories or if network connectivity is working.\e[0m"
+    echo -e "\e[31m═══════════════════════════════════════════════════════════════\e[0m"
 }
 
 # Check if package should be processed based on name filter
@@ -2397,7 +2491,7 @@ function validate_repository_structure() {
 
 ### Main execution section ###
 load_config
-parse_args "$@"
+parse_args "$@" 
 check_command_elevation
 validate_repository_structure
 show_runtime_status
@@ -2407,5 +2501,6 @@ cleanup_old_cache_directories
 build_repo_cache
 process_packages
 sync_to_shared_repos
+report_failed_downloads
 
 log "I" "Script completed successfully"
