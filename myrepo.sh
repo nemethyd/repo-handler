@@ -1623,11 +1623,23 @@ function process_packages() {
         # Progress reporting every N packages (configurable for better speed)
         if (( processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
             local elapsed=$(($(date +%s) - start_time))
-            local rate=0
+            local rate_display=""
             if [[ $elapsed -gt 0 ]]; then
-                rate=$((processed_packages / elapsed))
+                # Use awk for decimal precision in rate calculation
+                local rate_decimal
+                rate_decimal=$(awk "BEGIN {printf \"%.1f\", $processed_packages / $elapsed}")
+                if (( $(awk "BEGIN {print ($processed_packages / $elapsed >= 1)}") )); then
+                    rate_display="${rate_decimal} pkg/sec"
+                else
+                    # Show seconds per package when rate is less than 1 pkg/sec
+                    local sec_per_pkg
+                    sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+                    rate_display="${sec_per_pkg} sec/pkg"
+                fi
+            else
+                rate_display="calculating..."
             fi
-            echo -e "\e[36m⏱️  Progress: $processed_packages/$total_packages packages ($rate pkg/sec)\e[0m"
+            echo -e "\e[36m⏱️  Progress: $processed_packages/$total_packages packages ($rate_display)\e[0m"
         fi
         
         # Normalize epoch
@@ -1875,15 +1887,27 @@ function process_packages() {
     
     # Final statistics with colors
     local elapsed=$(($(date +%s) - start_time))
-    local rate=0
+    local rate_display=""
     if [[ $elapsed -gt 0 ]]; then
-        rate=$((processed_packages / elapsed))
+        # Use awk for decimal precision in rate calculation
+        local rate_decimal
+        rate_decimal=$(awk "BEGIN {printf \"%.1f\", $processed_packages / $elapsed}")
+        if (( $(awk "BEGIN {print ($processed_packages / $elapsed >= 1)}") )); then
+            rate_display="${rate_decimal} pkg/sec"
+        else
+            # Show seconds per package when rate is less than 1 pkg/sec
+            local sec_per_pkg
+            sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+            rate_display="${sec_per_pkg} sec/pkg"
+        fi
+    else
+        rate_display="N/A"
     fi
     
     echo
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     echo -e "\e[32m✓ Processing completed in ${elapsed}s\e[0m"
-    echo -e "\e[36m  Processed: $processed_packages packages at $rate pkg/sec\e[0m"
+    echo -e "\e[36m  Processed: $processed_packages packages at $rate_display\e[0m"
     echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     
