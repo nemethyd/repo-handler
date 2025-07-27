@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.3.1"
+VERSION="2.3.2"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -1609,45 +1609,11 @@ function process_packages() {
     
     log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
     [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
-    
-    # PERFORMANCE OPTIMIZATION 2: Pre-create all repository directories upfront
-    log "I" "📁 Pre-creating repository directories for performance..."
-    local created_dirs=0
-    local unique_repos
-    unique_repos=$(printf '%s\n' "$package_list" | cut -d'|' -f6 | sort -u)
-    
-    while IFS= read -r repo_name; do
-        [[ -z "$repo_name" ]] && continue
-        local repo_path
-        repo_path=$(get_repo_path "$repo_name")
-        
-        # Skip invalid repository paths
-        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            continue
-        fi
-        
-        # Create directory if it doesn't exist
-        if [[ ! -d "$repo_path" ]]; then
-            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                if sudo mkdir -p "$repo_path" 2>/dev/null; then
-                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
-                    sudo chmod 755 "$repo_path" 2>/dev/null || true
-                    ((created_dirs++))
-                fi
-            else
-                if mkdir -p "$repo_path" 2>/dev/null; then
-                    ((created_dirs++))
-                fi
-            fi
-        fi
-    done <<< "$unique_repos"
-    
-    log "I" "✓ Pre-created $created_dirs repository directories"
-    
+
     # Show legend for status markers
     echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
     echo
-    
+
     # Get installed packages using dnf (like original script) - this includes repo info!
     echo -e "\e[33m📦 Getting list of installed packages with repository information...\e[0m"
     local package_list
@@ -1678,6 +1644,145 @@ function process_packages() {
     echo -e "\e[32m✓ Found $total_packages installed packages\e[0m"
     echo
     
+    # PERFORMANCE OPTIMIZATION 4: Smart Package Filtering and Deduplication
+    log "I" "🔍 Applying smart package filtering and deduplication..."
+    local filter_start_time
+    filter_start_time=$(date +%s)
+    
+    # Pre-filter the package list for optimal processing
+    local filtered_packages
+    local duplicates_removed=0
+    local invalid_skipped=0
+    local filtered_count=0
+    
+    # Create temporary files for processing
+    local temp_raw
+    local temp_filtered
+    local temp_sorted
+    temp_raw=$(mktemp)
+    temp_filtered=$(mktemp)
+    temp_sorted=$(mktemp)
+    
+    # Write package list to temp file for processing
+    echo "$package_list" > "$temp_raw"
+    
+    # Step 1: Remove packages with invalid/problematic repository names
+    while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+        # Skip invalid repository names early
+        if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" || -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+            ((invalid_skipped++))
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Skipped invalid repo: $package_name ($repo_name)"
+            continue
+        fi
+        
+        # Normalize epoch for consistent processing
+        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+        
+        echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_filtered"
+        ((filtered_count++))
+    done < "$temp_raw"
+    
+    # Step 2: Sort packages for optimal processing order (by repo, then name, then version)
+    # This groups packages by repository for better batch processing efficiency
+    sort -t'|' -k6,6 -k1,1 -k3,3V "$temp_filtered" > "$temp_sorted"
+    
+    # Step 3: Remove exact duplicates (same package-version-arch combination)
+    local temp_deduped
+    temp_deduped=$(mktemp)
+    local previous_line=""
+    
+    while IFS= read -r line; do
+        if [[ "$line" != "$previous_line" ]]; then
+            echo "$line" >> "$temp_deduped"
+            previous_line="$line"
+        else
+            ((duplicates_removed++))
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Removed duplicate: $line"
+        fi
+    done < "$temp_sorted"
+    
+    # Step 4: Apply name filter if specified (do this after deduplication for efficiency)
+    if [[ -n "$NAME_FILTER" ]]; then
+        local temp_name_filtered
+        temp_name_filtered=$(mktemp)
+        local name_filtered_count=0
+        
+        while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+            if [[ "$package_name" == *"$NAME_FILTER"* ]]; then
+                echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_name_filtered"
+                ((name_filtered_count++))
+            fi
+        done < "$temp_deduped"
+        
+        # Use name-filtered list
+        filtered_packages=$(cat "$temp_name_filtered")
+        rm -f "$temp_name_filtered"
+        log "I" "📝 Applied name filter '$NAME_FILTER': $name_filtered_count packages match"
+    else
+        # Use deduplicated list
+        filtered_packages=$(cat "$temp_deduped")
+    fi
+    
+    # Clean up temporary files
+    rm -f "$temp_raw" "$temp_filtered" "$temp_sorted" "$temp_deduped"
+    
+    # Update counts and show optimization results
+    local final_count
+    final_count=$(echo "$filtered_packages" | wc -l)
+    local filter_end_time
+    local filter_duration
+    filter_end_time=$(date +%s)
+    filter_duration=$((filter_end_time - filter_start_time))
+    
+    local packages_saved=$((total_packages - final_count))
+    
+    log "I" "✅ Smart filtering completed in ${filter_duration}s:"
+    [[ $invalid_skipped -gt 0 ]] && log "I" "   📋 Skipped $invalid_skipped packages with invalid repositories"
+    [[ $duplicates_removed -gt 0 ]] && log "I" "   🔄 Removed $duplicates_removed duplicate packages"
+    if [[ $packages_saved -gt 0 ]]; then
+        local efficiency_gain
+        efficiency_gain=$(awk "BEGIN {printf \"%.1f\", ($packages_saved * 100.0) / $total_packages}")
+        log "I" "   ⚡ Processing efficiency improved by ${efficiency_gain}% ($packages_saved fewer packages to process)"
+    fi
+    log "I" "   📦 Processing $final_count optimized packages"
+    
+    # Update total packages count for accurate progress reporting
+    total_packages=$final_count
+    
+    # PERFORMANCE OPTIMIZATION 2: Pre-create all repository directories upfront
+    log "I" "📁 Pre-creating repository directories for performance..."
+    local created_dirs=0
+    local unique_repos
+    unique_repos=$(printf '%s\n' "$filtered_packages" | cut -d'|' -f6 | sort -u)
+    
+    while IFS= read -r repo_name; do
+        [[ -z "$repo_name" ]] && continue
+        local repo_path
+        repo_path=$(get_repo_path "$repo_name")
+        
+        # Skip invalid repository paths
+        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
+            continue
+        fi
+        
+        # Create directory if it doesn't exist
+        if [[ ! -d "$repo_path" ]]; then
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                if sudo mkdir -p "$repo_path" 2>/dev/null; then
+                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                    sudo chmod 755 "$repo_path" 2>/dev/null || true
+                    ((created_dirs++))
+                fi
+            else
+                if mkdir -p "$repo_path" 2>/dev/null; then
+                    ((created_dirs++))
+                fi
+            fi
+        fi
+    done <<< "$unique_repos"
+    
+    log "I" "✓ Pre-created $created_dirs repository directories"
+
     # Start processing
     local start_time
     start_time=$(date +%s)
@@ -1951,7 +2056,7 @@ function process_packages() {
                 ;;
         esac
         
-    done <<< "$package_list"
+    done <<< "$filtered_packages"
     
     # Second pass: batch download all NEW packages
     if [[ ${#new_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
