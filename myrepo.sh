@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.5"
+VERSION="2.2.6"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -24,7 +24,7 @@ LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
 MAX_PACKAGES=${MAX_PACKAGES:-0}
-MAX_NEW_PACKAGES=${MAX_NEW_PACKAGES:-0}
+MAX_NEW_PACKAGES=${MAX_NEW_PACKAGES:--1}
 SYNC_ONLY=${SYNC_ONLY:-0}
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
@@ -59,6 +59,17 @@ MAX_PARALLEL_DOWNLOADS=${MAX_PARALLEL_DOWNLOADS:-8}       # DNF parallel downloa
 DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
 DEBUG_FILE_LIST_THRESHOLD=${DEBUG_FILE_LIST_THRESHOLD:-10} # Show file list if repo has fewer RPMs than this
 DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to show in debug list
+
+# Common Oracle Linux 9 repositories (for fallback repository detection)
+declare -a REPOSITORIES=(
+    "ol9_baseos_latest"
+    "ol9_appstream"
+    "ol9_codeready_builder"
+    "ol9_developer_EPEL"
+    "ol9_developer"
+    "ol9_oraclelinux_developer_EPEL"
+    "ol9_edge"
+)
 
 # Formatting constants (matching original script)
 PADDING_LENGTH=28
@@ -1460,7 +1471,7 @@ function parse_args() {
                 echo "  --log-dir PATH         Log directory (default: $LOG_DIR)"
                 echo "  --manual-repos LIST    Comma-separated list of manual repositories"
                 echo "  --max-packages INT     Maximum packages to process total (includes existing, new, and updates - 0=unlimited)"
-                echo "  --max-new-packages INT Maximum new packages to download only (limits [N] packages - 0=unlimited)"
+                echo "  --max-new-packages INT Maximum new packages to download only (limits [N] packages - 0=none, -1=unlimited)"
                 echo "  --name-filter REGEX    Process only packages matching regex"
                 echo "  --parallel INT         Number of parallel operations (default: $PARALLEL)"
                 echo "  --repos LIST           Process only specified repositories"
@@ -1559,13 +1570,11 @@ function process_packages() {
     echo -e "\e[32m✓ Found $total_packages installed packages\e[0m"
     echo
     
-    # First pass: analyze what needs to be done (fast)
+    # Start processing
     local start_time
     start_time=$(date +%s)
     
     while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
-        ((processed_packages++))
-        
         # Skip if we've hit the package limit
         if [[ $MAX_PACKAGES -gt 0 && $processed_packages -gt $MAX_PACKAGES ]]; then
             echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping\e[0m"
@@ -1581,6 +1590,9 @@ function process_packages() {
         if ! should_process_repo "$repo_name"; then
             continue
         fi
+        
+        # Only increment processed_packages AFTER all filtering is done
+        ((processed_packages++))
         
         # Progress reporting every N packages (configurable for better speed)
         if (( processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
@@ -1663,17 +1675,17 @@ function process_packages() {
         
         # Additional validation to prevent empty repo names that could cause getPackage under LOCAL_REPO_PATH
         if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
-            log "W" "Invalid repository name detected for package $package_name: '$repo_name'"
-            log "W" "This could cause creation of invalid getPackage directory - skipping package"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository name detected for package $package_name: '$repo_name' - skipping"
             continue
         fi
         
+        # Ensure repository directory exists for each package
         local repo_path
         repo_path=$(get_repo_path "$repo_name")
         
         # Additional safety check - ensure repo_path is valid
         if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
             continue
         fi
         
@@ -1687,7 +1699,7 @@ function process_packages() {
             mkdir -p "$repo_path" 2>/dev/null
         fi
         
-        # Get package status using our simple, reliable method
+        # Get package status using simple, reliable method
         local status
         status=$(get_package_status "$package_name" "$package_version" "$package_release" "$package_arch" "$repo_path")
         
@@ -1704,13 +1716,13 @@ function process_packages() {
                 echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    # First, try to find a local copy before adding to download batch
+                    # Try to find local RPM first
                     local rpm_path
                     rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
                         # Found local copy of the updated package - use it instead of downloading
-                        echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
                         [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
                         
                         # Remove old version(s) first
@@ -1728,18 +1740,16 @@ function process_packages() {
                         # Copy the local RPM to the repository
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                             if sudo cp "$rpm_path" "$repo_path/"; then
-                                echo -e "\e[32m   ✓ Updated from local source\e[0m"
+                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                # Add to update batch for download fallback
                                 update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                             fi
                         else
                             if cp "$rpm_path" "$repo_path/"; then
-                                echo -e "\e[32m   ✓ Updated from local source\e[0m"
+                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                # Add to update batch for download fallback
                                 update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                             fi
                         fi
@@ -1751,9 +1761,18 @@ function process_packages() {
                 ;;
             "NEW")
                 # Check if we've hit the MAX_NEW_PACKAGES limit BEFORE processing
-                if [[ $DRY_RUN -eq 0 && $MAX_NEW_PACKAGES -gt 0 && $new_packages_found -ge $MAX_NEW_PACKAGES ]]; then
-                    echo -e "\e[33m🔢 Reached new packages limit ($MAX_NEW_PACKAGES), stopping\e[0m"
-                    break
+                # NEW LOGIC: 0 = no new packages, -1 = unlimited, >0 = specific limit
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    if [[ $MAX_NEW_PACKAGES -eq 0 ]]; then
+                        # 0 means no new packages allowed
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_NEW_PACKAGES=0): $package_name\e[0m"
+                        continue
+                    elif [[ $MAX_NEW_PACKAGES -gt 0 && $new_packages_found -ge $MAX_NEW_PACKAGES ]]; then
+                        # Positive number means specific limit reached
+                        echo -e "\e[33m🔢 Reached new packages limit ($MAX_NEW_PACKAGES), stopping\e[0m"
+                        break
+                    fi
+                    # -1 or any negative number means unlimited (no limit check needed)
                 fi
                 
                 # Process the new package
@@ -1764,30 +1783,28 @@ function process_packages() {
                 if [[ $DRY_RUN -eq 0 ]]; then
                     ((new_packages_found++))
                     
-                    # First, try to find a local copy before adding to download batch
+                    # Try to find local RPM first
                     local rpm_path
                     rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
                         # Found local copy - use it instead of downloading
-                        echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"
                         [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
                         
                         # Copy the local RPM to the repository
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                             if sudo cp "$rpm_path" "$repo_path/"; then
-                                echo -e "\e[32m   ✓ Copied from local source\e[0m"
+                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                # Add to new batch for download fallback
                                 new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                             fi
                         else
                             if cp "$rpm_path" "$repo_path/"; then
-                                echo -e "\e[32m   ✓ Copied from local source\e[0m"
+                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                # Add to new batch for download fallback
                                 new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                             fi
                         fi
@@ -2241,9 +2258,13 @@ function validate_and_handle_modes() {
         log "I" "Package limit: $MAX_PACKAGES packages"
     fi
 
-    if [[ $MAX_NEW_PACKAGES -gt 0 ]]; then
+    # Show new package limit with new logic: 0=none, -1=unlimited, >0=specific limit
+    if [[ $MAX_NEW_PACKAGES -eq 0 ]]; then
+        log "I" "New packages limit: No new packages allowed"
+    elif [[ $MAX_NEW_PACKAGES -gt 0 ]]; then
         log "I" "New packages limit: $MAX_NEW_PACKAGES packages"
     fi
+    # -1 or negative means unlimited, no message needed
 }
 
 # Validate repository structure and detect common issues
