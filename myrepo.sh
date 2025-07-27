@@ -19,7 +19,7 @@ VERSION="2.3.6"
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-MANUAL_REPOS=("ol9_edge")
+MANUAL_REPOS=()  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
@@ -83,7 +83,6 @@ declare -a REPOSITORIES=(
     "ol9_codeready_builder"
     "ol9_developer_EPEL"
     "ol9_developer"
-    "ol9_oraclelinux_developer_EPEL"
     "ol9_edge"
 )
 
@@ -125,6 +124,12 @@ function batch_download_packages() {
     
     # Group packages by repository for batch downloading (simple grouping)
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
+        # Skip manual repositories - they are for locally managed packages, not downloads
+        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
+            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)\e[0m"
+            continue
+        fi
+        
         local repo_path
         repo_path=$(get_repo_path "$repo_name")
         
@@ -2001,7 +2006,7 @@ function process_packages() {
     log "I" "📁 Pre-creating repository directories for performance..."
     local created_dirs=0
     local unique_repos
-    unique_repos=$(printf '%s\n' "$filtered_packages" | cut -d'|' -f6 | sort -u)
+    unique_repos=$(printf '%s\n' "$filtered_packages" | cut -d'|' -f6 | sort -u | grep -v -E '^(@System|System|@commandline|Invalid|getPackage)$')
     
     while IFS= read -r repo_name; do
         [[ -z "$repo_name" ]] && continue
@@ -2116,34 +2121,31 @@ function process_packages() {
                     [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found via installed package: $package_name ($discovered_repo - will enable for download)\e[0m"
                     repo_name="$discovered_repo"
                 else
-                    # Fallback to guessing based on package name patterns
+                    # Only check manual repositories for @System packages - no guessing!
                     local found_repo=""
-                    case "$package_name" in
-                        *SFCGAL*|*sfcgal*)
-                            # SFCGAL is typically in developer/EPEL repos
-                            for repo in "ol9_developer_EPEL" "ol9_developer" "ol9_oraclelinux_developer_EPEL"; do
-                                if [[ " ${REPOSITORIES[*]} " == *" $repo "* ]]; then
-                                    found_repo="$repo"
+                    for manual_repo in "${MANUAL_REPOS[@]}"; do
+                        if [[ " ${REPOSITORIES[*]} " == *" $manual_repo "* ]]; then
+                            # Check if this package might exist in this manual repo by looking at the filesystem
+                            local manual_repo_path
+                            manual_repo_path=$(get_repo_path "$manual_repo")
+                            if [[ -d "$manual_repo_path" ]]; then
+                                # Look for any version of this package in the manual repo
+                                local existing_package
+                                existing_package=$(find "$manual_repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null | head -1)
+                                if [[ -n "$existing_package" ]]; then
+                                    found_repo="$manual_repo"
+                                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found in manual repo: $package_name (exists in $manual_repo)\e[0m"
                                     break
                                 fi
-                            done
-                            ;;
-                        *)
-                            # Try to guess the most likely disabled repository
-                            for repo in "${REPOSITORIES[@]}"; do
-                                if [[ ${enabled_repos_cache["$repo"]} != 1 ]]; then
-                                    found_repo="$repo"
-                                    break
-                                fi
-                            done
-                            ;;
-                    esac
+                            fi
+                        fi
+                    done
                     
                     if [[ -n "$found_repo" ]]; then
-                        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Guessing repo: $package_name ($found_repo disabled, attempting download anyway)\e[0m"
                         repo_name="$found_repo"
                     else
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unavailable: $package_name (not found in any repository)\e[0m"
+                        # No manual repo contains this package - let it fail and be reported
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as failed)\e[0m"
                         continue
                     fi
                 fi
@@ -2260,8 +2262,13 @@ function process_packages() {
                             fi
                         fi
                     else
-                        # No local copy found - add to update batch for download
-                        update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        # No local copy found - check if this is a manual repository
+                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
+                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
+                        else
+                            # Add to update batch for download from regular repositories
+                            update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        fi
                     fi
                 fi
                 ;;
@@ -2317,8 +2324,13 @@ function process_packages() {
                             fi
                         fi
                     else
-                        # No local copy found - add to new batch for download
-                        new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        # No local copy found - check if this is a manual repository
+                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
+                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
+                        else
+                            # Add to new batch for download from regular repositories
+                            new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        fi
                     fi
                 fi
                 ;;
