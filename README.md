@@ -149,8 +149,8 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Set maximum number of packages to process (0 = no limit)
 # MAX_PACKAGES=0
 
-# Set maximum number of new packages to download (-1 = no limit, 0 = none)
-# MAX_NEW_PACKAGES=-1
+# Set maximum number of changed packages to download (-1 = no limit, 0 = none)
+# MAX_CHANGED_PACKAGES=-1
 
 # Set the number of parallel processes (optimized default: 6)
 # PARALLEL=6
@@ -235,6 +235,7 @@ This version focuses on **maximum performance through simplification**, removing
 - Hash table lookups for O(1) package searches instead of O(n) linear searches
 - Batch RPM metadata extraction to reduce subprocess overhead
 - Optimized DNF queries with intelligent caching
+- Improved fallback mechanism with smaller batch retries before individual downloads
 
 **📊 Progress Monitoring**:
 - Configurable progress update intervals (PROGRESS_UPDATE_INTERVAL=30s)

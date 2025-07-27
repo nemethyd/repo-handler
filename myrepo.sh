@@ -14,7 +14,7 @@
 # and adaptive features in favor of simple, reliable, fast operation.
 
 # Script version
-VERSION="2.3.5"
+VERSION="2.3.6"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -24,7 +24,7 @@ LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
 MAX_PACKAGES=${MAX_PACKAGES:-0}
-MAX_NEW_PACKAGES=${MAX_NEW_PACKAGES:--1}
+MAX_CHANGED_PACKAGES=${MAX_CHANGED_PACKAGES:--1}
 SYNC_ONLY=${SYNC_ONLY:-0}
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
@@ -289,23 +289,48 @@ function batch_download_packages() {
                 else
                     log "W" "✗ Some downloads failed in batch $batch_num for $repo_name (check dnf logs for details)"
                     
-                    # Try downloading packages one by one as fallback
-                    log "I" "   Trying individual downloads as fallback..."
+                    # OPTIMIZED FALLBACK: Try smaller batches first, then individual downloads
+                    log "I" "   Trying optimized fallback downloads..."
                     local success_count=0
+                    local fallback_batch_size=5  # Much smaller batches for problematic repos
+                    local fallback_processed=0
                     
-                    for pkg in "${batch_packages[@]}"; do
+                    # First try: smaller batches (5 packages at a time)
+                    while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
+                        local fallback_end=$((fallback_processed + fallback_batch_size))
+                        [[ $fallback_end -gt ${#batch_packages[@]} ]] && fallback_end=${#batch_packages[@]}
+                        
+                        local small_batch=()
+                        for ((i=fallback_processed; i<fallback_end; i++)); do
+                            small_batch+=("${batch_packages[i]}")
+                        done
+                        
+                        # Try small batch download
                         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
-                            ((success_count++))
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ $pkg"
+                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
+                            success_count=$((success_count + ${#small_batch[@]}))
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"
+                            fallback_processed=$fallback_end
                         else
-                            # Track failed download with basic reason
-                            failed_downloads["$pkg"]="$repo_name"
-                            failed_download_reasons["$pkg"]="DNF download failed"
-                            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "   ✗ Failed: $pkg"
+                            # Small batch failed, try individual downloads for this batch
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads for ${#small_batch[@]} packages"
+                            for pkg in "${small_batch[@]}"; do
+                                # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+                                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                                    ((success_count++))
+                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"
+                                else
+                                    # Track failed download with basic reason
+                                    failed_downloads["$pkg"]="$repo_name"
+                                    failed_download_reasons["$pkg"]="DNF download failed"
+                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"
+                                fi
+                            done
+                            fallback_processed=$fallback_end
                         fi
                     done
-                    log "I" "   Fallback result: $success_count/$batch_package_count packages downloaded"
+                    
+                    log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"
                     global_downloaded=$((global_downloaded + success_count))
                 fi
                 
@@ -962,7 +987,7 @@ function cleanup_uninstalled_packages() {
                 # Show progress for large repositories
                 if [[ $total_rpms -gt 100 ]]; then
                     local progress_percent=$(( (processed_rpms * 100) / total_rpms ))
-                    [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   Progress: $processed_rpms/$total_rpms packages checked (${progress_percent}%)\e[0m"
+                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[36m   Progress: $processed_rpms/$total_rpms packages checked (${progress_percent}%)\e[0m"
                 fi
             done
             
@@ -1512,7 +1537,7 @@ function load_config() {
                 DEBUG_LEVEL) DEBUG_LEVEL="$value" ;;
                 DRY_RUN) DRY_RUN="$value" ;;
                 MAX_PACKAGES) MAX_PACKAGES="$value" ;;
-                MAX_NEW_PACKAGES) MAX_NEW_PACKAGES="$value" ;;
+                MAX_CHANGED_PACKAGES) MAX_CHANGED_PACKAGES="$value" ;;
                 PARALLEL) PARALLEL="$value" ;;
                 EXCLUDED_REPOS) EXCLUDE_REPOS="$value" ;;
                 FULL_REBUILD) FULL_REBUILD="$value" ;;
@@ -1688,8 +1713,8 @@ function parse_args() {
                 MAX_PACKAGES="$2"
                 shift 2
                 ;;
-            --max-new-packages)
-                MAX_NEW_PACKAGES="$2"
+            --max-changed-packages)
+                MAX_CHANGED_PACKAGES="$2"
                 shift 2
                 ;;
             --name-filter)
@@ -1746,7 +1771,7 @@ function parse_args() {
                 echo "  --log-dir PATH         Log directory (default: $LOG_DIR)"
                 echo "  --manual-repos LIST    Comma-separated list of manual repositories"
                 echo "  --max-packages INT     Maximum packages to process total (includes existing, new, and updates - 0=unlimited)"
-                echo "  --max-new-packages INT Maximum new packages to download only (limits [N] packages - 0=none, -1=unlimited)"
+                echo "  --max-changed-packages INT Maximum changed packages to download (new + updates - 0=none, -1=unlimited)"
                 echo "  --name-filter REGEX    Process only packages matching regex"
                 echo "  --parallel INT         Number of parallel operations (default: $PARALLEL)"
                 echo "  --repos LIST           Process only specified repositories"
@@ -1801,7 +1826,7 @@ function process_packages() {
     local new_count=0
     local update_count=0
     local exists_count=0
-    local new_packages_found=0
+    local changed_packages_found=0  # Combined counter for new + updated packages
     
     # Arrays to collect packages for batch downloading
     local new_packages=()
@@ -2174,7 +2199,22 @@ function process_packages() {
                 [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 ;;
             "UPDATE")
+                # Check if we've hit the MAX_CHANGED_PACKAGES limit BEFORE processing
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then
+                        # 0 means no changed packages allowed
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"
+                        continue
+                    elif [[ $MAX_CHANGED_PACKAGES -gt 0 && $changed_packages_found -ge $MAX_CHANGED_PACKAGES ]]; then
+                        # Positive number means specific limit reached
+                        echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"
+                        break
+                    fi
+                    # -1 or any negative number means unlimited (no limit check needed)
+                fi
+                
                 ((update_count++))
+                ((changed_packages_found++))  # Count updates toward changed packages limit
                 # Validate repo_name before using as array key
                 if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
                     ((stats_update_count["$repo_name"]++))
@@ -2226,16 +2266,15 @@ function process_packages() {
                 fi
                 ;;
             "NEW")
-                # Check if we've hit the MAX_NEW_PACKAGES limit BEFORE processing
-                # NEW LOGIC: 0 = no new packages, -1 = unlimited, >0 = specific limit
+                # Check if we've hit the MAX_CHANGED_PACKAGES limit BEFORE processing
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_NEW_PACKAGES -eq 0 ]]; then
-                        # 0 means no new packages allowed
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_NEW_PACKAGES=0): $package_name\e[0m"
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then
+                        # 0 means no changed packages allowed
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"
                         continue
-                    elif [[ $MAX_NEW_PACKAGES -gt 0 && $new_packages_found -ge $MAX_NEW_PACKAGES ]]; then
+                    elif [[ $MAX_CHANGED_PACKAGES -gt 0 && $changed_packages_found -ge $MAX_CHANGED_PACKAGES ]]; then
                         # Positive number means specific limit reached
-                        echo -e "\e[33m🔢 Reached new packages limit ($MAX_NEW_PACKAGES), stopping\e[0m"
+                        echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"
                         break
                     fi
                     # -1 or any negative number means unlimited (no limit check needed)
@@ -2243,6 +2282,7 @@ function process_packages() {
                 
                 # Process the new package
                 ((new_count++))
+                ((changed_packages_found++))  # Count new packages toward changed packages limit
                 # Validate repo_name before using as array key
                 if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
                     ((stats_new_count["$repo_name"]++))
@@ -2250,7 +2290,6 @@ function process_packages() {
                 echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    ((new_packages_found++))
                     
                     # Try to find local RPM first
                     local rpm_path
@@ -2816,11 +2855,11 @@ function validate_and_handle_modes() {
         log "I" "Package limit: $MAX_PACKAGES packages"
     fi
 
-    # Show new package limit with new logic: 0=none, -1=unlimited, >0=specific limit
-    if [[ $MAX_NEW_PACKAGES -eq 0 ]]; then
-        log "I" "New packages limit: No new packages allowed"
-    elif [[ $MAX_NEW_PACKAGES -gt 0 ]]; then
-        log "I" "New packages limit: $MAX_NEW_PACKAGES packages"
+    # Show changed package limit with new logic: 0=none, -1=unlimited, >0=specific limit
+    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then
+        log "I" "Changed packages limit: No changed packages allowed"
+    elif [[ $MAX_CHANGED_PACKAGES -gt 0 ]]; then
+        log "I" "Changed packages limit: $MAX_CHANGED_PACKAGES packages (new + updates)"
     fi
     # -1 or negative means unlimited, no message needed
 }
