@@ -14,7 +14,7 @@
 # Complex adaptive features have been simplified in favor of reliable, fast operation.
 
 # Script version
-VERSION="2.2.7"
+VERSION="2.2.8"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -1562,6 +1562,28 @@ function process_packages() {
     echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     
+    # PERFORMANCE OPTIMIZATION: Cache enabled repositories once at start
+    log "I" "📋 Building enabled repositories cache for performance..."
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    local enabled_repos_list
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
+        log "E" "Failed to get enabled repositories list for caching"
+        return 1
+    fi
+    
+    # Create associative array for O(1) repository enabled lookups
+    declare -A enabled_repos_cache
+    local cached_repo_count=0
+    while IFS= read -r repo; do
+        enabled_repos_cache["$repo"]=1
+        ((cached_repo_count++))
+    done <<< "$enabled_repos_list"
+    
+    log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    
     # Show legend for status markers
     echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
     echo
@@ -1676,7 +1698,7 @@ function process_packages() {
                         *)
                             # Try to guess the most likely disabled repository
                             for repo in "${REPOSITORIES[@]}"; do
-                                if ! is_repo_enabled "$repo"; then
+                                if [[ ${enabled_repos_cache["$repo"]} != 1 ]]; then
                                     found_repo="$repo"
                                     break
                                 fi
@@ -1697,8 +1719,8 @@ function process_packages() {
             # For non-@System repositories, check if repository is enabled
             local clean_repo_name="${repo_name#@}"  # Remove @ prefix if present
             
-            if ! is_repo_enabled "$clean_repo_name"; then
-                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping disabled: $package_name ($clean_repo_name disabled)\e[0m"
+            if [[ ${enabled_repos_cache["$clean_repo_name"]} != 1 ]]; then
+                [[ $DEBUG_LEVEL -ge 3 ]] && echo -e "\e[90m   Skipping disabled: $package_name ($clean_repo_name disabled)\e[0m"
                 continue
             fi
             
@@ -2335,7 +2357,7 @@ function validate_repository_structure() {
             if [[ $file_count -gt 0 ]]; then
                 log "W" "   The invalid directory contains $file_count RPM files that may need to be moved"
                 log "W" "   Manual intervention required to fix this issue"
-            else
+            else            
                 log "I" "   The invalid directory appears to be empty - safe to remove"
             fi
         fi
