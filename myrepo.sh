@@ -2,7 +2,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
 # AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-07-27
+# Last Updated: 2025-07-28
 
 # MIT licensing
 # Purpose:
@@ -14,18 +14,20 @@
 # and adaptive features in favor of simple, reliable, fast operation.
 
 # Script version
-VERSION="2.3.6"
+
+VERSION="2.3.7"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-MANUAL_REPOS=()  # Array for manually managed repositories (not downloadable via DNF)
+MANUAL_REPOS=("pgdg16" "pgdg-common")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
 MAX_PACKAGES=${MAX_PACKAGES:-0}
 MAX_CHANGED_PACKAGES=${MAX_CHANGED_PACKAGES:--1}
 SYNC_ONLY=${SYNC_ONLY:-0}
+NO_SYNC=${NO_SYNC:-0}
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
 REPOS=""
@@ -104,6 +106,10 @@ declare -A stats_exists_count
 # Failed downloads tracking arrays
 declare -A failed_downloads
 declare -A failed_download_reasons
+
+# Unknown packages tracking arrays (packages not found in any repository)
+declare -A unknown_packages
+declare -A unknown_package_reasons
 
 # Simplified tracking (removed complex performance monitoring for speed)
 declare -A failed_downloads
@@ -524,7 +530,7 @@ function build_repo_cache() {
     local cache_timestamp_file="$cache_dir/cache_timestamp"
     if [[ -f "$cache_timestamp_file" ]]; then
         local cache_time
-        cache_time=$(cat "$cache_timestamp_file" 2>/dev/null || echo "0")
+        cache_time=$(cat "$cache_timestamp_file" 2>/dev/null || echo 0)
         local cache_age=$((current_time - cache_time))
         
         if [[ $cache_age -gt $cache_max_age ]]; then
@@ -605,6 +611,16 @@ function build_repo_cache() {
     local unique_packages
     unique_packages=$(echo "$installed_packages" | cut -d'|' -f1 | sort -u)
     
+    # Also get packages that show up as @System - these need to be searched in repositories
+    local system_packages
+    system_packages=$(echo "$installed_packages" | grep -E '\|@System$|\|System$' | cut -d'|' -f1 | sort -u)
+    
+    # Combine both lists for comprehensive repository searching
+    local all_packages_to_search
+    all_packages_to_search=$(printf '%s\n%s\n' "$unique_packages" "$system_packages" | sort -u)
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Will search for $(echo "$all_packages_to_search" | wc -l) unique packages in repositories (including $(echo "$system_packages" | wc -l) @System packages)"
+    
     # Get list of enabled repositories
     local enabled_repos
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
@@ -636,7 +652,7 @@ function build_repo_cache() {
         # Build a targeted package list for this repository
         while IFS= read -r pkg_name; do
             package_list+=("$pkg_name")
-        done <<< "$unique_packages"
+        done <<< "$all_packages_to_search"
         
         # Query only for our installed packages in this repository (much faster!)
         local dnf_result
@@ -645,31 +661,57 @@ function build_repo_cache() {
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>&1); then
             
-            # Write directly to cache file, handling permissions properly
-            if echo "$dnf_result" > "$cache_file" 2>/dev/null; then
-                # Successfully wrote as current user
-                chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
-            elif [[ $ELEVATE_COMMANDS -eq 1 ]] && echo "$dnf_result" | sudo tee "$cache_file" >/dev/null 2>&1; then
-                # Write with sudo and set proper permissions
-                sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
-            else
-                # Fallback: write to temp file with unique name and try to move
-                local temp_file="$cache_file.tmp.$$"
+            # Write to cache file with robust permission handling (prevent error display)
+            local cache_written=false
+            
+            # Method 1: Try direct write with full error suppression
+            {
+                if echo "$dnf_result" > "$cache_file"; then
+                    # Successfully wrote as current user
+                    chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+                    cache_written=true
+                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written directly: $cache_file"
+                fi
+            } 2>/dev/null
+            
+            # Method 2: If direct write failed, try with sudo
+            if [[ $cache_written == false && $ELEVATE_COMMANDS -eq 1 ]]; then
+                if echo "$dnf_result" | sudo tee "$cache_file" >/dev/null 2>&1; then
+                    # Write with sudo and set proper permissions
+                    sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+                    cache_written=true
+                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written with sudo: $cache_file"
+                fi
+            fi
+            
+            # Method 3: Final fallback - write to temp file and move
+            if [[ $cache_written == false ]]; then
+                local temp_file
+                temp_file=$(mktemp "${cache_file}.tmp.XXXXXX" 2>/dev/null) || temp_file="$cache_file.tmp.$$"
+                
                 if echo "$dnf_result" > "$temp_file" 2>/dev/null; then
                     if mv "$temp_file" "$cache_file" 2>/dev/null; then
                         chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+                        cache_written=true
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written via temp file: $cache_file"
                     elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo mv "$temp_file" "$cache_file" 2>/dev/null; then
                         sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+                        cache_written=true
+                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written via temp file with sudo: $cache_file"
                     else
                         # Clean up temp file if all attempts failed
                         rm -f "$temp_file" 2>/dev/null || true
-                        log "W" "Failed to write cache file: $cache_file"
-                        continue
                     fi
                 else
-                    log "W" "Failed to create temp cache file for: $repo"
-                    continue
+                    # Clean up temp file if creation failed
+                    rm -f "$temp_file" 2>/dev/null || true
                 fi
+            fi
+            
+            # Check if we succeeded in writing the cache
+            if [[ $cache_written == false ]]; then
+                log "W" "Failed to write cache file: $cache_file (all methods failed)"
+                continue
             fi
             
             local package_count
@@ -685,6 +727,61 @@ function build_repo_cache() {
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Error: $dnf_result"
         fi
     done <<< "$enabled_repos"
+    
+    # IMPORTANT: Also process manual repositories by scanning their RPM files directly
+    if [[ ${#MANUAL_REPOS[@]} -gt 0 ]]; then
+        log "I" "📁 Processing manual repositories for package detection..."
+        for manual_repo in "${MANUAL_REPOS[@]}"; do
+            [[ -z "$manual_repo" ]] && continue
+            
+            local manual_repo_path
+            manual_repo_path=$(get_repo_path "$manual_repo")
+            
+            if [[ ! -d "$manual_repo_path" ]]; then
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Manual repository directory not found: $manual_repo_path"
+                continue
+            fi
+            
+            local manual_cache_file="$cache_dir/${manual_repo}.cache"
+            local rpm_count=0
+            
+            # Scan RPM files in the manual repository
+            if rpm_metadata=$(find "$manual_repo_path" -name "*.rpm" -type f -exec rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n" {} \; 2>/dev/null); then
+                if [[ -n "$rpm_metadata" ]]; then
+                    # Write manual repository cache with same permission handling as regular repos
+                    local cache_written=false
+                    
+                    # Method 1: Try direct write
+                    {
+                        if echo "$rpm_metadata" > "$manual_cache_file"; then
+                            chmod "$CACHE_FILE_PERMISSIONS" "$manual_cache_file" 2>/dev/null || true
+                            cache_written=true
+                        fi
+                    } 2>/dev/null
+                    
+                    # Method 2: Try with sudo if needed
+                    if [[ $cache_written == false && $ELEVATE_COMMANDS -eq 1 ]]; then
+                        if echo "$rpm_metadata" | sudo tee "$manual_cache_file" >/dev/null 2>&1; then
+                            sudo chmod "$CACHE_FILE_PERMISSIONS" "$manual_cache_file" 2>/dev/null || true
+                            cache_written=true
+                        fi
+                    fi
+                    
+                    if [[ $cache_written == true ]]; then
+                        available_repo_packages["$manual_repo"]=$(cat "$manual_cache_file")
+                        rpm_count=$(wc -l < "$manual_cache_file")
+                        log "I" "✓ Cached $rpm_count packages from manual repository: $manual_repo"
+                    else
+                        log "W" "Failed to write cache for manual repository: $manual_repo"
+                    fi
+                else
+                    log "I" "→ No RPM packages found in manual repository: $manual_repo"
+                fi
+            else
+                log "W" "Failed to scan RPM files in manual repository: $manual_repo_path"
+            fi
+        done
+    fi
     
     # Save cache timestamp
     local timestamp_written=false
@@ -1266,6 +1363,74 @@ function draw_table_row_flex() {
     printf "║\n"
 }
 
+# Clean up old repodata directories (both at repository level and inside getPackage)
+function cleanup_old_repodata() {
+    local repo_name="$1"
+    local repo_base_path="$2"
+    local repo_package_path="$3"
+    local cleanup_count=0
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cleaning up old repodata for repository: $repo_name"
+    
+    # Pattern list for old repodata directories
+    local cleanup_patterns=(
+        "repodata.old.*"    # Standard backup repodata directories
+        "repodata.bak.*"    # Alternative backup naming
+        ".repodata.*"       # Hidden repodata directories
+    )
+    
+    # Clean up old repodata at repository base level (correct location)
+    if [[ -d "$repo_base_path" ]]; then
+        for pattern in "${cleanup_patterns[@]}"; do 
+            while IFS= read -r -d '' old_repodata; do
+                if [[ -d "$old_repodata" ]]; then
+                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Removing old repodata: $old_repodata"
+                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                        sudo rm -rf "$old_repodata" 2>/dev/null || true
+                    else
+                        rm -rf "$old_repodata" 2>/dev/null || true
+                    fi
+                    ((cleanup_count++))
+                fi
+            done < <(find "$repo_base_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
+        done
+    fi
+    
+    # Clean up incorrectly placed repodata inside getPackage directory (legacy cleanup)
+    if [[ -d "$repo_package_path" ]]; then
+        for pattern in "${cleanup_patterns[@]}"; do 
+            while IFS= read -r -d '' old_repodata; do
+                if [[ -d "$old_repodata" ]]; then
+                    log "W" "   Found misplaced repodata inside getPackage, removing: $old_repodata"
+                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                        sudo rm -rf "$old_repodata" 2>/dev/null || true
+                    else
+                        rm -rf "$old_repodata" 2>/dev/null || true
+                    fi
+                    ((cleanup_count++))
+                fi
+            done < <(find "$repo_package_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
+        done
+        
+        # Also clean up any current repodata that might be misplaced inside getPackage
+        if [[ -d "$repo_package_path/repodata" ]]; then
+            log "W" "   Found misplaced current repodata inside getPackage, removing: $repo_package_path/repodata"
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo rm -rf "$repo_package_path/repodata" 2>/dev/null || true
+            else
+                rm -rf "$repo_package_path/repodata" 2>/dev/null || true
+            fi
+            ((cleanup_count++))
+        fi
+    fi
+    
+    if [[ $cleanup_count -gt 0 ]]; then
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Cleaned up $cleanup_count old/misplaced repodata directories"
+    fi
+    
+    return $cleanup_count
+}
+
 # Perform full rebuild by removing all packages in local repositories
 function full_rebuild_repos() {
     if [[ $FULL_REBUILD -ne 1 ]]; then
@@ -1287,11 +1452,26 @@ function full_rebuild_repos() {
             
             log "I" "Cleaning repository: $repo_name"
             
-            # Remove all RPM files
+            # Remove all RPM files (both in getPackage and any misplaced ones)
             find "$repo_dir" -name "*.rpm" -type f -delete 2>/dev/null || true
             
-            # Also clean up old repodata
-            find "$repo_dir" -name "repodata.old.*" -type d -exec rm -rf {} + 2>/dev/null || true
+            # Enhanced repodata cleanup using new function
+            local repo_base_path
+            local repo_package_path
+            repo_base_path=$(get_repo_base_path "$repo_name")
+            repo_package_path=$(get_repo_path "$repo_name")
+            
+            cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_package_path"
+            
+            # Also remove current repodata for full rebuild
+            if [[ -d "$repo_base_path/repodata" ]]; then
+                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                    sudo rm -rf "$repo_base_path/repodata" 2>/dev/null || true
+                else
+                    rm -rf "$repo_base_path/repodata" 2>/dev/null || true
+                fi
+                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Removed current repodata for full rebuild"
+            fi
             
             echo -e "\e[33m$(align_repo_name "$repo_name"): Repository cleaned for full rebuild\e[0m"
         fi
@@ -1439,6 +1619,17 @@ function get_package_status() {
         echo "EXISTS"
         return 0
     fi
+
+    # For rhel9/el9 release suffix mismatch, check alternate filename
+    if [[ "$package_release" =~ ^(.*)\.rhel9$ ]]; then
+        local alt_release="${BASH_REMATCH[1]}.el9"
+        local alt_filename="${package_name}-${package_version}-${alt_release}.${package_arch}.rpm"
+        if [[ -f "$repo_path/$alt_filename" ]]; then
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found alt match: $alt_filename -> EXISTS"
+            echo "EXISTS"
+            return 0
+        fi
+    fi
     
     # Check for same package name/arch but different version (UPDATE needed)
     local existing_files
@@ -1471,6 +1662,20 @@ function get_package_status() {
 }
 
 # Get repository path for a repository name
+# Get the repository base path (without getPackage subdirectory)
+function get_repo_base_path() {
+    local repo_name="$1"
+    
+    # Validate repository name to prevent invalid names
+    if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+        log "E" "Invalid repository name: '$repo_name'"
+        return 1
+    fi
+    
+    echo "$LOCAL_REPO_PATH/$repo_name"
+    return 0
+}
+
 function get_repo_path() {
     local repo_name="$1"
     
@@ -1750,6 +1955,10 @@ function parse_args() {
                 SYNC_ONLY=1
                 shift
                 ;;
+            --no-sync)
+                NO_SYNC=1
+                shift
+                ;;
             --dnf-serial)
                 DNF_SERIAL=1
                 shift
@@ -1784,6 +1993,7 @@ function parse_args() {
                 echo "  --set-permissions      Auto-fix file permissions"
                 echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
                 echo "  -s, --sync-only        Only sync repositories to shared location"
+                echo "  --no-sync              Skip synchronization to shared location"
                 echo "  --dnf-serial           Force serial DNF operations"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
@@ -1836,6 +2046,7 @@ function process_packages() {
     # Arrays to collect packages for batch downloading
     local new_packages=()
     local update_packages=()
+    local not_found_packages=()
     
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
@@ -1912,9 +2123,11 @@ function process_packages() {
     local temp_raw
     local temp_filtered
     local temp_sorted
+    local temp_deduped
     temp_raw=$(mktemp)
     temp_filtered=$(mktemp)
     temp_sorted=$(mktemp)
+    temp_deduped=$(mktemp)
     
     # Write package list to temp file for processing
     echo "$package_list" > "$temp_raw"
@@ -1940,8 +2153,6 @@ function process_packages() {
     sort -t'|' -k6,6 -k1,1 -k3,3V "$temp_filtered" > "$temp_sorted"
     
     # Step 3: Remove exact duplicates (same package-version-arch combination)
-    local temp_deduped
-    temp_deduped=$(mktemp)
     local previous_line=""
     
     while IFS= read -r line; do
@@ -1997,7 +2208,7 @@ function process_packages() {
         efficiency_gain=$(awk "BEGIN {printf \"%.1f\", ($packages_saved * 100.0) / $total_packages}")
         log "I" "   ⚡ Processing efficiency improved by ${efficiency_gain}% ($packages_saved fewer packages to process)"
     fi
-    log "I" "   📦 Processing $final_count optimized packages"
+    log "I" "📦 Processing $final_count optimized packages"
 
     # Update total packages count for accurate progress reporting
     total_packages=$final_count
@@ -2041,22 +2252,27 @@ function process_packages() {
     start_time=$(date +%s)
     
     while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+        # Skip empty lines or lines with missing package_name
+        if [[ -z "$package_name" ]]; then
+            continue
+        fi
+
         # Skip if we've hit the package limit
         if [[ $MAX_PACKAGES -gt 0 && $processed_packages -gt $MAX_PACKAGES ]]; then
             echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping\e[0m"
             break
         fi
-        
+
         # Apply name filter (already filtered by dnf query, but double-check)
         if ! should_process_package "$package_name"; then
             continue
         fi
-        
+
         # Apply repository filters
         if ! should_process_repo "$repo_name"; then
             continue
         fi
-        
+
         # Only increment processed_packages AFTER all filtering is done
         ((processed_packages++))
         
@@ -2144,8 +2360,11 @@ function process_packages() {
                     if [[ -n "$found_repo" ]]; then
                         repo_name="$found_repo"
                     else
-                        # No manual repo contains this package - let it fail and be reported
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as failed)\e[0m"
+                        # No manual repo contains this package - record as unknown for final report
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as unknown)\e[0m"
+                        local package_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+                        unknown_packages["$package_key"]="@System (source unknown)"
+                        unknown_package_reasons["$package_key"]="Package not found in any enabled or manual repository"
                         continue
                     fi
                 fi
@@ -2265,6 +2484,13 @@ function process_packages() {
                         # No local copy found - check if this is a manual repository
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
                             [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
+                            # Skip this package entirely - don't count it in stats and don't add to download queues
+                            ((update_count--))  # Subtract from count since we already incremented it
+                            ((changed_packages_found--))  # Also subtract from changed packages count
+                            # Remove from stats if we added it
+                            if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
+                                ((stats_update_count["$repo_name"]--))
+                            fi
                         else
                             # Add to update batch for download from regular repositories
                             update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
@@ -2327,6 +2553,13 @@ function process_packages() {
                         # No local copy found - check if this is a manual repository
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
                             [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
+                            # Skip this package entirely - don't count it in stats and don't add to download queues
+                            ((new_count--))  # Subtract from count since we already incremented it
+                            ((changed_packages_found--))  # Also subtract from changed packages count
+                            # Remove from stats if we added it
+                            if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
+                                ((stats_new_count["$repo_name"]--))
+                            fi
                         else
                             # Add to new batch for download from regular repositories
                             new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
@@ -2430,6 +2663,23 @@ function process_packages() {
     
     # Generate the beautiful summary table
     generate_summary_table
+
+    # Final report for not found packages
+    if [[ ${#not_found_packages[@]} -gt 0 ]]; then
+        echo
+        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
+        echo -e "\e[35m🔍 NOT FOUND PACKAGES REPORT\e[0m"
+        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
+        local total_not_found=0
+        for entry in "${not_found_packages[@]}"; do
+            echo -e "\e[31m   ✗ $entry\e[0m"
+            ((total_not_found++))
+        done
+        echo
+        echo -e "\e[35m📊 Total not found packages: $total_not_found\e[0m"
+        echo -e "\e[36m💡 Tip: These packages were not found locally and not downloaded because the repository is manual.\e[0m"
+        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
+    fi
     
     # Clean up uninstalled packages after processing (if enabled)
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
@@ -2489,6 +2739,63 @@ function report_failed_downloads() {
     echo -e "\e[31m📊 Total failed downloads: $total_failures packages\e[0m"
     echo -e "\e[36m💡 Tip: Check if these packages are available in enabled repositories or if network connectivity is working.\e[0m"
     echo -e "\e[31m═══════════════════════════════════════════════════════════════\e[0m"
+}
+
+# Report unknown packages at the end of script execution
+function report_unknown_packages() {
+    # Debug: Show array sizes
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Unknown packages array size: ${#unknown_packages[@]}"
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Unknown package reasons array size: ${#unknown_package_reasons[@]}"
+    
+    # Skip if no unknown packages recorded
+    if [[ ${#unknown_packages[@]} -eq 0 ]]; then
+        log "I" "✅ All packages have known repository sources - no unknown packages to report"
+        return 0
+    fi
+    
+    echo
+    echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
+    echo -e "\e[35m🔍 UNKNOWN PACKAGES REPORT\e[0m"
+    echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
+    
+    local total_unknown=0
+    
+    # Group unknown packages by source repository for better organization
+    declare -A repo_unknown
+    for package_key in "${!unknown_packages[@]}"; do
+        local source_repo="${unknown_packages[$package_key]}"
+        repo_unknown["$source_repo"]+="$package_key "
+        ((total_unknown++))
+    done
+    
+    # Report unknown packages by source repository
+    # Use proper array iteration to handle repository names with spaces
+    local sorted_repos=()
+    while IFS= read -r -d '' repo_name; do
+        sorted_repos+=("$repo_name")
+    done < <(printf '%s\0' "${!repo_unknown[@]}" | sort -z)
+    
+    for source_repo in "${sorted_repos[@]}"; do
+        echo -e "\e[33m📦 Source Repository: $source_repo\e[0m"
+        
+        # Process each unknown package from this source
+        local packages="${repo_unknown[$source_repo]}"
+        # Use proper array to avoid word splitting on spaces in package keys
+        local -a package_array
+        read -ra package_array <<< "$packages"
+        for package_key in "${package_array[@]}"; do
+            [[ -n "$package_key" ]] || continue  # Skip empty entries
+            local reason="${unknown_package_reasons[$package_key]:-Package source could not be determined}"
+            echo -e "\e[37m   ? $package_key\e[0m"
+            echo -e "\e[37m     Reason: $reason\e[0m"
+        done
+        echo
+    done
+    
+    echo -e "\e[35m📊 Total unknown packages: $total_unknown packages\e[0m"
+    echo -e "\e[36m💡 Tip: These packages were installed but their source repository could not be determined.\e[0m"
+    echo -e "\e[36m   They may be from disabled repositories, manual installations, or custom builds.\e[0m"
+    echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
 }
 
 # Check if package should be processed based on name filter
@@ -2581,6 +2888,9 @@ function show_runtime_status() {
     else
         log "I" "Parallel compression for metadata updates disabled"
     fi
+    if [[ $NO_SYNC -eq 1 ]]; then
+        log "I" "Repository synchronization to shared location disabled"
+    fi
 
     # Show active filters if any
     if [[ -n "$REPOS" ]]; then
@@ -2599,6 +2909,12 @@ function sync_to_shared_repos() {
     # Only sync if not in dry run mode and shared repo path exists
     if [[ $DRY_RUN -eq 1 ]]; then
         log "I" "🔍 DRY RUN: Would sync repositories to shared location if enabled"
+        return 0
+    fi
+    
+    # Skip sync if --no-sync option is specified
+    if [[ $NO_SYNC -eq 1 ]]; then
+        log "I" "⏭️  Synchronization to shared location skipped (--no-sync specified)"
         return 0
     fi
     
@@ -2676,20 +2992,44 @@ function update_all_repository_metadata() {
         if [[ -d "$repo_dir" ]]; then
             local repo_name
             repo_name=$(basename "$repo_dir")
-            
+
             # Skip if this repo should not be processed
             if ! should_process_repo "$repo_name"; then
                 continue
             fi
-            
-            local repo_path
-            repo_path=$(get_repo_path "$repo_name")
-            
-            if [[ -d "$repo_path" ]]; then
-                if update_repository_metadata "$repo_name" "$repo_path"; then
+
+            # Check if this is a manual repo
+            local is_manual_repo=false
+            for manual_repo in "${MANUAL_REPOS[@]}"; do
+                if [[ "$repo_name" == "$manual_repo" ]]; then
+                    is_manual_repo=true
+                    break
+                fi
+            done
+
+            if [[ "$is_manual_repo" == true ]]; then
+                # For manual repos, use base path only
+                local repo_base_path
+                repo_base_path=$(get_repo_base_path "$repo_name")
+                cleanup_old_repodata "$repo_name" "$repo_base_path" ""
+                if update_repository_metadata "$repo_name" "$repo_base_path"; then
                     ((updated_repos++))
                 else
                     ((failed_repos++))
+                fi
+            else
+                # For regular repos, use getPackage subdir
+                local repo_path
+                repo_path=$(get_repo_path "$repo_name")
+                if [[ -d "$repo_path" ]]; then
+                    local repo_base_path
+                    repo_base_path=$(get_repo_base_path "$repo_name")
+                    cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
+                    if update_repository_metadata "$repo_name" "$repo_path"; then
+                        ((updated_repos++))
+                    else
+                        ((failed_repos++))
+                    fi
                 fi
             fi
         fi
@@ -2758,6 +3098,10 @@ function update_manual_repository_metadata() {
         
         if [[ $needs_update == true ]]; then
             log "I" "🔄 $(align_repo_name "$manual_repo"): Manual repository needs metadata update"
+            
+            # Clean up old repodata for manual repositories (they don't use getPackage structure)
+            cleanup_old_repodata "$manual_repo" "$repo_dir" ""
+            
             if update_repository_metadata "$manual_repo" "$repo_dir"; then
                 ((updated_manual++))
             fi
@@ -2776,16 +3120,46 @@ function update_manual_repository_metadata() {
 # Update repository metadata using createrepo_c
 function update_repository_metadata() {
     local repo_name="$1"
-    local repo_path="$2"
+    local repo_path="$2"  # This could be either getPackage path or direct repo path (for manual repos)
     
-    if [[ ! -d "$repo_path" ]]; then
-        log "W" "Repository path does not exist: $repo_path"
+    # Determine if this is a manual repository or regular repository
+    local is_manual_repo=false
+    for manual_repo in "${MANUAL_REPOS[@]}"; do
+        if [[ "$repo_name" == "$manual_repo" ]]; then
+            is_manual_repo=true
+            break
+        fi
+    done
+    
+    local repo_base_path
+    local packages_path
+    
+    if [[ $is_manual_repo == true ]]; then
+        # For manual repositories, repo_path is already the base path
+        repo_base_path="$repo_path"
+        packages_path="$repo_path"
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$(align_repo_name "$repo_name"): Processing as manual repository"
+    else
+        # For regular repositories, we need to get the base path
+        repo_base_path=$(get_repo_base_path "$repo_name")
+        local get_repo_result=$?
+        packages_path="$repo_path"  # This is the getPackage path
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$(align_repo_name "$repo_name"): Processing as regular repository (getPackage structure)"
+        
+        if [[ $get_repo_result -ne 0 ]]; then
+            log "E" "Failed to get repository base path for: $repo_name"
+            return 1
+        fi
+    fi
+    
+    if [[ ! -d "$packages_path" ]]; then
+        log "W" "Repository packages path does not exist: $packages_path"
         return 1
     fi
     
     # Check if there are any RPM files to create metadata for
     local rpm_count
-    rpm_count=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
+    rpm_count=$(find "$packages_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
     
     if [[ $rpm_count -eq 0 ]]; then
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$repo_name"): No RPM files found, skipping metadata update"
@@ -2793,19 +3167,34 @@ function update_repository_metadata() {
     fi
     
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "I" "🔍 $(align_repo_name "$repo_name"): Would update repository metadata (createrepo_c --update)"
+        log "I" "🔍 $(align_repo_name "$repo_name"): Would update repository metadata (createrepo_c --update on $repo_base_path)"
         return 0
     fi
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating repository metadata..."
+    if [[ $is_manual_repo == true ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating manual repository metadata..."
+    else
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating repository metadata (repodata at repository level)..."
+    fi
+    
+    # Ensure the repository base directory exists
+    if [[ ! -d "$repo_base_path" ]]; then
+        mkdir -p "$repo_base_path" 2>/dev/null || {
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo mkdir -p "$repo_base_path"
+                sudo chown "$USER:$USER" "$repo_base_path" 2>/dev/null || true
+                chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_base_path" 2>/dev/null || true
+            fi
+        }
+    fi
     
     # Automatically fix permissions when needed (improved from original script)
     if [[ $ELEVATE_COMMANDS -eq 1 && -n "$USER" ]]; then
-        if [[ -d "$repo_path/repodata" ]]; then
-            sudo chown -R "$USER:$USER" "$repo_path/repodata" 2>/dev/null || true
+        if [[ -d "$repo_base_path/repodata" ]]; then
+            sudo chown -R "$USER:$USER" "$repo_base_path/repodata" 2>/dev/null || true
         fi
-        sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
-        chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_path" 2>/dev/null || true
+        sudo chown "$USER:$USER" "$repo_base_path" 2>/dev/null || true
+        chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_base_path" 2>/dev/null || true
     fi
     
     # Build createrepo command with parallel compression
@@ -2823,7 +3212,11 @@ function update_repository_metadata() {
         log "E" "Neither createrepo_c nor createrepo found - cannot update repository metadata"
         return 1
     fi
-    createrepo_cmd+=" \"$repo_path\""
+    
+    # IMPORTANT: Run createrepo on the repository base path
+    # For regular repos: this ensures repodata is created at repository level, not inside getPackage
+    # For manual repos: this is the same as the packages path
+    createrepo_cmd+=" \"$repo_base_path\""
     
     # Add sudo if elevation is enabled
     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
@@ -2834,7 +3227,11 @@ function update_repository_metadata() {
     
     # Execute createrepo command
     if eval "$createrepo_cmd" >/dev/null 2>&1; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Repository metadata updated successfully"
+        if [[ $is_manual_repo == true ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Manual repository metadata updated successfully"
+        else
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Repository metadata updated successfully (repodata created at repository level)"
+        fi
         return 0
     else
         log "E" "❌ $(align_repo_name "$repo_name"): Failed to update repository metadata"
@@ -2919,5 +3316,6 @@ build_repo_cache
 process_packages
 sync_to_shared_repos
 report_failed_downloads
+report_unknown_packages
 
 log "I" "Script completed successfully"
