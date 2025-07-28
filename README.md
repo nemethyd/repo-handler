@@ -570,25 +570,6 @@ The script implements a sophisticated workflow that efficiently manages local pa
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
 - **Cache Management**: The shared cache at `/var/cache/myrepo` provides optimal performance for both root and user executions.
 
-## Changelog
-
-### v2.3.8 (2025-07-28)
-- **NEW**: Added `--no-metadata-update` option to skip repository metadata updates (createrepo_c)
-- **ENHANCEMENT**: Improved development and testing workflow by allowing package processing without metadata overhead
-- **PERFORMANCE**: Combined with `--no-sync`, provides maximum speed for development scenarios
-- **CONFIGURATION**: Added NO_METADATA_UPDATE support in myrepo.cfg
-- **DOCUMENTATION**: Updated README with new option and examples
-
-### v2.3.7 (2025-07-28)
-- **NEW**: Added `--no-sync` option to skip synchronization to shared location
-- **ENHANCEMENT**: Improved development and testing workflow by allowing package processing without time-consuming sync
-- **DOCUMENTATION**: Updated README with new option and examples
-
-### v2.3.6 (2025-07-27)
-- **BUGFIX**: Enhanced manual repository cache building for better package detection
-- **BUGFIX**: Fixed ShellCheck SC2005 warning and magic number issues
-- **ENHANCEMENT**: Improved unknown package reporting and repository source detection
-
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

@@ -15,12 +15,12 @@
 
 # Script version
 
-VERSION="2.3.8"
+VERSION="2.3.9"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-MANUAL_REPOS=("pgdg16" "pgdg-common")  # Array for manually managed repositories (not downloadable via DNF)
+MANUAL_REPOS=("ol9_edge")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 DRY_RUN=${DRY_RUN:-0}
@@ -151,16 +151,15 @@ function batch_download_packages() {
             }
         fi
         
-        # Remove old package versions before download
+        # Remove only the exact version being updated (if it exists) - keep other installed versions
         if [[ -d "$repo_path" ]]; then
-            local old_packages
-            old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
-            if [[ -n "$old_packages" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+            local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+            if [[ -f "$exact_package_file" ]]; then
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing existing version: ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                    sudo rm -f "$exact_package_file" 2>/dev/null
                 else
-                    echo "$old_packages" | xargs rm -f 2>/dev/null
+                    rm -f "$exact_package_file" 2>/dev/null
                 fi
             fi
         fi
@@ -242,7 +241,7 @@ function batch_download_packages() {
                 
                 # Check if repository is enabled/disabled
                 if ! is_repo_enabled "$repo_name"; then
-                    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Enabling disabled repository: $repo_name"
+                    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name (for package download only)"
                     dnf_options+=(--enablerepo="$repo_name")
                 fi
                 
@@ -270,7 +269,8 @@ function batch_download_packages() {
                     ) &
                     local progress_pid=$!
                     
-                    if timeout "$DNF_DOWNLOAD_TIMEOUT" "${dnf_cmd}" download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command (e.g., "sudo dnf")
+                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
                         download_success=1
                     fi
                     
@@ -319,7 +319,7 @@ function batch_download_packages() {
                         
                         # Try small batch download
                         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
+                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
                             success_count=$((success_count + ${#small_batch[@]}))
                             [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"
                             fallback_processed=$fallback_end
@@ -328,7 +328,7 @@ function batch_download_packages() {
                             [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads for ${#small_batch[@]} packages"
                             for pkg in "${small_batch[@]}"; do
                                 # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                                     ((success_count++))
                                     [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"
                                 else
@@ -1632,12 +1632,38 @@ function get_package_status() {
         fi
     fi
     
+    # Handle Oracle UEK kernel version normalization (e.g., 100.28.2.2.el9uek vs 100.28.2.el9uek)
+    if [[ "$package_release" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)\.(.*)$ ]]; then
+        local base_version="${BASH_REMATCH[1]}"
+        local suffix="${BASH_REMATCH[3]}"
+        local normalized_release="${base_version}.${suffix}"
+        local normalized_filename="${package_name}-${package_version}-${normalized_release}.${package_arch}.rpm"
+        if [[ -f "$repo_path/$normalized_filename" ]]; then
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found normalized match: $normalized_filename (${package_release} -> ${normalized_release}) -> EXISTS"
+            echo "EXISTS"
+            return 0
+        fi
+    fi
+    
     # Check for same package name/arch but different version (UPDATE needed)
     local existing_files
     existing_files=$(find "$repo_path" -maxdepth 1 -name "$name_arch_pattern" -type f 2>/dev/null)
     
     if [[ -n "$existing_files" ]]; then
-        # Found same package with different version - need UPDATE
+        # Double-check for exact match in the found files (handles edge cases)
+        while IFS= read -r existing_file; do
+            local basename_file
+            basename_file=$(basename "$existing_file")
+            
+            # If we find an exact match here, it means we missed it above - return EXISTS
+            if [[ "$basename_file" == "$exact_filename" ]]; then
+                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match in file list: $basename_file -> EXISTS"
+                echo "EXISTS"
+                return 0
+            fi
+        done <<< "$existing_files"
+        
+        # No exact match found among existing files - need UPDATE
         local existing_count
         existing_count=$(echo "$existing_files" | wc -l)
         [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count existing version(s) of $package_name -> UPDATE"
@@ -1742,16 +1768,36 @@ function load_config() {
                     # First try comma-separated, then fall back to space-separated
                     if [[ "$value" == *","* ]]; then
                         IFS=',' read -ra MANUAL_REPOS <<< "$value"
+                        # Trim whitespace from each array element
+                        for i in "${!MANUAL_REPOS[@]}"; do
+                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]#"${MANUAL_REPOS[i]%%[![:space:]]*}"}"  # Remove leading whitespace
+                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]%"${MANUAL_REPOS[i]##*[![:space:]]}"}"  # Remove trailing whitespace
+                        done
                     else
                         IFS=' ' read -ra MANUAL_REPOS <<< "$value"
+                        # Trim whitespace from each array element
+                        for i in "${!MANUAL_REPOS[@]}"; do
+                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]#"${MANUAL_REPOS[i]%%[![:space:]]*}"}"  # Remove leading whitespace
+                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]%"${MANUAL_REPOS[i]##*[![:space:]]}"}"  # Remove trailing whitespace
+                        done
                     fi
                     ;;
                 LOCAL_RPM_SOURCES)
                     # Convert comma-separated or space-separated list to array
                     if [[ "$value" == *","* ]]; then
                         IFS=',' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                        # Trim whitespace from each array element
+                        for i in "${!LOCAL_RPM_SOURCES[@]}"; do
+                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]#"${LOCAL_RPM_SOURCES[i]%%[![:space:]]*}"}"  # Remove leading whitespace
+                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]%"${LOCAL_RPM_SOURCES[i]##*[![:space:]]}"}"  # Remove trailing whitespace
+                        done
                     else
                         IFS=' ' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                        # Trim whitespace from each array element
+                        for i in "${!LOCAL_RPM_SOURCES[@]}"; do
+                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]#"${LOCAL_RPM_SOURCES[i]%%[![:space:]]*}"}"  # Remove leading whitespace
+                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]%"${LOCAL_RPM_SOURCES[i]##*[![:space:]]}"}"  # Remove trailing whitespace
+                        done
                     fi
                     ;;
                 DEBUG_LEVEL) DEBUG_LEVEL="$value" ;;
@@ -1791,7 +1837,7 @@ function load_config() {
         done < "$config_file"
         
         log "I" "Configuration loaded: LOCAL_REPO_PATH=$LOCAL_REPO_PATH"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "MANUAL_REPOS: ${MANUAL_REPOS[*]}"
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "MANUAL_REPOS from config: (${#MANUAL_REPOS[@]} entries) ${MANUAL_REPOS[*]}"
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}"
     else
         log "I" "No configuration file found, using defaults"
@@ -2101,21 +2147,37 @@ function process_packages() {
     dnf_cmd=$(get_dnf_cmd)
     
     # Use the original script's efficient method with timeout
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF command will be: ${dnf_cmd}"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Name filter: '${NAME_FILTER}'"
+    
     if [[ -n "$NAME_FILTER" ]]; then
         # Get all packages first, then filter by package name (first field before |)
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query with name filter..."
         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
         package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
             if [[ "$name" =~ $NAME_FILTER ]]; then
                 echo "$name|$rest"
             fi
         done)
+        local dnf_exit_code=$?
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query with filter completed with exit code: $dnf_exit_code"
     else
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query without name filter..."
         # shellcheck disable=SC2086
         package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+        local dnf_exit_code=$?
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query without filter completed with exit code: $dnf_exit_code"
     fi
     
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Package list length: ${#package_list}"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "First few lines of package list:"
+    [[ $DEBUG_LEVEL -ge 3 ]] && echo "$package_list" | head -3 >&2
+    
     if [[ -z "$package_list" ]]; then
-        log "E" "Failed to get installed packages list"
+        log "E" "Failed to get installed packages list (exit code: ${dnf_exit_code:-unknown})"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Trying manual DNF test..."
+        [[ $DEBUG_LEVEL -ge 2 ]] && ${dnf_cmd} --version >&2
         return 1
     fi
     
@@ -2284,16 +2346,13 @@ function process_packages() {
             continue
         fi
 
-        # Apply repository filters
-        if ! should_process_repo "$repo_name"; then
-            continue
-        fi
+        # NOTE: Repository filtering moved to AFTER repository identification
+        # This allows @System packages to be identified first before filtering
 
-        # Only increment processed_packages AFTER all filtering is done
-        ((processed_packages++))
+        # Don't increment processed_packages yet - do it after repository filtering
         
         # Progress reporting every N packages (OPTIMIZATION 3: Improved progress with ETA)
-        if (( processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
+        if (( processed_packages > 0 && processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
             local elapsed=$(($(date +%s) - start_time))
             local rate_display=""
             local eta_display=""
@@ -2307,13 +2366,17 @@ function process_packages() {
                 else
                     # Show seconds per package when rate is less than 1 pkg/sec
                     local sec_per_pkg
-                    sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+                    if [[ $processed_packages -gt 0 ]]; then
+                        sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+                    else
+                        sec_per_pkg="N/A"
+                    fi
                     rate_display="${sec_per_pkg} sec/pkg"
                 fi
                 
                 # Calculate ETA for remaining packages
                 local remaining_packages=$((total_packages - processed_packages))
-                if [[ $remaining_packages -gt 0 ]]; then
+                if [[ $remaining_packages -gt 0 && $processed_packages -gt 0 ]]; then
                     local eta_seconds
                     eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining_packages / ($processed_packages / $elapsed)}")
                     if [[ $eta_seconds -gt $ETA_DISPLAY_THRESHOLD ]]; then
@@ -2390,8 +2453,8 @@ function process_packages() {
             local clean_repo_name="${repo_name#@}"  # Remove @ prefix if present
             
             if [[ ${enabled_repos_cache["$clean_repo_name"]} != 1 ]]; then
-                [[ $DEBUG_LEVEL -ge 3 ]] && echo -e "\e[90m   Skipping disabled: $package_name ($clean_repo_name disabled)\e[0m"
-                continue
+                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)\e[0m"
+                # Don't skip - we'll handle disabled repos by temporarily enabling them during downloads
             fi
             
             repo_name="$clean_repo_name"
@@ -2408,6 +2471,15 @@ function process_packages() {
             [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository name detected for package $package_name: '$repo_name' - skipping"
             continue
         fi
+        
+        # Apply repository filters AFTER repository identification is complete
+        if ! should_process_repo "$repo_name"; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping package from filtered repository: $package_name ($repo_name)"
+            continue
+        fi
+        
+        # Only increment processed_packages AFTER all filtering is done
+        ((processed_packages++))
         
         # Ensure repository directory exists for each package
         local repo_path
@@ -2468,15 +2540,14 @@ function process_packages() {
                         [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
                         [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
                         
-                        # Remove old version(s) first
-                        local old_packages
-                        old_packages=$(find "$repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null)
-                        if [[ -n "$old_packages" ]]; then
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing old versions of $package_name from $repo_name"
+                        # Remove only the exact version being updated (if it exists) - keep other installed versions
+                        local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+                        if [[ -f "$exact_package_file" ]]; then
+                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing existing version: ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                             if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                                echo "$old_packages" | xargs sudo rm -f 2>/dev/null
+                                sudo rm -f "$exact_package_file" 2>/dev/null
                             else
-                                echo "$old_packages" | xargs rm -f 2>/dev/null
+                                rm -f "$exact_package_file" 2>/dev/null
                             fi
                         fi
                         
@@ -2659,7 +2730,11 @@ function process_packages() {
         else
             # Show seconds per package when rate is less than 1 pkg/sec
             local sec_per_pkg
-            sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+            if [[ $processed_packages -gt 0 ]]; then
+                sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+            else
+                sec_per_pkg="N/A"
+            fi
             rate_display="${sec_per_pkg} sec/pkg"
         fi
     else
