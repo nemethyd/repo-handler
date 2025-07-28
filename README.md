@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.7)
+# Repo Handler Script (v2.3.8)
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with different AI support models  
 **AI flock**: ChatGPT, Claude, Gemini  
@@ -8,7 +8,9 @@
 
 The `repo-handler` project provides a high-performance bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
 
-**v2.3.7 Performance Optimizations**: This version achieves maximum performance by removing complex adaptive features in favor of simple, reliable, fast operation. All major bottlenecks have been eliminated while preserving essential functionality and bug fixes, including proper progress update reporting and elimination of all hardcoded timeout values. Now includes `--no-sync` option for development and testing scenarios.
+**v2.3.8 New Feature**: Added `--no-metadata-update` option for skipping repository metadata updates during development and testing. This version also includes the `--no-sync` option and proper manual repository configuration parsing.
+
+**v2.3.7 Performance Optimizations**: This version achieves maximum performance by removing complex adaptive features in favor of simple, reliable, fast operation. All major bottlenecks have been eliminated while preserving essential functionality and bug fixes, including proper progress update reporting and elimination of all hardcoded timeout values.
 
 ### Repository Architecture
 
@@ -471,6 +473,7 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 | `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
 | `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run sync to shared repos.         |
 | `--no-sync`          | *(flag)*                   | *off*                 | Skip synchronization to shared location entirely.             |
+| `--no-metadata-update` | *(flag)*                 | *off*                 | Skip repository metadata updates (createrepo_c).              |
 | `--refresh-metadata` | *(flag)*                   | *off*                 | Force refresh of DNF metadata cache and rebuild repo cache.   |
 | `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
 | `-v, --verbose`      | *(flag)*                   | *off*                 | Set debug level to 2 (normal verbosity).                     |
@@ -502,6 +505,9 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 # Skip synchronization (useful for testing or development)
 ./myrepo.sh --no-sync --name-filter "geos*"
+
+# Skip metadata updates (useful for development/testing)
+./myrepo.sh --no-metadata-update --no-sync --name-filter "geos*"
 
 # Full rebuild with verbose debugging
 ./myrepo.sh --full-rebuild --debug 3
@@ -559,10 +565,19 @@ The script implements a sophisticated workflow that efficiently manages local pa
 - **Performance**: The script uses fixed optimal settings (batch size: 50, parallel: 6) for best performance.
 - **Sync-Only Mode**: Use `--sync-only` for fast repository synchronization when no package processing is needed.
 - **Skip Sync Mode**: Use `--no-sync` for development and testing scenarios where you want to process packages but skip the time-consuming synchronization step.
+- **Skip Metadata Updates**: Use `--no-metadata-update` for development and testing scenarios where you want to skip repository metadata creation (createrepo_c) for faster execution.
+- **Combined Development Mode**: Use `--no-sync --no-metadata-update` for maximum speed during development and testing.
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
 - **Cache Management**: The shared cache at `/var/cache/myrepo` provides optimal performance for both root and user executions.
 
 ## Changelog
+
+### v2.3.8 (2025-07-28)
+- **NEW**: Added `--no-metadata-update` option to skip repository metadata updates (createrepo_c)
+- **ENHANCEMENT**: Improved development and testing workflow by allowing package processing without metadata overhead
+- **PERFORMANCE**: Combined with `--no-sync`, provides maximum speed for development scenarios
+- **CONFIGURATION**: Added NO_METADATA_UPDATE support in myrepo.cfg
+- **DOCUMENTATION**: Updated README with new option and examples
 
 ### v2.3.7 (2025-07-28)
 - **NEW**: Added `--no-sync` option to skip synchronization to shared location
@@ -584,7 +599,7 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 
 ## Conclusion
 
-The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. Version 2.3.7 focuses on maximum performance through simplification, offering reliable and fast operation while maintaining all essential functionality including the new `--no-sync` option for development and testing scenarios.
+The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. Version 2.3.8 adds the `--no-metadata-update` option for enhanced development and testing workflows, building on v2.3.7's focus on maximum performance through simplification, offering reliable and fast operation while maintaining all essential functionality.
 
-The combination of configuration file support, extensive command-line options, performance optimization, and flexible synchronization controls makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
+The combination of configuration file support, extensive command-line options, performance optimization, and flexible synchronization and metadata controls (including `--no-sync` and `--no-metadata-update`) makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
 

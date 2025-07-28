@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.7"
+VERSION="2.3.8"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -28,6 +28,7 @@ MAX_PACKAGES=${MAX_PACKAGES:-0}
 MAX_CHANGED_PACKAGES=${MAX_CHANGED_PACKAGES:--1}
 SYNC_ONLY=${SYNC_ONLY:-0}
 NO_SYNC=${NO_SYNC:-0}
+NO_METADATA_UPDATE=${NO_METADATA_UPDATE:-0}  # Skip repository metadata updates (createrepo_c)
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
 REPOS=""
@@ -1737,12 +1738,21 @@ function load_config() {
                 LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
                 SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
                 MANUAL_REPOS) 
-                    # Convert comma-separated list to array
-                    IFS=',' read -ra MANUAL_REPOS <<< "$value"
+                    # Convert comma-separated or space-separated list to array
+                    # First try comma-separated, then fall back to space-separated
+                    if [[ "$value" == *","* ]]; then
+                        IFS=',' read -ra MANUAL_REPOS <<< "$value"
+                    else
+                        IFS=' ' read -ra MANUAL_REPOS <<< "$value"
+                    fi
                     ;;
                 LOCAL_RPM_SOURCES)
-                    # Convert comma-separated list to array
-                    IFS=',' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                    # Convert comma-separated or space-separated list to array
+                    if [[ "$value" == *","* ]]; then
+                        IFS=',' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                    else
+                        IFS=' ' read -ra LOCAL_RPM_SOURCES <<< "$value"
+                    fi
                     ;;
                 DEBUG_LEVEL) DEBUG_LEVEL="$value" ;;
                 DRY_RUN) DRY_RUN="$value" ;;
@@ -1755,6 +1765,7 @@ function load_config() {
                 SET_PERMISSIONS) SET_PERMISSIONS="$value" ;;
                 REFRESH_METADATA) REFRESH_METADATA="$value" ;;
                 DNF_SERIAL) DNF_SERIAL="$value" ;;
+                NO_METADATA_UPDATE) NO_METADATA_UPDATE="$value" ;;
                 ELEVATE_COMMANDS) ELEVATE_COMMANDS="$value" ;;
                 CACHE_MAX_AGE) CACHE_MAX_AGE="$value" ;;
                 SHARED_CACHE_PATH) SHARED_CACHE_PATH="$value" ;;
@@ -1959,6 +1970,10 @@ function parse_args() {
                 NO_SYNC=1
                 shift
                 ;;
+            --no-metadata-update)
+                NO_METADATA_UPDATE=1
+                shift
+                ;;
             --dnf-serial)
                 DNF_SERIAL=1
                 shift
@@ -1994,6 +2009,7 @@ function parse_args() {
                 echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
                 echo "  -s, --sync-only        Only sync repositories to shared location"
                 echo "  --no-sync              Skip synchronization to shared location"
+                echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
                 echo "  --dnf-serial           Force serial DNF operations"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
@@ -2689,10 +2705,14 @@ function process_packages() {
     fi
     
     # Update repository metadata for all modified repositories
-    update_all_repository_metadata
-    
-    # Update metadata for manual repositories if they have changes
-    update_manual_repository_metadata
+    if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
+        log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
+    else
+        update_all_repository_metadata
+        
+        # Update metadata for manual repositories if they have changes
+        update_manual_repository_metadata
+    fi
 }
 
 # Report failed downloads at the end of script execution
@@ -2890,6 +2910,9 @@ function show_runtime_status() {
     fi
     if [[ $NO_SYNC -eq 1 ]]; then
         log "I" "Repository synchronization to shared location disabled"
+    fi
+    if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
+        log "I" "Repository metadata updates disabled"
     fi
 
     # Show active filters if any
