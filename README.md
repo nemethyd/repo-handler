@@ -1,12 +1,14 @@
-# Repo Handler Script (v2.3.8)
+# Repo Handler Script (v2.3.10)
 
 **Developed by**: Dániel Némethy (nemethy@moderato.hu) with different AI support models  
 **AI flock**: ChatGPT, Claude, Gemini  
-**Last Updated**: 2025-07-28
+**Last Updated**: 2025-07-29
 
 ## Overview
 
 The `repo-handler` project provides a high-performance bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
+
+**v2.3.10 Improvements**: Enhanced package version comparison logic to correctly handle cases where manual repositories contain newer versions than official repositories. The system now uses RPM's native version comparison with intelligent fallback, ensuring accurate [N] New, [U] Update, and [E] Exists status detection across all repository types. Also includes comprehensive ShellCheck compliance improvements for better code quality.
 
 **v2.3.8 New Feature**: Added `--no-metadata-update` option for skipping repository metadata updates during development and testing. This version also includes the `--no-sync` option and proper manual repository configuration parsing.
 
@@ -580,7 +582,7 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 
 ## Conclusion
 
-The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. Version 2.3.8 adds the `--no-metadata-update` option for enhanced development and testing workflows, building on v2.3.7's focus on maximum performance through simplification, offering reliable and fast operation while maintaining all essential functionality.
+The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. Version 2.3.10 significantly improves package version comparison logic with RPM-native version comparison and enhanced status detection, ensuring accurate handling of complex multi-repository scenarios where manual repositories may contain newer versions than official ones. This builds on v2.3.8's `--no-metadata-update` option for enhanced development workflows and v2.3.7's performance optimizations.
 
-The combination of configuration file support, extensive command-line options, performance optimization, and flexible synchronization and metadata controls (including `--no-sync` and `--no-metadata-update`) makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
+The combination of configuration file support, extensive command-line options, performance optimization, accurate version comparison, and flexible synchronization and metadata controls (including `--no-sync` and `--no-metadata-update`) makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
 

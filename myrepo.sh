@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.9"
+VERSION="2.3.10"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -1593,6 +1593,106 @@ function get_dnf_cmd() {
     fi
 }
 
+# Compare two package versions to determine if first is newer than second
+# Returns 0 (true) if version1 is newer than version2, 1 (false) otherwise
+# Usage: version_is_newer "17.0.0-1.el9" "9.0.0-14.el9"
+function version_is_newer() {
+    local version1="$1"
+    local version2="$2"
+    
+    # Extract version and release parts
+    local ver1="${version1%-*}"  # Everything before last dash
+    local rel1="${version1##*-}" # Everything after last dash
+    local ver2="${version2%-*}"
+    local rel2="${version2##*-}"
+    
+    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2"
+    
+    # Use rpm --eval with version comparison macros for accurate comparison
+    # This handles complex version schemes correctly
+    local comparison_result
+    if command -v rpm >/dev/null 2>&1; then
+        # Method 1: Use RPM's built-in version comparison (most accurate)
+        comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+            case "$comparison_result" in
+                "1")
+                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)"
+                    return 0  # version1 is newer
+                    ;;
+                "0")
+                    # Same version, compare releases
+                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
+                    if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+                        case "$comparison_result" in
+                            "1")
+                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)"
+                                return 0  # release1 is newer
+                                ;;
+                            "0"|"-1")
+                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2"
+                                return 1  # same or older
+                                ;;
+                        esac
+                    fi
+                    ;;
+                "-1")
+                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 < $ver2 (version is older)"
+                    return 1  # version1 is older
+                    ;;
+            esac
+        fi
+    fi
+    
+    # Method 2: Fallback to simple numeric comparison for basic cases
+    # Split versions by dots and compare numerically
+    IFS='.' read -ra ver1_parts <<< "$ver1"
+    IFS='.' read -ra ver2_parts <<< "$ver2"
+    
+    local max_parts=$((${#ver1_parts[@]} > ${#ver2_parts[@]} ? ${#ver1_parts[@]} : ${#ver2_parts[@]}))
+    
+    for ((i=0; i<max_parts; i++)); do
+        local part1=${ver1_parts[i]:-0}
+        local part2=${ver2_parts[i]:-0}
+        
+        # Extract numeric part (handle non-numeric suffixes)
+        local num1
+        num1=${part1//[^0-9]*/}
+        local num2
+        num2=${part2//[^0-9]*/}
+        
+        # Default to 0 if extraction failed
+        num1=${num1:-0}
+        num2=${num2:-0}
+        
+        if [[ $num1 -gt $num2 ]]; then
+            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)"
+            return 0  # version1 is newer
+        elif [[ $num1 -lt $num2 ]]; then
+            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)"
+            return 1  # version1 is older
+        fi
+        # If equal, continue to next part
+    done
+    
+    # Versions are equal at this point, compare releases using simple numeric comparison
+    local rel1_num
+    rel1_num=${rel1//[^0-9]*/}
+    local rel2_num
+    rel2_num=${rel2//[^0-9]*/}
+    
+    rel1_num=${rel1_num:-0}
+    rel2_num=${rel2_num:-0}
+    
+    if [[ $rel1_num -gt $rel2_num ]]; then
+        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)"
+        return 0  # release1 is newer
+    else
+        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)"
+        return 1  # same or older
+    fi
+}
+
 # Simple but accurate package status determination - this is the critical function!
 function get_package_status() {
     local package_name="$1"
@@ -1663,10 +1763,57 @@ function get_package_status() {
             fi
         done <<< "$existing_files"
         
-        # No exact match found among existing files - need UPDATE
+        # No exact match found - but we have existing versions
+        # For manual repositories, we need to check if the installed version is newer than what we have
+        # This handles cases where manual repos contain newer versions than official repos
         local existing_count
         existing_count=$(echo "$existing_files" | wc -l)
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count existing version(s) of $package_name -> UPDATE"
+        
+        # Extract version info from the most recent existing file for comparison
+        local newest_existing_file
+        newest_existing_file=$(echo "$existing_files" | head -1)
+        local existing_basename
+        existing_basename=$(basename "$newest_existing_file")
+        
+        # Parse existing version information from filename
+        # Pattern: packagename-version-release.arch.rpm
+        if [[ "$existing_basename" =~ ^(.+)-([^-]+)-([^-]+)\.([^.]+)\.rpm$ ]]; then
+            local existing_version="${BASH_REMATCH[2]}"
+            local existing_release="${BASH_REMATCH[3]}"
+            
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Comparing versions: requested=$package_version-$package_release vs existing=$existing_version-$existing_release"
+            
+            # Simple version comparison: if the requested version-release matches what we have locally,
+            # but the exact filename differs (e.g., .el9 vs no .el9), consider it EXISTS
+            if [[ "$package_version" == "$existing_version" ]]; then
+                # Same version - check if releases are compatible
+                local req_base_release="${package_release%.*}"  # Remove .el9, .rhel9 suffixes
+                local exist_base_release="${existing_release%.*}"
+                
+                if [[ "$req_base_release" == "$exist_base_release" ]] || [[ "$package_release" == "$existing_release" ]]; then
+                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Compatible version found: $existing_basename -> EXISTS"
+                    echo "EXISTS"
+                    return 0
+                fi
+            fi
+            
+            # Check if the locally installed version is newer than what's being requested
+            # This prevents downgrading packages regardless of repository type
+            local repo_name_from_path
+            repo_name_from_path=$(basename "$(dirname "$repo_path")")
+            
+            if version_is_newer "$existing_version-$existing_release" "$package_version-$package_release"; then
+                local repo_type="official"
+                if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name_from_path "* ]]; then
+                    repo_type="manual"
+                fi
+                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$repo_type repository has newer version ($existing_version-$existing_release > $package_version-$package_release) -> EXISTS"
+                echo "EXISTS"
+                return 0
+            fi
+        fi
+        
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count existing version(s) of $package_name, need UPDATE"
         [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Example existing file: $(echo "$existing_files" | head -1 | xargs basename)"
         echo "UPDATE"
         return 0
