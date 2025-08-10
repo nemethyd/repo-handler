@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.10"
+VERSION="2.3.11"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -1886,111 +1886,28 @@ function is_repo_enabled() {
 
 # Load configuration from myrepo.cfg if it exists - optimized version
 function load_config() {
-    local config_file="myrepo.cfg"
-    
-    if [[ -f "$config_file" ]]; then
-        log "I" "Loading configuration from $config_file"
-        
-        # Use a more efficient method to read config
-        local line_count=0
-        while IFS='=' read -r key value || [[ -n "$key" ]]; do
-            ((line_count++))
-            # Skip comments and empty lines
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
-            
-            # Remove leading/trailing whitespace and quotes - more efficiently
-            key="${key// /}"
-            value="${value#"${value%%[![:space:]]*}"}"  # Remove leading whitespace
-            value="${value%"${value##*[![:space:]]}"}"  # Remove trailing whitespace
-            value="${value#\"}"  # Remove leading quote
-            value="${value%\"}"  # Remove trailing quote
-            
-            # Set configuration variables
-            case "$key" in
-                LOCAL_REPO_PATH) LOCAL_REPO_PATH="$value" ;;
-                SHARED_REPO_PATH) SHARED_REPO_PATH="$value" ;;
-                MANUAL_REPOS) 
-                    # Convert comma-separated or space-separated list to array
-                    # First try comma-separated, then fall back to space-separated
-                    if [[ "$value" == *","* ]]; then
-                        IFS=',' read -ra MANUAL_REPOS <<< "$value"
-                        # Trim whitespace from each array element
-                        for i in "${!MANUAL_REPOS[@]}"; do
-                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]#"${MANUAL_REPOS[i]%%[![:space:]]*}"}"  # Remove leading whitespace
-                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]%"${MANUAL_REPOS[i]##*[![:space:]]}"}"  # Remove trailing whitespace
-                        done
-                    else
-                        IFS=' ' read -ra MANUAL_REPOS <<< "$value"
-                        # Trim whitespace from each array element
-                        for i in "${!MANUAL_REPOS[@]}"; do
-                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]#"${MANUAL_REPOS[i]%%[![:space:]]*}"}"  # Remove leading whitespace
-                            MANUAL_REPOS[i]="${MANUAL_REPOS[i]%"${MANUAL_REPOS[i]##*[![:space:]]}"}"  # Remove trailing whitespace
-                        done
-                    fi
-                    ;;
-                LOCAL_RPM_SOURCES)
-                    # Convert comma-separated or space-separated list to array
-                    if [[ "$value" == *","* ]]; then
-                        IFS=',' read -ra LOCAL_RPM_SOURCES <<< "$value"
-                        # Trim whitespace from each array element
-                        for i in "${!LOCAL_RPM_SOURCES[@]}"; do
-                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]#"${LOCAL_RPM_SOURCES[i]%%[![:space:]]*}"}"  # Remove leading whitespace
-                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]%"${LOCAL_RPM_SOURCES[i]##*[![:space:]]}"}"  # Remove trailing whitespace
-                        done
-                    else
-                        IFS=' ' read -ra LOCAL_RPM_SOURCES <<< "$value"
-                        # Trim whitespace from each array element
-                        for i in "${!LOCAL_RPM_SOURCES[@]}"; do
-                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]#"${LOCAL_RPM_SOURCES[i]%%[![:space:]]*}"}"  # Remove leading whitespace
-                            LOCAL_RPM_SOURCES[i]="${LOCAL_RPM_SOURCES[i]%"${LOCAL_RPM_SOURCES[i]##*[![:space:]]}"}"  # Remove trailing whitespace
-                        done
-                    fi
-                    ;;
-                DEBUG_LEVEL) DEBUG_LEVEL="$value" ;;
-                DRY_RUN) DRY_RUN="$value" ;;
-                MAX_PACKAGES) MAX_PACKAGES="$value" ;;
-                MAX_CHANGED_PACKAGES) MAX_CHANGED_PACKAGES="$value" ;;
-                PARALLEL) PARALLEL="$value" ;;
-                EXCLUDED_REPOS) EXCLUDE_REPOS="$value" ;;
-                FULL_REBUILD) FULL_REBUILD="$value" ;;
-                LOG_DIR) LOG_DIR="$value" ;;
-                SET_PERMISSIONS) SET_PERMISSIONS="$value" ;;
-                REFRESH_METADATA) REFRESH_METADATA="$value" ;;
-                DNF_SERIAL) DNF_SERIAL="$value" ;;
-                NO_METADATA_UPDATE) NO_METADATA_UPDATE="$value" ;;
-                ELEVATE_COMMANDS) ELEVATE_COMMANDS="$value" ;;
-                CACHE_MAX_AGE) CACHE_MAX_AGE="$value" ;;
-                SHARED_CACHE_PATH) SHARED_CACHE_PATH="$value" ;;
-                CLEANUP_UNINSTALLED) CLEANUP_UNINSTALLED="$value" ;;
-                USE_PARALLEL_COMPRESSION) USE_PARALLEL_COMPRESSION="$value" ;;
-                DNF_QUERY_TIMEOUT) DNF_QUERY_TIMEOUT="$value" ;;
-                DNF_CACHE_TIMEOUT) DNF_CACHE_TIMEOUT="$value" ;;
-                SUDO_TEST_TIMEOUT) SUDO_TEST_TIMEOUT="$value" ;;
-                BATCH_SIZE) BATCH_SIZE="$value" ;;
-                PROGRESS_REPORT_INTERVAL) PROGRESS_REPORT_INTERVAL="$value" ;;
-                CONFIG_FILE_MAX_LINES) CONFIG_FILE_MAX_LINES="$value" ;;
-                MAX_PARALLEL_DOWNLOADS) MAX_PARALLEL_DOWNLOADS="$value" ;;
-                DNF_RETRIES) DNF_RETRIES="$value" ;;
-                DEBUG_FILE_LIST_THRESHOLD) DEBUG_FILE_LIST_THRESHOLD="$value" ;;
-                DEBUG_FILE_LIST_COUNT) DEBUG_FILE_LIST_COUNT="$value" ;;
-            esac
-            
-            # Limit config file reading to prevent hanging on large files
-            if [[ $line_count -gt $CONFIG_FILE_MAX_LINES ]]; then
-                log "W" "Config file too large, stopping at line $line_count"
-                break
-            fi
-        done < "$config_file"
-        
-        log "I" "Configuration loaded: LOCAL_REPO_PATH=$LOCAL_REPO_PATH"
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "MANUAL_REPOS from config: (${#MANUAL_REPOS[@]} entries) ${MANUAL_REPOS[*]}"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}"
-    else
-        log "I" "No configuration file found, using defaults"
+    # Directory of the invoked script (no symlink resolution)
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+    CONFIG_FILE=""
+    if [[ -f "${SCRIPT_DIR}/myrepo.cfg" ]]; then
+        CONFIG_FILE="${SCRIPT_DIR}/myrepo.cfg"
+    elif [[ -f "./myrepo.cfg" ]]; then
+        CONFIG_FILE="./myrepo.cfg"
     fi
-    
-    # Set up default LOCAL_RPM_SOURCES if not configured
+
+    if [[ -n "$CONFIG_FILE" ]]; then
+        log "I" "Loading configuration from $CONFIG_FILE"
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+        log "I" "Configuration loaded: LOCAL_REPO_PATH=$LOCAL_REPO_PATH"
+        if [[ ${#MANUAL_REPOS[@]} -gt 0 ]]; then
+            log "I" "MANUAL_REPOS: (${#MANUAL_REPOS[@]}) ${MANUAL_REPOS[*]}"
+        fi
+    else
+        log "I" "No myrepo.cfg found beside script or in current directory"
+    fi
+
     if [[ ${#LOCAL_RPM_SOURCES[@]} -eq 0 ]]; then
         LOCAL_RPM_SOURCES=(
             "$HOME/rpmbuild/RPMS"
@@ -3179,7 +3096,7 @@ function sync_to_shared_repos() {
             
             # Skip and warn about invalid getPackage directory directly under LOCAL_REPO_PATH
             if [[ "$repo_name" == "getPackage" ]]; then
-                log "W" "Found invalid getPackage directory directly under $LOCAL_REPO_PATH - this is a bug!"
+                log "W" "Found invalid getPackage directory at $LOCAL_REPO_PATH/getPackage"
                 log "W" "   getPackage should only exist as subdirectories under repository directories"
                 log "W" "   Skipping sync for this invalid directory"
                 continue
@@ -3253,7 +3170,7 @@ function update_all_repository_metadata() {
             done
 
             if [[ "$is_manual_repo" == true ]]; then
-                # For manual repos, use base path only
+                # For manual repositories, use base path only
                 local repo_base_path
                 repo_base_path=$(get_repo_base_path "$repo_name")
                 cleanup_old_repodata "$repo_name" "$repo_base_path" ""
@@ -3263,7 +3180,7 @@ function update_all_repository_metadata() {
                     ((failed_repos++))
                 fi
             else
-                # For regular repos, use getPackage subdir
+                # For regular repositories, we need to get the base path
                 local repo_path
                 repo_path=$(get_repo_path "$repo_name")
                 if [[ -d "$repo_path" ]]; then
@@ -3345,7 +3262,7 @@ function update_manual_repository_metadata() {
             log "I" "🔄 $(align_repo_name "$manual_repo"): Manual repository needs metadata update"
             
             # Clean up old repodata for manual repositories (they don't use getPackage structure)
-            cleanup_old_repodata "$manual_repo" "$repo_dir" ""
+            cleanup_old_repodata "$repo_name" "$repo_dir" ""
             
             if update_repository_metadata "$manual_repo" "$repo_dir"; then
                 ((updated_manual++))
