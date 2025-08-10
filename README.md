@@ -1,49 +1,184 @@
-# Repo Handler Script (v2.3.10)
+# Repo Handler Script (v2.3.11)
 
-**Developed by**: Dániel Némethy (nemethy@moderato.hu) with different AI support models  
-**AI flock**: ChatGPT, Claude, Gemini  
-**Last Updated**: 2025-07-29
+Author: Dániel Némethy (nemethy@moderato.hu)
 
-## Overview
+## Purpose
 
-The `repo-handler` project provides a high-performance bash script designed to manage, clean, and synchronize local package repositories on systems that are isolated from the Internet. This script is particularly useful for environments where a local mirror of installed packages needs to be maintained and synchronized with a shared repository.
+`myrepo.sh` builds and maintains lean local RPM repositories that mirror only the packages actually installed on a host (plus any manually managed repositories). It can then update repository metadata and optionally sync the result to a shared location. Intended for disconnected / controlled environments where you need a reproducible subset of upstream repositories.
 
-**v2.3.10 Improvements**: Enhanced package version comparison logic to correctly handle cases where manual repositories contain newer versions than official repositories. The system now uses RPM's native version comparison with intelligent fallback, ensuring accurate [N] New, [U] Update, and [E] Exists status detection across all repository types. Also includes comprehensive ShellCheck compliance improvements for better code quality.
+## What It Actually Does (Current Implementation)
 
-**v2.3.8 New Feature**: Added `--no-metadata-update` option for skipping repository metadata updates during development and testing. This version also includes the `--no-sync` option and proper manual repository configuration parsing.
+1. Loads defaults and (if present) `myrepo.cfg` located beside the script.
+2. Auto‑detects privilege mode (root / sudo / user) and uses `dnf` directly or via `sudo`.
+3. Builds / reuses a shared metadata cache of repository package lists (only for installed packages) under `SHARED_CACHE_PATH`.
+4. Queries all installed packages with repository info using `dnf repoquery`.
+5. Filters, normalizes and deduplicates the package list (skips invalid repos, collapses duplicates, optional name regex filter).
+6. Determines the source repository for each package (resolving `@System` packages using cached metadata, fallback heuristics and manual repo scan).
+7. Classifies each package as NEW / UPDATE / EXISTS per repository by comparing the presence and version of RPM files already stored locally.
+8. Copies RPMs from configured local source directories first (avoids redownloading already available artifacts).
+9. Batches remaining NEW and UPDATE downloads per repository using `dnf download`, with fallback to smaller batches and individual retries; tracks failed downloads.
+10. (Optional) Removes RPMs for packages no longer installed (`cleanup_uninstalled_packages`).
+11. Generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
+12. (Optional) Syncs the local repository tree to a shared path, skipping disabled repos.
+13. Produces: colored per‑package log lines, a per‑repository summary table, failed download report, unknown package report.
 
-**v2.3.7 Performance Optimizations**: This version achieves maximum performance by removing complex adaptive features in favor of simple, reliable, fast operation. All major bottlenecks have been eliminated while preserving essential functionality and bug fixes, including proper progress update reporting and elimination of all hardcoded timeout values.
+## Repository Layout
 
-### Repository Architecture
+```
+LOCAL_REPO_PATH/
+   <repo_name>/
+      repodata/              (generated here)
+      getPackage/            (RPM files stored here)
+         pkgA-ver-rel.arch.rpm
+         ...
+   <manual_repo>/
+      repodata/
+      getPackage/ (same structure)
+```
 
-The script manages a **LOCAL_REPO_PATH** (typically `/repo`) that contains two types of repositories:
+Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF; only existing or locally supplied RPMs are included. The script will not attempt to fetch missing RPMs for manual repos.
 
-1. **Internet-sourced repositories**: These contain a reduced subset of official internet repositories, including only the packages that are actually installed on the local "golden copy" system. This creates much smaller repositories compared to the original internet repositories.
+## Key Features Implemented
 
-2. **Manual repositories** (defined in `MANUAL_REPOS`): These are additional repositories (like `ol9_edge`) that will be replicated and synchronized regardless of whether their content is installed locally. These allow for manual package deployment and custom repository management.
+- NEW / UPDATE / EXISTS classification with filename pattern + version comparison (RPM vercmp + numeric fallback).
+- Local RPM reuse: scans `LOCAL_RPM_SOURCES` before downloading.
+- Batch + fallback download strategy with progress output and throttled status logging.
+- Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
+- Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
+- Metadata generation via `createrepo_c` with optional parallel workers.
+- Auto privilege detection (`ELEVATE_COMMANDS`=auto) – uses sudo only when needed.
+- Filtering: include (`--repos`), exclude (`--exclude-repos`), name regex (`--name-filter`).
+- Limits: `--max-packages` (overall processed), `--max-changed-packages` (new + update downloads; 0=none, -1=unlimited).
+- Dry run mode (`--dry-run`) showing intended actions without changes.
+- Manual repository metadata refresh detection (timestamp + presence logic).
+- Summary table and reports (failed downloads, unknown packages).
 
-The script helps:
+## Configuration (`myrepo.cfg`)
 
-- **Replicate and Update**: Creates and updates internet-sourced repositories based on installed packages from a "golden copy" system, plus manages manual repositories regardless of installation status.
-- **Automatic Cleanup**: Removes uninstalled or outdated packages from internet-sourced repositories, ensuring they only contain necessary packages.
-- **Manual Repository Support**: Maintains and synchronizes manual repositories (like `ol9_edge`) that can contain packages not necessarily installed locally.
-- **Synchronization**: Keeps both types of repositories in sync with a shared repository using `rsync`.
-- **Configuration Flexibility**: Allows customization through a configuration file `myrepo.cfg` and command-line arguments.
-- **Repository Exclusions**: Enables exclusion of certain repositories from being processed.
+Place `myrepo.cfg` next to `myrepo.sh`. Any shell assignments override defaults. Example snippet:
 
-![MyRepo Workflow](images/MyRepo.png)
+```bash
+LOCAL_REPO_PATH="/repo"
+SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
+MANUAL_REPOS=("ol9_edge")
+LOCAL_RPM_SOURCES=("$HOME/rpmbuild/RPMS" "/var/cache/dnf")
+MAX_CHANGED_PACKAGES=-1
+DEBUG_LEVEL=1
+```
 
-### Key Features:
+You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_edge,custom_repo`).
 
-- **Reduced Repository Size**: The internet-sourced repositories are much smaller than the original upstream repositories, containing only packages installed on the specific environment, while manual repositories provide flexibility for additional package deployment.
-- **Batch Processing**: Efficiently processes packages in batches for performance optimization.
-- **Automatic Cleanup**: Removes older or uninstalled package versions from the local repository.
-- **Synchronization**: Keeps the local repository in sync with a shared repository using `rsync`.
-- **Flexible Filtering**: Supports both repository-level and package name-level filtering for precise control over what gets processed.
-- **Customizable Output**: Aligns repository names in output messages for better readability.
-- **Configuration File Support**: Introduces `myrepo.cfg` for overriding default settings, with command-line arguments taking precedence.
-- **Debugging Options**: Includes a `DEBUG_LEVEL` for controlling output verbosity during script execution.
-- **Verbosity Control**: Allows setting the verbosity of log messages using the `DEBUG_LEVEL` option (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose). Message types determine display symbols: [E]rror, [W]arning, [S]uccess, [I]nfo, [P]rogress, [A]ction, [U]pdate, [D]ebug.
+## Command Line Options (Implemented)
+
+```
+--batch-size INT                 (internal simple batch grouping)
+--cache-max-age SEC              Max age for cached repo metadata
+--shared-cache-path PATH         Cache directory (default: /var/cache/myrepo)
+--cleanup-uninstalled | --no-cleanup-uninstalled
+--parallel-compression | --no-parallel-compression
+--debug [LEVEL]                  If no LEVEL, defaults to 2
+--dry-run                        No filesystem or download changes
+--exclude-repos list             Comma-separated
+--full-rebuild                   Purge all RPMs + repodata first
+--local-repo-path PATH
+--log-dir PATH                   (currently informational)
+--manual-repos list              Comma-separated (overrides config)
+--max-packages INT               Limit packages processed (0 = unlimited)
+--max-changed-packages INT       Limit NEW+UPDATE downloads (0=none, -1=unlimited)
+--name-filter REGEX              Process only matching package names
+--parallel INT                   Worker hint for compression / future parallelism
+--repos list                     Only these repositories
+--refresh-metadata               Force rebuild of cache timestamp + dnf metadata clean
+--set-permissions                (basic permission normalization)
+--shared-repo-path PATH          Target sync destination
+-s | --sync-only                 Skip processing; just sync
+--no-sync                        Skip sync stage
+--no-metadata-update             Skip createrepo_c
+--dnf-serial                     Hint to avoid parallel DNF (currently advisory)
+-v | --verbose                   Set debug level 2
+-h | --help                      Show help
+```
+
+## Environment / Important Variables
+
+| Variable | Meaning |
+|----------|---------|
+| LOCAL_REPO_PATH | Root of local repositories |
+| SHARED_REPO_PATH | Sync destination (rsync target) |
+| MANUAL_REPOS | Array of manual repositories (no DNF fetch) |
+| LOCAL_RPM_SOURCES | Directories scanned for existing RPMs first |
+| CACHE_MAX_AGE | Seconds before repo metadata cache refresh |
+| MAX_CHANGED_PACKAGES | Cap on new+updated downloads (-1 unlimited, 0 forbid) |
+| ELEVATE_COMMANDS | 1 (auto) or 0 (never sudo) |
+| DEBUG_LEVEL | 0–4 impact verbosity |
+
+All can be overridden via `myrepo.cfg` or CLI; CLI wins.
+
+## Typical Workflow
+
+1. Place script + config: `/opt/tools/myrepo.sh`, `/opt/tools/myrepo.cfg`.
+2. Ensure `LOCAL_REPO_PATH` exists (e.g. `/repo`).
+3. Run once to build cache & populate repos: `./myrepo.sh --debug 2`.
+4. Add new packages (install them on system or drop into manual repo) and rerun.
+5. Sync results: either automatic (default) or later with `./myrepo.sh -s`.
+
+## Examples
+
+Download only changed packages for selected repos:
+```
+./myrepo.sh --repos ol9_baseos_latest,ol9_appstream --max-changed-packages 100
+```
+
+Dry run with filtering:
+```
+./myrepo.sh --dry-run --name-filter '^(kernel|openssl)'
+```
+
+Full rebuild (purge + repopulate) without syncing yet:
+```
+./myrepo.sh --full-rebuild --no-sync
+```
+
+Manual repositories only (metadata refresh):
+```
+./myrepo.sh --repos ol9_edge --refresh-metadata
+```
+
+Sync only (no processing):
+```
+./myrepo.sh --sync-only
+```
+
+## Exit Status
+
+0 = success / completed script path
+>0 = failure during early validation or critical operation (cache build, dnf query, etc.)
+
+## Requirements
+
+- Oracle / RHEL compatible system with `dnf`
+- `createrepo_c` (preferred) or fallback `createrepo`
+- `rsync` (recommended for efficient syncing)
+- Bash 4+
+
+## Notes / Guarantees
+
+- Does not attempt to “guess” missing packages for manual repos—silently skips downloads there unless RPM supplied locally.
+- Will not place `repodata/` inside `getPackage`; ensures metadata resides at repository root.
+- Protects against accidental creation of a naked `$LOCAL_REPO_PATH/getPackage` directory (warns if detected).
+- Uses only enabled repositories for downloads; disabled repos are temporarily enabled per batch when needed.
+
+## Limitations (Known, Accepted)
+
+- No signature verification of RPMs (assumes trusted environment).
+- Metadata change detection for manual repos is timestamp-based (not content hashing).
+- Parallel DNF download concurrency limited by DNF itself; `--parallel` mainly influences metadata compression workers.
+- No built-in lock for multi-host concurrent writes to the same shared path.
+
+## License
+
+MIT License. See `LICENSE` file.
+
 - **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
