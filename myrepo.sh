@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.11"
+VERSION="2.3.12"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -67,6 +67,9 @@ DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to 
 
 # Simplified batch processing (removed complex performance tracking for speed)
 SIMPLE_BATCH_SIZE=${SIMPLE_BATCH_SIZE:-50}                # Fixed batch size for optimal performance
+FALLBACK_BATCH_SIZE=${FALLBACK_BATCH_SIZE:-5}            # Fallback batch size for retrying failed downloads
+RPM_QUERY_BATCH_SIZE=${RPM_QUERY_BATCH_SIZE:-50}         # Batch size for rpm -qp metadata extraction during cleanup
+REMOVE_BATCH_SIZE=${REMOVE_BATCH_SIZE:-100}              # Batch size for removing uninstalled RPMs
 
 # Progress reporting thresholds (configurable to avoid hardcoded magic numbers)
 LARGE_BATCH_THRESHOLD=${LARGE_BATCH_THRESHOLD:-200}       # Threshold for large batch progress reporting
@@ -304,7 +307,7 @@ function batch_download_packages() {
                     # OPTIMIZED FALLBACK: Try smaller batches first, then individual downloads
                     log "I" "   Trying optimized fallback downloads..."
                     local success_count=0
-                    local fallback_batch_size=5  # Much smaller batches for problematic repos
+                    local fallback_batch_size=$FALLBACK_BATCH_SIZE  # Configurable smaller batches for problematic repos
                     local fallback_processed=0
                     
                     # First try: smaller batches (5 packages at a time)
@@ -997,7 +1000,7 @@ function cleanup_uninstalled_packages() {
             fi
             
             # MAJOR PERFORMANCE IMPROVEMENT: Batch RPM queries using parallel processing
-            local batch_size=50  # Process RPMs in batches to avoid command line length limits
+            local batch_size=$RPM_QUERY_BATCH_SIZE  # Configurable batch size for rpm metadata queries
             local processed_rpms=0
             local rpms_to_remove=()
             local removed_count=0
@@ -1096,7 +1099,7 @@ function cleanup_uninstalled_packages() {
             
             # PERFORMANCE OPTIMIZATION: Batch remove files in chunks to avoid command line limits
             if [[ ${#rpms_to_remove[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-                local remove_batch_size=100
+                local remove_batch_size=$REMOVE_BATCH_SIZE
                 local remove_processed=0
                 
                 while [[ $remove_processed -lt ${#rpms_to_remove[@]} ]]; do
