@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.14)
+# Repo Handler Script (v2.3.17)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -109,6 +109,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | CACHE_MAX_AGE | Seconds before repo metadata cache refresh |
 | MAX_CHANGED_PACKAGES | Cap on new+updated downloads (-1 unlimited, 0 forbid) |
 | ELEVATE_COMMANDS | 1 (auto) or 0 (never sudo) |
+| FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–4 impact verbosity |
 
 All can be overridden via `myrepo.cfg` or CLI; CLI wins.

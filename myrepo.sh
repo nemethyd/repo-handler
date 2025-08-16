@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.14"
+VERSION="2.3.17"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -66,6 +66,7 @@ DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to 
 
 # Unified batch size configuration
 BATCH_SIZE=${BATCH_SIZE:-50}              # Primary batch size used for downloads, rpm metadata queries and removals
+FORCE_REDOWNLOAD=${FORCE_REDOWNLOAD:-0}    # 1 = remove existing RPM before downloading; 0 = keep until new file succeeds
 
 # Progress reporting thresholds (configurable to avoid hardcoded magic numbers)
 LARGE_BATCH_THRESHOLD=${LARGE_BATCH_THRESHOLD:-200}       # Threshold for large batch progress reporting
@@ -145,15 +146,15 @@ function batch_download_packages() {
             }
         fi
         
-        # Remove only the exact version being updated (if it exists) - keep other installed versions
-        if [[ -d "$repo_path" ]]; then
+        # Optional pre-removal of existing RPM (safer replacement defaults to deferred removal)
+        if [[ -d "$repo_path" && $FORCE_REDOWNLOAD -eq 1 ]]; then
             local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
             if [[ -f "$exact_package_file" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing existing version: ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Pre-removing existing (FORCE_REDOWNLOAD=1): ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    sudo rm -f "$exact_package_file" 2>/dev/null
+                    sudo rm -f "$exact_package_file" 2>/dev/null || true
                 else
-                    rm -f "$exact_package_file" 2>/dev/null
+                    rm -f "$exact_package_file" 2>/dev/null || true
                 fi
             fi
         fi
@@ -1697,7 +1698,9 @@ function get_package_status() {
     
     # Build expected filename patterns
     local exact_filename="${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-    local name_arch_pattern="${package_name}-*-*.${package_arch}.rpm"
+    # Pattern that matches ONLY the base package (version starts immediately after name)
+    # This deliberately excludes subpackages like name-libs, name-devel etc.
+    local base_version_glob="${package_name}-[0-9]*.${package_arch}.rpm"
     
     [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking status for $exact_filename in $repo_path"
     
@@ -1739,76 +1742,69 @@ function get_package_status() {
         fi
     fi
     
-    # Check for same package name/arch but different version (UPDATE needed)
+    # Check for same base package name/arch but potentially different version (UPDATE needed)
+    # Restrict to files whose next token after package name starts with a digit to avoid subpackages
     local existing_files
-    existing_files=$(find "$repo_path" -maxdepth 1 -name "$name_arch_pattern" -type f 2>/dev/null)
+    existing_files=$(find "$repo_path" -maxdepth 1 -type f -name "$base_version_glob" 2>/dev/null)
     
     if [[ -n "$existing_files" ]]; then
         # Double-check for exact match in the found files (handles edge cases)
         while IFS= read -r existing_file; do
             local basename_file
             basename_file=$(basename "$existing_file")
-            
-            # If we find an exact match here, it means we missed it above - return EXISTS
+            # Guard: exact match should have been caught earlier; keep defensive check
             if [[ "$basename_file" == "$exact_filename" ]]; then
-                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match in file list: $basename_file -> EXISTS"
+                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match in filtered base list: $basename_file -> EXISTS"
                 echo "EXISTS"
                 return 0
             fi
         done <<< "$existing_files"
-        
-        # No exact match found - but we have existing versions
-        # For manual repositories, we need to check if the installed version is newer than what we have
-        # This handles cases where manual repos contain newer versions than official repos
+
         local existing_count
         existing_count=$(echo "$existing_files" | wc -l)
-        
-        # Extract version info from the most recent existing file for comparison
+
+        # Use the first existing base package for version comparison
         local newest_existing_file
         newest_existing_file=$(echo "$existing_files" | head -1)
         local existing_basename
         existing_basename=$(basename "$newest_existing_file")
-        
-        # Parse existing version information from filename
-        # Pattern: packagename-version-release.arch.rpm
-        if [[ "$existing_basename" =~ ^(.+)-([^-]+)-([^-]+)\.([^.]+)\.rpm$ ]]; then
-            local existing_version="${BASH_REMATCH[2]}"
-            local existing_release="${BASH_REMATCH[3]}"
-            
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Comparing versions: requested=$package_version-$package_release vs existing=$existing_version-$existing_release"
-            
-            # Simple version comparison: if the requested version-release matches what we have locally,
-            # but the exact filename differs (e.g., .el9 vs no .el9), consider it EXISTS
-            if [[ "$package_version" == "$existing_version" ]]; then
-                # Same version - check if releases are compatible
-                local req_base_release="${package_release%.*}"  # Remove .el9, .rhel9 suffixes
-                local exist_base_release="${existing_release%.*}"
-                
-                if [[ "$req_base_release" == "$exist_base_release" ]] || [[ "$package_release" == "$existing_release" ]]; then
-                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Compatible version found: $existing_basename -> EXISTS"
-                    echo "EXISTS"
-                    return 0
-                fi
-            fi
-            
-            # Check if the locally installed version is newer than what's being requested
-            # This prevents downgrading packages regardless of repository type
-            local repo_name_from_path
-            repo_name_from_path=$(basename "$(dirname "$repo_path")")
-            
-            if version_is_newer "$existing_version-$existing_release" "$package_version-$package_release"; then
-                local repo_type="official"
-                if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name_from_path "* ]]; then
-                    repo_type="manual"
-                fi
-                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$repo_type repository has newer version ($existing_version-$existing_release > $package_version-$package_release) -> EXISTS"
-                echo "EXISTS"
-                return 0
-            fi
+
+        # Extract version-release.arch (strip prefix and suffix)
+    # Extract fragments carefully; quote parameter expansions separately to satisfy shellcheck SC2295
+    # shellcheck disable=SC2295 # We intentionally separate quoting for pattern parts
+    local vr_arch="${existing_basename#"${package_name}"-}"
+    # shellcheck disable=SC2295
+    vr_arch="${vr_arch%."${package_arch}".rpm}"
+    local existing_version="${vr_arch%%-*}"
+    # shellcheck disable=SC2295
+    local existing_release="${vr_arch#"${existing_version}"-}"
+
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Comparing base package versions: requested=$package_version-$package_release vs existing=$existing_version-$existing_release"
+
+        # If same version and compatible release treat as EXISTS
+        local req_base_release="${package_release%.*}"
+        local exist_base_release="${existing_release%.*}"
+        if [[ "$package_version" == "$existing_version" && ( "$req_base_release" == "$exist_base_release" || "$package_release" == "$existing_release" ) ]]; then
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Compatible base version found: $existing_basename -> EXISTS"
+            echo "EXISTS"
+            return 0
         fi
-        
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count existing version(s) of $package_name, need UPDATE"
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Example existing file: $(echo "$existing_files" | head -1 | xargs basename)"
+
+        # If existing is newer -> EXISTS (don't downgrade)
+        local repo_name_from_path
+        repo_name_from_path=$(basename "$(dirname "$repo_path")")
+        if version_is_newer "$existing_version-$existing_release" "$package_version-$package_release"; then
+            local repo_type="official"
+            if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name_from_path "* ]]; then
+                repo_type="manual"
+            fi
+            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$repo_type repository has newer base version ($existing_version-$existing_release > $package_version-$package_release) -> EXISTS"
+            echo "EXISTS"
+            return 0
+        fi
+
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count base package version(s) of $package_name, need UPDATE"
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Example base file: $(echo "$existing_files" | head -1 | xargs basename)"
         echo "UPDATE"
         return 0
     fi
@@ -2598,27 +2594,19 @@ function process_packages() {
                         [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
                         [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
                         
-                        # Remove only the exact version being updated (if it exists) - keep other installed versions
-                        local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-                        if [[ -f "$exact_package_file" ]]; then
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Removing existing version: ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-                            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                                sudo rm -f "$exact_package_file" 2>/dev/null
-                            else
-                                rm -f "$exact_package_file" 2>/dev/null
-                            fi
-                        fi
-                        
-                        # Copy the local RPM to the repository
+                        # Safe replacement: copy new file first, then remove old if different
+                        local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+                        local temp_copy="${target_file}.new.$$"
+                        # Copy the local RPM to a temp file then move atomically
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$repo_path/"; then
+                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then
                                 [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
                                 update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                             fi
                         else
-                            if cp "$rpm_path" "$repo_path/"; then
+                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then
                                 [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
                             else
                                 echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
@@ -3099,7 +3087,7 @@ function sync_to_shared_repos() {
             # Check if this repository should be synced (only enabled repos)
             if ! is_repo_enabled "$repo_name"; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping sync for disabled repository: $repo_name"
-                echo -e "\e[90m$(align_repo_name "$repo_name"): Skipped (disabled repository)\e[0m"
+                log "I" "$(align_repo_name "$repo_name"): Skipped (disabled repository)"
                 continue
             fi
             
@@ -3124,7 +3112,7 @@ function sync_to_shared_repos() {
                 cp -r "$repo_dir/"* "$shared_repo_dir/" 2>/dev/null
             fi
             
-            echo -e "\e[32m$(align_repo_name "$repo_name"): Synced to shared repository\e[0m"
+            log "I" "$(align_repo_name "$repo_name"): Synced to shared repository"
         fi
     done
     
@@ -3460,6 +3448,7 @@ function validate_repository_structure() {
 }
 
 ### Main execution section ###
+SCRIPT_START_TIME=$(date +%s)
 load_config
 parse_args "$@" 
 check_command_elevation
@@ -3474,4 +3463,13 @@ sync_to_shared_repos
 report_failed_downloads
 report_unknown_packages
 
-log "I" "Script completed successfully"
+SCRIPT_END_TIME=$(date +%s)
+SCRIPT_DURATION=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+if [[ $SCRIPT_DURATION -lt 60 ]]; then
+    DURATION_HUMAN="${SCRIPT_DURATION}s"
+else
+    mins=$((SCRIPT_DURATION / 60))
+    secs=$((SCRIPT_DURATION % 60))
+    DURATION_HUMAN="${mins}m${secs}s"
+fi
+log "I" "${0##*/} v${VERSION} completed successfully in ${DURATION_HUMAN}"
