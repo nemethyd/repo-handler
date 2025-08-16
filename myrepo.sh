@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.19"
+VERSION="2.3.20"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -119,6 +119,8 @@ declare -A CHANGED_REPOS  # Repos with added/updated/removed RPMs this run
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
 
+### Function Definitions (Alphabetical Order) ###
+
 # Align repository names like the original script
 function align_repo_name() {
     local repo_name="$1"
@@ -128,338 +130,80 @@ function align_repo_name() {
 # Simplified batch download without complex performance tracking
 function batch_download_packages() {
     local -A repo_packages
-    
-    # Group packages by repository for batch downloading (simple grouping)
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
-        # Skip manual repositories - they are for locally managed packages, not downloads
         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
             [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)\e[0m"
             continue
         fi
-        
-        local repo_path
-        repo_path=$(get_repo_path "$repo_name")
-        
-        # Ensure repository directory exists with proper permissions
+        local repo_path; repo_path=$(get_repo_path "$repo_name")
         if [[ ! -d "$repo_path" ]]; then
             mkdir -p "$repo_path" 2>/dev/null || {
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    sudo mkdir -p "$repo_path"
-                    sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                    sudo mkdir -p "$repo_path" && sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
                     chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_path" 2>/dev/null || true
                 fi
             }
         fi
-        
-        # Optional pre-removal of existing RPM (safer replacement defaults to deferred removal)
         if [[ -d "$repo_path" && $FORCE_REDOWNLOAD -eq 1 ]]; then
             local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
             if [[ -f "$exact_package_file" ]]; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Pre-removing existing (FORCE_REDOWNLOAD=1): ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    sudo rm -f "$exact_package_file" 2>/dev/null || true
-                else
-                    rm -f "$exact_package_file" 2>/dev/null || true
-                fi
+                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then sudo rm -f "$exact_package_file" 2>/dev/null || true; else rm -f "$exact_package_file" 2>/dev/null || true; fi
             fi
         fi
-        
-        # Build package spec (handle epoch properly for DNF download)
         local package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
         repo_packages["$repo_path|$repo_name"]+="$package_spec "
     done
-    
-    # Count total packages for progress tracking
     local total_packages_to_download=0
     for repo_key in "${!repo_packages[@]}"; do
-        local package_count
-        package_count=$(echo "${repo_packages[$repo_key]}" | wc -w)
+        local package_count; package_count=$(echo "${repo_packages[$repo_key]}" | wc -w)
         total_packages_to_download=$((total_packages_to_download + package_count))
     done
-    
     log "I" "📦 Processing $total_packages_to_download packages across ${#repo_packages[@]} repositories..."
-    
-    # Enhanced progress reporting for large batches
     if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
         log "I" "🔄 Large batch detected ($total_packages_to_download packages) - progress updates every ${PROGRESS_UPDATE_INTERVAL}s"
     fi
-    
-    # Track global progress
-    local global_downloaded=0
-    local current_repo=0
-    
-    # Download batches per repository (simplified without complex load balancing)
+    local global_downloaded=0 current_repo=0
     for repo_key in "${!repo_packages[@]}"; do
-        local repo_path="${repo_key%|*}"
-        local repo_name="${repo_key#*|}"
-        local packages="${repo_packages[$repo_key]}"
-        
-        if [[ -n "$packages" ]]; then
-            ((current_repo++))
-            
-            # Count packages for better feedback
-            local total_package_count
-            total_package_count=$(echo "$packages" | wc -w)
-            
-            log "I" "📥 Repository $current_repo/${#repo_packages[@]}: Downloading $total_package_count packages from $repo_name..."
-            
-            # Split packages into simple fixed-size batches
-            local -a package_array
-            read -ra package_array <<< "$packages"
-            
-            local batch_num=1
-            local processed_packages=0
-            
-            while [[ $processed_packages -lt $total_package_count ]]; do
-                # Create batch with fixed size
-                local batch_packages=()
-                local batch_end=$(( processed_packages + BATCH_SIZE ))
-                [[ $batch_end -gt $total_package_count ]] && batch_end=$total_package_count
-                
-                for ((i=processed_packages; i<batch_end; i++)); do
-                    batch_packages+=("${package_array[i]}")
+        local repo_path="${repo_key%|*}" repo_name="${repo_key#*|}" packages="${repo_packages[$repo_key]}"
+        [[ -z "$packages" ]] && continue
+        ((current_repo++))
+        local total_package_count; total_package_count=$(echo "$packages" | wc -w)
+        log "I" "📥 Repository $current_repo/${#repo_packages[@]}: Downloading $total_package_count packages from $repo_name..."
+        local -a package_array; read -ra package_array <<< "$packages"
+        local batch_num=1 processed_packages=0
+        while [[ $processed_packages -lt $total_package_count ]]; do
+            local batch_packages=() batch_end=$(( processed_packages + BATCH_SIZE )); [[ $batch_end -gt $total_package_count ]] && batch_end=$total_package_count
+            for ((i=processed_packages; i<batch_end; i++)); do batch_packages+=("${package_array[i]}"); done
+            local batch_package_count=${#batch_packages[@]}
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Batch packages: ${batch_packages[*]}"
+            local dnf_cmd; dnf_cmd=$(get_dnf_cmd)
+            local dnf_options=( --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS" --setopt=fastestmirror=1 --setopt=deltarpm=0 --setopt=timeout="$DNF_QUERY_TIMEOUT" --setopt=retries="$DNF_RETRIES" --destdir="$repo_path" )
+            if ! is_repo_enabled "$repo_name"; then [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name"; dnf_options+=(--enablerepo="$repo_name"); fi
+            local batch_start_time; batch_start_time=$(date +%s)
+            log "I" "⏳ Starting DNF download for $repo_name..."
+            local show_periodic_progress=0; if [[ $batch_package_count -gt $PROGRESS_BATCH_THRESHOLD || $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then show_periodic_progress=1; fi
+            local download_success=0
+            if [[ $show_periodic_progress -eq 1 ]]; then (
+                sleep "$PROGRESS_UPDATE_INTERVAL"; while true; do log "I" "🔄 Still downloading... ($batch_package_count packages from $repo_name, elapsed: $(($(date +%s) - batch_start_time))s)"; sleep "$PROGRESS_UPDATE_INTERVAL"; done
+            ) & progress_pid=$!; if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then download_success=1; fi; kill $progress_pid 2>/dev/null || true; wait $progress_pid 2>/dev/null || true; else if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then download_success=1; fi; fi
+            if [[ $download_success -eq 1 ]]; then
+                local batch_end_time batch_duration; batch_end_time=$(date +%s); batch_duration=$((batch_end_time - batch_start_time))
+                log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"; CHANGED_REPOS["$repo_name"]=1
+                global_downloaded=$((global_downloaded + batch_package_count)); if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then local progress_percent=$(( (global_downloaded * 100) / total_packages_to_download )); log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"; fi
+            else
+                log "W" "✗ Some downloads failed in batch $batch_num for $repo_name"; log "I" "   Trying optimized fallback downloads..."
+                local success_count=0 fallback_batch_size=$BATCH_SIZE fallback_processed=0
+                while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
+                    local fallback_end=$((fallback_processed + fallback_batch_size)); [[ $fallback_end -gt ${#batch_packages[@]} ]] && fallback_end=${#batch_packages[@]}
+                    local small_batch=(); for ((i=fallback_processed; i<fallback_end; i++)); do small_batch+=("${batch_packages[i]}"); done
+                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then success_count=$((success_count + ${#small_batch[@]})); [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"; fallback_processed=$fallback_end; else [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads"; for pkg in "${small_batch[@]}"; do if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then ((success_count++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"; else failed_downloads["$pkg"]="$repo_name"; failed_download_reasons["$pkg"]="DNF download failed"; [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"; fi; done; fallback_processed=$fallback_end; fi
                 done
-                
-                local batch_package_count=${#batch_packages[@]}
-                
-                # Debug: show what we're trying to download
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Batch packages: ${batch_packages[*]}"
-                
-                # Use optimized DNF with simple settings
-                local dnf_cmd
-                dnf_cmd=$(get_dnf_cmd)
-                
-                # Build DNF command with basic repository options
-                local dnf_options=(
-                    --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
-                    --setopt=fastestmirror=1
-                    --setopt=deltarpm=0
-                    --setopt=timeout="$DNF_QUERY_TIMEOUT"
-                    --setopt=retries="$DNF_RETRIES"
-                    --destdir="$repo_path"
-                )
-                
-                # Check if repository is enabled/disabled
-                if ! is_repo_enabled "$repo_name"; then
-                    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name (for package download only)"
-                    dnf_options+=(--enablerepo="$repo_name")
-                fi
-                
-                local batch_start_time
-                batch_start_time=$(date +%s)
-                
-                log "I" "⏳ Starting DNF download for $repo_name..."
-                
-                # For large batches, show periodic progress during download
-                local show_periodic_progress=0
-                if [[ $batch_package_count -gt $PROGRESS_BATCH_THRESHOLD || $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
-                    show_periodic_progress=1
-                fi
-                
-                # shellcheck disable=SC2086 # Intentional word splitting for dnf command and package list
-                local download_success=0
-                if [[ $show_periodic_progress -eq 1 ]]; then
-                    # Start background progress monitor for large downloads
-                    (
-                        sleep "$PROGRESS_UPDATE_INTERVAL"
-                        while true; do
-                            log "I" "🔄 Still downloading... ($batch_package_count packages from $repo_name, elapsed: $(($(date +%s) - batch_start_time))s)"
-                            sleep "$PROGRESS_UPDATE_INTERVAL"
-                        done
-                    ) &
-                    local progress_pid=$!
-                    
-                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command (e.g., "sudo dnf")
-                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
-                        download_success=1
-                    fi
-                    
-                    # Stop progress monitor
-                    kill $progress_pid 2>/dev/null || true
-                    wait $progress_pid 2>/dev/null || true
-                else
-                    # shellcheck disable=SC2086 # Intentional word splitting for dnf command (e.g., "sudo dnf")
-                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
-                        download_success=1
-                    fi
-                fi
-                
-                if [[ $download_success -eq 1 ]]; then
-                    local batch_end_time
-                    local batch_duration
-                    batch_end_time=$(date +%s)
-                    batch_duration=$((batch_end_time - batch_start_time))
-                    
-                    log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"
-                    # Mark repository as changed (new/updated packages present)
-                    CHANGED_REPOS["$repo_name"]=1
-                    
-                    # Update global progress for large batches
-                    global_downloaded=$((global_downloaded + batch_package_count))
-                    if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
-                        local progress_percent=$(( (global_downloaded * 100) / total_packages_to_download ))
-                        log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"
-                    fi
-                else
-                    log "W" "✗ Some downloads failed in batch $batch_num for $repo_name (check dnf logs for details)"
-                    
-                    # OPTIMIZED FALLBACK: Try smaller batches first, then individual downloads
-                    log "I" "   Trying optimized fallback downloads..."
-                    local success_count=0
-                    local fallback_batch_size=$BATCH_SIZE  # Using unified batch size for fallback attempts
-                    local fallback_processed=0
-                    
-                    # First try: smaller batches (5 packages at a time)
-                    while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
-                        local fallback_end=$((fallback_processed + fallback_batch_size))
-                        [[ $fallback_end -gt ${#batch_packages[@]} ]] && fallback_end=${#batch_packages[@]}
-                        
-                        local small_batch=()
-                        for ((i=fallback_processed; i<fallback_end; i++)); do
-                            small_batch+=("${batch_packages[i]}")
-                        done
-                        
-                        # Try small batch download
-                        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                        if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
-                            success_count=$((success_count + ${#small_batch[@]}))
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"
-                            fallback_processed=$fallback_end
-                        else
-                            # Small batch failed, try individual downloads for this batch
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads for ${#small_batch[@]} packages"
-                            for pkg in "${small_batch[@]}"; do
-                                # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-                                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
-                                    ((success_count++))
-                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"
-                                else
-                                    # Track failed download with basic reason
-                                    failed_downloads["$pkg"]="$repo_name"
-                                    failed_download_reasons["$pkg"]="DNF download failed"
-                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"
-                                fi
-                            done
-                            fallback_processed=$fallback_end
-                        fi
-                    done
-                    
-                    log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"
-                    if [[ $success_count -gt 0 ]]; then
-                        CHANGED_REPOS["$repo_name"]=1
-                    fi
-                    global_downloaded=$((global_downloaded + success_count))
-                fi
-                
-                processed_packages=$((processed_packages + batch_package_count))
-                ((batch_num++))
-            done
-        fi
-    done
-}
-
-# Clean up old cache directories from filesystem
-function cleanup_old_cache_directories() {
-    local old_cache_patterns=(
-        "/tmp/myrepo_cache_shared"
-        "/tmp/myrepo_cache"
-        "/tmp/myrepo_cache_*"
-        "$HOME/.cache/myrepo"
-        "$HOME/myrepo_cache_*"
-    )
-    
-    # First pass: check if any old directories exist
-    local old_dirs_found=0
-    
-    for pattern in "${old_cache_patterns[@]}"; do
-        # Handle patterns with wildcards
-        if [[ "$pattern" == *"*"* ]]; then
-            # Use find to handle wildcards safely
-            while IFS= read -r -d '' cache_dir; do
-                if [[ -d "$cache_dir" && "$cache_dir" != "$SHARED_CACHE_PATH" ]]; then
-                    ((old_dirs_found++))
-                    break 2  # Break out of both loops - we found at least one
-                fi
-            done < <(find "${pattern%/*}" -maxdepth 1 -name "${pattern##*/}" -type d -print0 2>/dev/null)
-        else
-            # Handle exact paths
-            if [[ -d "$pattern" && "$pattern" != "$SHARED_CACHE_PATH" ]]; then
-                ((old_dirs_found++))
-                break  # We found at least one
+                log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"; [[ $success_count -gt 0 ]] && CHANGED_REPOS["$repo_name"]=1; global_downloaded=$((global_downloaded + success_count))
             fi
-        fi
+            processed_packages=$((processed_packages + batch_package_count)); ((batch_num++))
+        done
     done
-    
-    # If no old directories found, return without cleanup
-    if [[ $old_dirs_found -eq 0 ]]; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "No old cache directories detected, skipping cleanup"
-        return 1  # No cleanup needed
-    fi
-    
-    # Old directories found - perform cleanup
-    log "I" "🧹 Cleaning up old cache directories from filesystem..."
-    
-    local cleaned_count=0
-    
-    for pattern in "${old_cache_patterns[@]}"; do
-        # Handle patterns with wildcards
-        if [[ "$pattern" == *"*"* ]]; then
-            # Use find to handle wildcards safely
-            while IFS= read -r -d '' cache_dir; do
-                if [[ -d "$cache_dir" && "$cache_dir" != "$SHARED_CACHE_PATH" ]]; then
-                    log "I" "🗑️  Removing old cache directory: $cache_dir"
-                    if [[ $DRY_RUN -eq 1 ]]; then
-                        log "I" "🔍 DRY RUN: Would remove $cache_dir"
-                        ((cleaned_count++))
-                    else
-                        # Try removing without sudo first
-                        if rm -rf "$cache_dir" 2>/dev/null; then
-                            ((cleaned_count++))
-                            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ Successfully removed: $cache_dir"
-                        elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo rm -rf "$cache_dir" 2>/dev/null; then
-                            ((cleaned_count++))
-                            log "I" "✓ Successfully removed with sudo: $cache_dir"
-                        else
-                            log "W" "Failed to remove: $cache_dir (permission denied even with sudo)"
-                        fi
-                    fi
-                fi
-            done < <(find "${pattern%/*}" -maxdepth 1 -name "${pattern##*/}" -type d -print0 2>/dev/null)
-        else
-            # Handle exact paths
-            if [[ -d "$pattern" && "$pattern" != "$SHARED_CACHE_PATH" ]]; then
-                log "I" "🗑️  Removing old cache directory: $pattern"
-                if [[ $DRY_RUN -eq 1 ]]; then
-                    log "I" "🔍 DRY RUN: Would remove $pattern"
-                    ((cleaned_count++))
-                else
-                    # Try removing without sudo first
-                    if rm -rf "$pattern" 2>/dev/null; then
-                        ((cleaned_count++))
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ Successfully removed: $pattern"
-                    elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo rm -rf "$pattern" 2>/dev/null; then
-                        ((cleaned_count++))
-                        log "I" "✓ Successfully removed with sudo: $pattern"
-                    else
-                        log "W" "Failed to remove: $pattern (permission denied even with sudo)"
-                    fi
-                fi
-            fi
-        fi
-    done
-    
-    if [[ $DRY_RUN -eq 1 ]]; then
-        log "I" "🔍 DRY RUN: Old cache cleanup simulation completed for $cleaned_count directories"
-    elif [[ $cleaned_count -gt 0 ]]; then
-        log "I" "✅ Old cache directories cleanup completed - cleaned up $cleaned_count directories"
-    else
-        log "W" "⚠️  Old directories detected but none could be cleaned (all permission attempts failed)"
-    fi
-    
-    # Show current shared cache location
-    log "I" "📁 Using shared cache: $SHARED_CACHE_PATH"
-    
-    return 0  # Cleanup was performed (or attempted)
 }
 
 # Build repository metadata cache (optimized - only for installed packages)
