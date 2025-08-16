@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.17"
+VERSION="2.3.18"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
