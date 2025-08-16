@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.18"
+VERSION="2.3.19"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -112,6 +112,9 @@ declare -A failed_download_reasons
 # Unknown packages tracking arrays (packages not found in any repository)
 declare -A unknown_packages
 declare -A unknown_package_reasons
+ # Track repositories whose RPM contents changed (new/update/download/removal) to limit metadata updates
+declare -A CHANGED_REPOS  # Repos with added/updated/removed RPMs this run
+# shellcheck disable=SC2034 # Populated during processing; iterated in update_all_repository_metadata
 
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
@@ -288,6 +291,8 @@ function batch_download_packages() {
                     batch_duration=$((batch_end_time - batch_start_time))
                     
                     log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"
+                    # Mark repository as changed (new/updated packages present)
+                    CHANGED_REPOS["$repo_name"]=1
                     
                     # Update global progress for large batches
                     global_downloaded=$((global_downloaded + batch_package_count))
@@ -340,6 +345,9 @@ function batch_download_packages() {
                     done
                     
                     log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"
+                    if [[ $success_count -gt 0 ]]; then
+                        CHANGED_REPOS["$repo_name"]=1
+                    fi
                     global_downloaded=$((global_downloaded + success_count))
                 fi
                 
@@ -1128,6 +1136,8 @@ function cleanup_uninstalled_packages() {
                     ((repos_cleaned++))
                     total_removed=$((total_removed + removed_count))
                     echo -e "\e[33m$(align_repo_name "$repo_name"): Removed $removed_count uninstalled packages in ${repo_duration}s\e[0m"
+                    # Removal alters repository contents; mark repo changed for metadata update
+                    CHANGED_REPOS["$repo_name"]=1
                 fi
             fi
             
@@ -2558,6 +2568,12 @@ function process_packages() {
                     ((stats_exists_count["$repo_name"]++))
                 fi
                 [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
+                # Test hook: allow selective metadata unit test to force a repo into CHANGED_REPOS during DRY_RUN
+                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then
+                    CHANGED_REPOS["$repo_name"]=1
+                    CHANGED_REPOS_MARKED_FOR_TEST=1
+                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)"
+                fi
                 ;;
             "UPDATE")
                 # Check if we've hit the MAX_CHANGED_PACKAGES limit BEFORE processing
@@ -2581,6 +2597,8 @@ function process_packages() {
                     ((stats_update_count["$repo_name"]++))
                 fi
                 echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
+                # Mark repo as changed (will refine after successful download if needed)
+                CHANGED_REPOS["$repo_name"]=1
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
                     # Try to find local RPM first
@@ -2652,6 +2670,8 @@ function process_packages() {
                     ((stats_new_count["$repo_name"]++))
                 fi
                 echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"
+                # Mark repo as changed (will refine after successful download if needed)
+                CHANGED_REPOS["$repo_name"]=1
                 
                 if [[ $DRY_RUN -eq 0 ]]; then
                     
@@ -3108,60 +3128,73 @@ function update_all_repository_metadata() {
         [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "Sync-only mode: skipping metadata updates"
         return 0
     fi
-    
-    log "I" "🔄 Updating repository metadata for all modified repositories..."
-    
+
+    # Test hook: if enabled and no changed repos detected yet, mark test_repo as changed if it exists
+    if [[ -n "${ENABLE_TEST_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 ]]; then
+        if [[ -d "$LOCAL_REPO_PATH/test_repo" ]]; then
+            CHANGED_REPOS["test_repo"]=1
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Added test_repo to CHANGED_REPOS"
+        fi
+    fi
+
+    # Decide target repositories: if CHANGED_REPOS populated, limit to those; else fall back to full scan
+    local target_repos=()
+    if [[ ${#CHANGED_REPOS[@]} -gt 0 ]]; then
+        for repo in "${!CHANGED_REPOS[@]}"; do
+            target_repos+=("$repo")
+        done
+        log "I" "🔄 Updating repository metadata for ${#target_repos[@]} changed repositories only"
+    else
+        log "I" "🔄 No explicit changed repository list; scanning all repositories for metadata update"
+        for repo_dir in "$LOCAL_REPO_PATH"/*; do
+            [[ -d "$repo_dir" ]] || continue
+            target_repos+=("$(basename "$repo_dir")")
+        done
+    fi
+
     local updated_repos=0
     local failed_repos=0
-    
-    # Get list of all repositories that should have metadata updated
-    for repo_dir in "$LOCAL_REPO_PATH"/*; do
-        if [[ -d "$repo_dir" ]]; then
-            local repo_name
-            repo_name=$(basename "$repo_dir")
 
-            # Skip if this repo should not be processed
-            if ! should_process_repo "$repo_name"; then
-                continue
+    for repo_name in "${target_repos[@]}"; do
+        # Skip if this repo should not be processed
+        if ! should_process_repo "$repo_name"; then
+            continue
+        fi
+
+        # Check if this is a manual repo
+        local is_manual_repo=false
+        for manual_repo in "${MANUAL_REPOS[@]}"; do
+            if [[ "$repo_name" == "$manual_repo" ]]; then
+                is_manual_repo=true
+                break
             fi
+        done
 
-            # Check if this is a manual repo
-            local is_manual_repo=false
-            for manual_repo in "${MANUAL_REPOS[@]}"; do
-                if [[ "$repo_name" == "$manual_repo" ]]; then
-                    is_manual_repo=true
-                    break
-                fi
-            done
-
-            if [[ "$is_manual_repo" == true ]]; then
-                # For manual repositories, use base path only
+        if [[ "$is_manual_repo" == true ]]; then
+            local repo_base_path
+            repo_base_path=$(get_repo_base_path "$repo_name")
+            cleanup_old_repodata "$repo_name" "$repo_base_path" ""
+            if update_repository_metadata "$repo_name" "$repo_base_path"; then
+                ((updated_repos++))
+            else
+                ((failed_repos++))
+            fi
+        else
+            local repo_path
+            repo_path=$(get_repo_path "$repo_name")
+            if [[ -d "$repo_path" ]]; then
                 local repo_base_path
                 repo_base_path=$(get_repo_base_path "$repo_name")
-                cleanup_old_repodata "$repo_name" "$repo_base_path" ""
-                if update_repository_metadata "$repo_name" "$repo_base_path"; then
+                cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
+                if update_repository_metadata "$repo_name" "$repo_path"; then
                     ((updated_repos++))
                 else
                     ((failed_repos++))
                 fi
-            else
-                # For regular repositories, we need to get the base path
-                local repo_path
-                repo_path=$(get_repo_path "$repo_name")
-                if [[ -d "$repo_path" ]]; then
-                    local repo_base_path
-                    repo_base_path=$(get_repo_base_path "$repo_name")
-                    cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
-                    if update_repository_metadata "$repo_name" "$repo_path"; then
-                        ((updated_repos++))
-                    else
-                        ((failed_repos++))
-                    fi
-                fi
             fi
         fi
     done
-    
+
     if [[ $DRY_RUN -eq 1 ]]; then
         log "I" "🔍 DRY RUN: Would update metadata for $((updated_repos + failed_repos)) repositories"
     else

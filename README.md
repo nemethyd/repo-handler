@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.17)
+# Repo Handler Script (v2.3.19)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -111,6 +111,18 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | ELEVATE_COMMANDS | 1 (auto) or 0 (never sudo) |
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–4 impact verbosity |
+
+### Test / Development Hooks
+
+These environment variables are intended strictly for testing and development. Do **not** enable them in production workflows.
+
+| Variable | Purpose | When Honored |
+|----------|---------|--------------|
+| ENABLE_TEST_SELECTIVE=1 | Activates a deterministic test hook that force-marks one repository as changed so the selective metadata update path (CHANGED_REPOS optimization) can be validated even when no NEW/UPDATE packages occur. | Only during a run when evaluating package statuses; primarily used by `tests/test_selective_metadata_update.sh`. Ignored if normal change tracking already populated `CHANGED_REPOS`. |
+
+Notes:
+- The selective metadata optimization updates metadata only for repositories whose RPM contents changed (added, updated, or removed packages). When `CHANGED_REPOS` is empty the script falls back to scanning all repositories.
+- `ENABLE_TEST_SELECTIVE` should never be set for real runs: it can trigger unnecessary metadata updates and is purely a test facilitation mechanism.
 
 All can be overridden via `myrepo.cfg` or CLI; CLI wins.
 
