@@ -103,6 +103,8 @@ TABLE_STATUS_WIDTH=8              # Status column width
 declare -A stats_new_count
 declare -A stats_update_count  
 declare -A stats_exists_count
+declare -A GLOBAL_ENABLED_REPOS_CACHE  # Populated once; reused by is_repo_enabled
+GLOBAL_ENABLED_REPOS_CACHE_POPULATED=0
 
 # Failed downloads tracking arrays
 declare -A failed_downloads
@@ -1857,21 +1859,17 @@ function get_repo_path() {
 # Check if repository is enabled (to exclude disabled repos from sync)
 function is_repo_enabled() {
     local repo_name="$1"
-    
-    # Check if repo is in enabled list
-    local enabled_repos
+    # Prefer global cache if populated
+    if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 1 ]]; then
+        [[ -n "${GLOBAL_ENABLED_REPOS_CACHE[$repo_name]:-}" ]] && return 0 || return 1
+    fi
+    # Fallback single check (should rarely happen before cache build)
     local dnf_cmd
     dnf_cmd=$(get_dnf_cmd)
-    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-    enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
-    
-    while IFS= read -r enabled_repo; do
-        if [[ "$repo_name" == "$enabled_repo" ]]; then
-            return 0  # Repository is enabled
-        fi
-    done <<< "$enabled_repos"
-    
-    return 1  # Repository is not enabled
+    if ${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -qx "$repo_name"; then
+        return 0
+    fi
+    return 1
 }
 
 # Load configuration from myrepo.cfg if it exists - optimized version
@@ -2162,33 +2160,32 @@ function process_packages() {
     # Arrays to collect packages for batch downloading
     local new_packages=()
     local update_packages=()
-    local not_found_packages=()
+    # Removed unused not_found_packages (was never populated)
     
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     
-    # PERFORMANCE OPTIMIZATION: Cache enabled repositories once at start
-    log "I" "📋 Building enabled repositories cache for performance..."
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
-    local enabled_repos_list
-    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-    if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
-        log "E" "Failed to get enabled repositories list for caching"
-        return 1
+    # PERFORMANCE OPTIMIZATION: Build global enabled repositories cache once
+    if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 0 ]]; then
+        log "I" "📋 Building enabled repositories cache for performance..."
+        local dnf_cmd
+        dnf_cmd=$(get_dnf_cmd)
+        local enabled_repos_list
+        # shellcheck disable=SC2086
+        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
+            log "E" "Failed to get enabled repositories list for caching"
+            return 1
+        fi
+        local cached_repo_count=0
+        while IFS= read -r repo; do
+            GLOBAL_ENABLED_REPOS_CACHE["$repo"]=1
+            ((cached_repo_count++))
+        done <<< "$enabled_repos_list"
+        GLOBAL_ENABLED_REPOS_CACHE_POPULATED=1
+        log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
     fi
-    
-    # Create associative array for O(1) repository enabled lookups
-    declare -A enabled_repos_cache
-    local cached_repo_count=0
-    while IFS= read -r repo; do
-        enabled_repos_cache["$repo"]=1
-        ((cached_repo_count++))
-    done <<< "$enabled_repos_list"
-    
-    log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
 
     # Show legend for status markers
     echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
@@ -2506,7 +2503,8 @@ function process_packages() {
             # For non-@System repositories, check if repository is enabled
             local clean_repo_name="${repo_name#@}"  # Remove @ prefix if present
             
-            if [[ ${enabled_repos_cache["$clean_repo_name"]} != 1 ]]; then
+            # Use populated global enabled repos cache; default to 0 (treated as disabled) if key absent
+            if [[ ${GLOBAL_ENABLED_REPOS_CACHE["$clean_repo_name"]:-0} != 1 ]]; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)\e[0m"
                 # Don't skip - we'll handle disabled repos by temporarily enabling them during downloads
             fi
@@ -2801,22 +2799,7 @@ function process_packages() {
     # Generate the beautiful summary table
     generate_summary_table
 
-    # Final report for not found packages
-    if [[ ${#not_found_packages[@]} -gt 0 ]]; then
-        echo
-        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
-        echo -e "\e[35m🔍 NOT FOUND PACKAGES REPORT\e[0m"
-        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
-        local total_not_found=0
-        for entry in "${not_found_packages[@]}"; do
-            echo -e "\e[31m   ✗ $entry\e[0m"
-            ((total_not_found++))
-        done
-        echo
-        echo -e "\e[35m📊 Total not found packages: $total_not_found\e[0m"
-        echo -e "\e[36m💡 Tip: These packages were not found locally and not downloaded because the repository is manual.\e[0m"
-        echo -e "\e[35m═══════════════════════════════════════════════════════════════\e[0m"
-    fi
+    # (Not-found packages reporting removed)
     
     # Clean up uninstalled packages after processing (if enabled)
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
