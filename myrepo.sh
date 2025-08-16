@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# Developed by: Dániel Némethy (nemethy@moderato.hu) with different AI support models
-# AI flock: ChatGPT, Claude, Gemini
-# Last Updated: 2025-07-28
+# Developed by: Dániel Némethy (nemethy@moderato.hu)
+# Last Updated: 2025-08-16
 
 # MIT licensing
 # Purpose:
@@ -15,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.12"
+VERSION="2.3.14"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -65,11 +64,8 @@ DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
 DEBUG_FILE_LIST_THRESHOLD=${DEBUG_FILE_LIST_THRESHOLD:-10} # Show file list if repo has fewer RPMs than this
 DEBUG_FILE_LIST_COUNT=${DEBUG_FILE_LIST_COUNT:-5}          # Number of files to show in debug list
 
-# Simplified batch processing (removed complex performance tracking for speed)
-SIMPLE_BATCH_SIZE=${SIMPLE_BATCH_SIZE:-50}                # Fixed batch size for optimal performance
-FALLBACK_BATCH_SIZE=${FALLBACK_BATCH_SIZE:-5}            # Fallback batch size for retrying failed downloads
-RPM_QUERY_BATCH_SIZE=${RPM_QUERY_BATCH_SIZE:-50}         # Batch size for rpm -qp metadata extraction during cleanup
-REMOVE_BATCH_SIZE=${REMOVE_BATCH_SIZE:-100}              # Batch size for removing uninstalled RPMs
+# Unified batch size configuration
+BATCH_SIZE=${BATCH_SIZE:-50}              # Primary batch size used for downloads, rpm metadata queries and removals
 
 # Progress reporting thresholds (configurable to avoid hardcoded magic numbers)
 LARGE_BATCH_THRESHOLD=${LARGE_BATCH_THRESHOLD:-200}       # Threshold for large batch progress reporting
@@ -110,14 +106,9 @@ declare -A stats_exists_count
 # Failed downloads tracking arrays
 declare -A failed_downloads
 declare -A failed_download_reasons
-
 # Unknown packages tracking arrays (packages not found in any repository)
 declare -A unknown_packages
 declare -A unknown_package_reasons
-
-# Simplified tracking (removed complex performance monitoring for speed)
-declare -A failed_downloads
-declare -A failed_download_reasons
 
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
@@ -216,7 +207,7 @@ function batch_download_packages() {
             while [[ $processed_packages -lt $total_package_count ]]; do
                 # Create batch with fixed size
                 local batch_packages=()
-                local batch_end=$(( processed_packages + SIMPLE_BATCH_SIZE ))
+                local batch_end=$(( processed_packages + BATCH_SIZE ))
                 [[ $batch_end -gt $total_package_count ]] && batch_end=$total_package_count
                 
                 for ((i=processed_packages; i<batch_end; i++)); do
@@ -307,7 +298,7 @@ function batch_download_packages() {
                     # OPTIMIZED FALLBACK: Try smaller batches first, then individual downloads
                     log "I" "   Trying optimized fallback downloads..."
                     local success_count=0
-                    local fallback_batch_size=$FALLBACK_BATCH_SIZE  # Configurable smaller batches for problematic repos
+                    local fallback_batch_size=$BATCH_SIZE  # Using unified batch size for fallback attempts
                     local fallback_processed=0
                     
                     # First try: smaller batches (5 packages at a time)
@@ -1000,7 +991,7 @@ function cleanup_uninstalled_packages() {
             fi
             
             # MAJOR PERFORMANCE IMPROVEMENT: Batch RPM queries using parallel processing
-            local batch_size=$RPM_QUERY_BATCH_SIZE  # Configurable batch size for rpm metadata queries
+            local batch_size=$BATCH_SIZE  # Unified batch size for rpm metadata queries
             local processed_rpms=0
             local rpms_to_remove=()
             local removed_count=0
@@ -1099,7 +1090,7 @@ function cleanup_uninstalled_packages() {
             
             # PERFORMANCE OPTIMIZATION: Batch remove files in chunks to avoid command line limits
             if [[ ${#rpms_to_remove[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-                local remove_batch_size=$REMOVE_BATCH_SIZE
+                local remove_batch_size=$BATCH_SIZE
                 local remove_processed=0
                 
                 while [[ $remove_processed -lt ${#rpms_to_remove[@]} ]]; do
@@ -3265,7 +3256,7 @@ function update_manual_repository_metadata() {
             log "I" "🔄 $(align_repo_name "$manual_repo"): Manual repository needs metadata update"
             
             # Clean up old repodata for manual repositories (they don't use getPackage structure)
-            cleanup_old_repodata "$repo_name" "$repo_dir" ""
+            cleanup_old_repodata "$manual_repo" "$repo_dir" ""
             
             if update_repository_metadata "$manual_repo" "$repo_dir"; then
                 ((updated_manual++))

@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.11)
+# Repo Handler Script (v2.3.14)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -71,7 +71,6 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 ## Command Line Options (Implemented)
 
 ```
---batch-size INT                 (internal simple batch grouping)
 --cache-max-age SEC              Max age for cached repo metadata
 --shared-cache-path PATH         Cache directory (default: /var/cache/myrepo)
 --cleanup-uninstalled | --no-cleanup-uninstalled
@@ -334,7 +333,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # SUDO_TEST_TIMEOUT=10
 
 # Performance settings (optimized for speed)
-# SIMPLE_BATCH_SIZE=50
+# BATCH_SIZE=50
 # PROGRESS_REPORT_INTERVAL=50
 # MAX_PARALLEL_DOWNLOADS=8
 # DNF_RETRIES=2
@@ -370,7 +369,7 @@ This version focuses on **maximum performance through simplification**, removing
 #### Performance Features:
 
 **🚀 Speed Optimizations**:
-- Simple fixed batch processing (SIMPLE_BATCH_SIZE=50) for optimal performance
+- Unified fixed batch processing (BATCH_SIZE=50) for optimal performance
 - Hash table lookups for O(1) package searches instead of O(n) linear searches
 - Batch RPM metadata extraction to reduce subprocess overhead
 - Optimized DNF queries with intelligent caching
@@ -392,7 +391,7 @@ This version focuses on **maximum performance through simplification**, removing
 
 ```bash
 # Core performance settings (optimal fixed values)
-SIMPLE_BATCH_SIZE=50            # Fixed optimal batch size for all operations
+BATCH_SIZE=50                   # Fixed optimal batch size for all operations
 PARALLEL=6                      # Optimal parallel processes
 CACHE_MAX_AGE=14400            # 4-hour metadata cache validity
 PROGRESS_UPDATE_INTERVAL=30     # Progress update frequency (seconds)
@@ -589,7 +588,6 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 | Option               | Values                     | Default               | Description                                                   |
 |----------------------|----------------------------|------------------------|---------------------------------------------------------------|
-| `--batch-size`       | *INT*                      | `50`                  | Batch size for processing RPMs during cleanup operations.     |
 | `--cache-max-age`    | *INT*                      | `14400`               | Cache validity in seconds (14400 = 4 hours).                 |
 | `--shared-cache-path`| *PATH*                     | `/var/cache/myrepo`   | Shared cache directory path.                                  |
 | `--cleanup-uninstalled` | *(flag)*                | *on*                  | Enable cleanup of uninstalled packages.                      |
@@ -656,10 +654,10 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh --dnf-serial --debug 2
 
 # Process specific repositories with custom parallel settings and batch size
-./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4 --batch-size 100
+./myrepo.sh --repos ol9_appstream,ol9_baseos --parallel 4
 
 # Use custom batch size for better performance on slower systems
-./myrepo.sh --batch-size 25 --debug 2
+./myrepo.sh --debug 2
 
 # Use shared cache path and enable cleanup
 ./myrepo.sh --shared-cache-path /tmp/myrepo_cache --cleanup-uninstalled
