@@ -15,10 +15,53 @@
 
 # Script version
 
-VERSION="2.3.26"
+VERSION="2.3.27"
+
+# --- Safety Guards (Priority 1 Implementation) ---
+# Bash version guard (requires >= 4 for associative arrays used extensively)
+if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
+    MYREPO_BASH_VERSION_CHECKED=1
+    if (( BASH_VERSINFO[0] < 4 )); then
+        echo -e "\e[31m❌ Bash 4+ required (found ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}). Aborting.\e[0m" >&2
+        exit 1
+    fi
+fi
+
+# Safe removal helper: refuses to act on empty, root, or single-slash-like targets.
+function safe_rm_rf() {
+    # Contract:
+    #   Input: path to remove recursively.
+    #   Safety: rejects empty, root-like, relative parent targets; confines to LOCAL_REPO_PATH or SHARED_CACHE_PATH.
+    #   Elevation: automatically uses sudo when ELEVATE_COMMANDS=1.
+    #   Returns 0 on success (or path absent), 1 on refusal/error.
+    local target="$1"
+    [[ -z "$target" ]] && { log "E" "Refusing to remove empty path (safe_rm_rf)"; return 1; }
+    case "$target" in
+        "/"|"/*"|"."|"..") log "E" "Refusing unsafe removal target: $target"; return 1;;
+    esac
+    if [[ ! -e "$target" ]]; then
+        log "D" "safe_rm_rf: Path not present (nothing to do): $target" 3
+        return 0
+    fi
+    if [[ "$target" != "$LOCAL_REPO_PATH"/* && "$target" != "$SHARED_CACHE_PATH"/* ]]; then
+        log "W" "Skipping removal outside managed roots: $target" 1
+        return 1
+    fi
+    local cmd=(rm -rf -- "$target")
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        cmd=(sudo "${cmd[@]}")
+    fi
+    if "${cmd[@]}" 2>/dev/null; then
+        log "D" "safe_rm_rf: Removed $target" 3
+        return 0
+    else
+        log "E" "safe_rm_rf: Failed to remove $target" 1
+        return 1
+    fi
+}
 
 # Default Configuration (can be overridden by myrepo.cfg)
-LOCAL_REPO_PATH="/repo"
+LOCAL_REPO_PATH="${LOCAL_REPO_PATH:-/repo}"  # Allow external override for testing/isolated runs
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 MANUAL_REPOS=("ol9_edge")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
@@ -1197,11 +1240,7 @@ function cleanup_old_repodata() {
             while IFS= read -r -d '' old_repodata; do
                 if [[ -d "$old_repodata" ]]; then
                     log "D" "   Removing old repodata: $old_repodata" 2
-                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                        sudo rm -rf "$old_repodata" 2>/dev/null || true
-                    else
-                        rm -rf "$old_repodata" 2>/dev/null || true
-                    fi
+                    safe_rm_rf "$old_repodata"
                     ((cleanup_count++))
                 fi
             done < <(find "$repo_base_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
@@ -1214,11 +1253,7 @@ function cleanup_old_repodata() {
             while IFS= read -r -d '' old_repodata; do
                 if [[ -d "$old_repodata" ]]; then
                     log "W" "   Found misplaced repodata inside getPackage, removing: $old_repodata"
-                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                        sudo rm -rf "$old_repodata" 2>/dev/null || true
-                    else
-                        rm -rf "$old_repodata" 2>/dev/null || true
-                    fi
+                    safe_rm_rf "$old_repodata"
                     ((cleanup_count++))
                 fi
             done < <(find "$repo_package_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
@@ -1227,11 +1262,7 @@ function cleanup_old_repodata() {
         # Also clean up any current repodata that might be misplaced inside getPackage
         if [[ -d "$repo_package_path/repodata" ]]; then
             log "W" "   Found misplaced current repodata inside getPackage, removing: $repo_package_path/repodata"
-            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                sudo rm -rf "$repo_package_path/repodata" 2>/dev/null || true
-            else
-                rm -rf "$repo_package_path/repodata" 2>/dev/null || true
-            fi
+            safe_rm_rf "$repo_package_path/repodata"
             ((cleanup_count++))
         fi
     fi
@@ -1828,8 +1859,8 @@ function finalize_and_report() {
     if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
         log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
     else
+        # Single consolidated metadata update handles both regular and manual repositories
         update_all_repository_metadata
-        update_manual_repository_metadata
     fi
     return 0
 }
@@ -1868,11 +1899,7 @@ function full_rebuild_repos() {
             
             # Also remove current repodata for full rebuild
             if [[ -d "$repo_base_path/repodata" ]]; then
-                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    sudo rm -rf "$repo_base_path/repodata" 2>/dev/null || true
-                else
-                    rm -rf "$repo_base_path/repodata" 2>/dev/null || true
-                fi
+                safe_rm_rf "$repo_base_path/repodata"
                 log "I" "$(align_repo_name "$repo_name"): Removed current repodata for full rebuild" 1
             fi
             
@@ -1891,12 +1918,13 @@ function gather_installed_packages() {
         dnf_cmd=$(get_dnf_cmd)
         local enabled_repos_list
     # intentional word splitting
-        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
-            log "E" "Failed to get enabled repositories list for caching"
-            return 1
+        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet 2>/dev/null | awk 'NR>1 {print $1}' | grep -v "^$"); then
+            log "W" "Could not enumerate enabled repositories (continuing without cache)"
+            enabled_repos_list=""
         fi
         local cached_repo_count=0
         while IFS= read -r repo; do
+            [[ -z "$repo" ]] && continue
             GLOBAL_ENABLED_REPOS_CACHE["$repo"]=1
             ((cached_repo_count++))
         done <<< "$enabled_repos_list"
@@ -1944,10 +1972,9 @@ function gather_installed_packages() {
     fi
 
     if [[ -z "$repoquery_result" ]]; then
-        log "E" "Failed to get installed packages list (exit code: ${dnf_exit_code:-unknown})"
-    log "D" "Trying manual DNF test..." 2
-    (( DEBUG_LEVEL >= 2 )) && ${dnf_cmd} --version >&2 || true
-        return 1
+        log "W" "No installed packages list produced (exit code: ${dnf_exit_code:-unknown}); continuing with empty set"
+        printf ''
+        return 0
     fi
 
     printf '%s\n' "$repoquery_result"
@@ -2908,156 +2935,108 @@ function sync_to_shared_repos() {
 
 # Update metadata for all repositories that had package changes
 function update_all_repository_metadata() {
+    # Global early-outs
     if [[ $SYNC_ONLY -eq 1 ]]; then
-    log "I" "Sync-only mode: skipping metadata updates" 1
+        log "I" "Sync-only mode: skipping metadata updates" 1
+        return 0
+    fi
+    if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
+        log "I" "Metadata updates disabled via NO_METADATA_UPDATE=1" 1
         return 0
     fi
 
-    # Test hook: if enabled and no changed repos detected yet, mark test_repo as changed if it exists
-    if [[ -n "${ENABLE_TEST_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 ]]; then
-        if [[ -d "$LOCAL_REPO_PATH/test_repo" ]]; then
-            CHANGED_REPOS["test_repo"]=1
-            log "D" "Test hook: Added test_repo to CHANGED_REPOS" 2
-        fi
+    # Test hook: seed a changed repo if requested
+    if [[ -n "${ENABLE_TEST_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 && -d "$LOCAL_REPO_PATH/test_repo" ]]; then
+        CHANGED_REPOS["test_repo"]=1
+        log "D" "Test hook: Added test_repo to CHANGED_REPOS" 2
     fi
 
-    # Decide target repositories: if CHANGED_REPOS populated, limit to those; else fall back to full scan
+    # Build target repo list
     local target_repos=()
     if [[ ${#CHANGED_REPOS[@]} -gt 0 ]]; then
-        for repo in "${!CHANGED_REPOS[@]}"; do
-            target_repos+=("$repo")
-        done
+        for repo in "${!CHANGED_REPOS[@]}"; do target_repos+=("$repo"); done
         log "I" "🔄 Updating repository metadata for ${#target_repos[@]} changed repositories only"
     else
-        log "I" "🔄 No explicit changed repository list; scanning all repositories for metadata update"
-        for repo_dir in "$LOCAL_REPO_PATH"/*; do
-            [[ -d "$repo_dir" ]] || continue
-            target_repos+=("$(basename "$repo_dir")")
-        done
+        log "I" "🔄 Scanning all repositories for metadata update"
+        for repo_dir in "$LOCAL_REPO_PATH"/*; do [[ -d "$repo_dir" ]] || continue; target_repos+=("$(basename "$repo_dir")"); done
     fi
 
-    local updated_repos=0
-    local failed_repos=0
+    local updated_repos=0 failed_repos=0 skipped_manual_fresh=0
 
     for repo_name in "${target_repos[@]}"; do
-        # Skip if this repo should not be processed
-        if ! should_process_repo "$repo_name"; then
-            continue
-        fi
+        if ! should_process_repo "$repo_name"; then continue; fi
 
-        # Check if this is a manual repo
-        local is_manual_repo=false
+        local is_manual_repo=false manual_repo
         for manual_repo in "${MANUAL_REPOS[@]}"; do
-            if [[ "$repo_name" == "$manual_repo" ]]; then
-                is_manual_repo=true
-                break
-            fi
+            if [[ "$repo_name" == "$manual_repo" ]]; then is_manual_repo=true; break; fi
         done
 
-        if [[ "$is_manual_repo" == true ]]; then
-            local repo_base_path
-            repo_base_path=$(get_repo_base_path "$repo_name")
-            cleanup_old_repodata "$repo_name" "$repo_base_path" ""
-            if update_repository_metadata "$repo_name" "$repo_base_path"; then
-                ((updated_repos++))
-            else
-                ((failed_repos++))
+        if [[ $is_manual_repo == true ]]; then
+            local repo_dir="$LOCAL_REPO_PATH/$repo_name"
+            if [[ ! -d "$repo_dir" ]]; then
+                log "D" "$(align_repo_name "$repo_name"): Manual repo dir missing" 2
+                continue
             fi
-        else
-            local repo_path
-            repo_path=$(get_repo_path "$repo_name")
-            if [[ -d "$repo_path" ]]; then
-                local repo_base_path
-                repo_base_path=$(get_repo_base_path "$repo_name")
-                cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
-                if update_repository_metadata "$repo_name" "$repo_path"; then
+            local rpm_count
+            rpm_count=$(find "$repo_dir" -name "*.rpm" -type f 2>/dev/null | wc -l)
+            if [[ $rpm_count -eq 0 ]]; then
+                log "D" "$(align_repo_name "$repo_name"): No RPMs present (manual)" 2
+                continue
+            fi
+            local needs_update=false
+            if [[ ! -d "$repo_dir/repodata" ]]; then
+                needs_update=true
+                log "D" "$(align_repo_name "$repo_name"): No repodata dir" 2
+            else
+                local newest_rpm
+                newest_rpm=$(find "$repo_dir" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+                if [[ -n "$newest_rpm" ]]; then
+                    local rpm_time metadata_time
+                    rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
+                    metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
+                    if [[ $rpm_time -gt $metadata_time ]]; then
+                        needs_update=true
+                        log "D" "$(align_repo_name "$repo_name"): RPMs newer than repodata" 2
+                    fi
+                fi
+            fi
+            if [[ $needs_update == true ]]; then
+                log "I" "🔄 $(align_repo_name "$repo_name"): Manual repository needs metadata update"
+                cleanup_old_repodata "$repo_name" "$repo_dir" ""
+                if update_repository_metadata "$repo_name" "$repo_dir"; then
                     ((updated_repos++))
                 else
                     ((failed_repos++))
                 fi
+            else
+                ((skipped_manual_fresh++))
+                log "D" "$(align_repo_name "$repo_name"): Manual metadata up to date" 2
+            fi
+            continue
+        fi
+
+        # Regular repository pathing
+        local repo_path
+        repo_path=$(get_repo_path "$repo_name")
+        if [[ -d "$repo_path" ]]; then
+            local repo_base_path
+            repo_base_path=$(get_repo_base_path "$repo_name")
+            cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
+            if update_repository_metadata "$repo_name" "$repo_path"; then
+                ((updated_repos++))
+            else
+                ((failed_repos++))
             fi
         fi
     done
 
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "I" "🔍 DRY RUN: Would update metadata for $((updated_repos + failed_repos)) repositories"
+        log "I" "🔍 DRY RUN: Would update metadata (regular + manual combined)" 1
     else
-        log "I" "✅ Metadata update completed: $updated_repos successful, $failed_repos failed"
+        log "I" "✅ Metadata update: $updated_repos updated, $failed_repos failed, $skipped_manual_fresh manual fresh" 1
         if [[ $failed_repos -gt 0 ]]; then
-            log "W" "Some repositories failed metadata update - they may not function correctly"
+            log "W" "Some repositories failed metadata update" 1
         fi
-    fi
-}
-
-# Update metadata for manual repositories that may have had manual changes
-function update_manual_repository_metadata() {
-    if [[ ${#MANUAL_REPOS[@]} -eq 0 ]]; then
-        return 0
-    fi
-    
-    log "I" "🔍 Checking manual repositories for metadata updates..."
-    
-    local updated_manual=0
-    
-    for manual_repo in "${MANUAL_REPOS[@]}"; do
-        local repo_dir="$LOCAL_REPO_PATH/$manual_repo"
-        
-        if [[ ! -d "$repo_dir" ]]; then
-            log "D" "$(align_repo_name "$manual_repo"): Manual repository directory not found" 2
-            continue
-        fi
-        
-        # Check if there are RPM files
-        local rpm_count
-        rpm_count=$(find "$repo_dir" -name "*.rpm" -type f 2>/dev/null | wc -l)
-        
-        if [[ $rpm_count -eq 0 ]]; then
-            log "D" "$(align_repo_name "$manual_repo"): No RPM files in manual repository" 2
-            continue
-        fi
-        
-        # Simple timestamp-based check: if any RPM is newer than metadata, update
-        local needs_update=false
-        
-        if [[ ! -d "$repo_dir/repodata" ]]; then
-            needs_update=true
-            log "D" "$(align_repo_name "$manual_repo"): No metadata directory found" 2
-        else
-            # Find newest RPM file
-            local newest_rpm
-            newest_rpm=$(find "$repo_dir" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-            
-            if [[ -n "$newest_rpm" ]]; then
-                local rpm_time
-                rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
-                local metadata_time
-                metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
-                
-                if [[ $rpm_time -gt $metadata_time ]]; then
-                    needs_update=true
-                    log "D" "$(align_repo_name "$manual_repo"): RPM files newer than metadata" 2
-                fi
-            fi
-        fi
-        
-        if [[ $needs_update == true ]]; then
-            log "I" "🔄 $(align_repo_name "$manual_repo"): Manual repository needs metadata update"
-            
-            # Clean up old repodata for manual repositories (they don't use getPackage structure)
-            cleanup_old_repodata "$manual_repo" "$repo_dir" ""
-            
-            if update_repository_metadata "$manual_repo" "$repo_dir"; then
-                ((updated_manual++))
-            fi
-        else
-            log "D" "$(align_repo_name "$manual_repo"): Manual repository metadata is up to date" 2
-        fi
-    done
-    
-    if [[ $updated_manual -gt 0 ]]; then
-        log "I" "✅ Updated metadata for $updated_manual manual repositories"
-    else
-    log "I" "✅ All manual repository metadata is up to date" 1
     fi
 }
 
