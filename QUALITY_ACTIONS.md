@@ -29,7 +29,7 @@ Ordered by: (1) Safety/Correctness, (2) Functional integrity, (3) Performance, (
 
 | Priority | ID | Area | Description | Status | Rationale |
 |----------|----|------|-------------|--------|-----------|
-| 2 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
+| 2 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | DONE | Implemented --plain / --no-emoji mode |
 | 3 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
 | 4 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
 | 5 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |

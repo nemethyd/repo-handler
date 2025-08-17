@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.31)
+# Repo Handler Script (v2.3.32)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -88,6 +88,11 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Dry run mode (`--dry-run`) showing intended actions without changes.
 - Manual repository metadata refresh detection (timestamp + presence logic).
 - Summary table and reports (failed downloads, unknown packages).
+- Plain / no-emoji output mode (`--plain` / `--no-emoji`) for parser-friendly logs.
+
+### Recent Patch (v2.3.32)
+
+Patch bump to 2.3.32: Added and documented plain / no-emoji logging mode (ID 18) with early argument detection so initial configuration lines respect plain output.
 
 ## Configuration (`myrepo.cfg`)
 
@@ -132,6 +137,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 --dnf-serial                     Hint to avoid parallel DNF (currently advisory)
 --self-test                      Run environment diagnostics and output JSON then exit
 --json-summary                   Emit machine-readable run summary (JSON file/stdout)
+--plain / --no-emoji             Disable emojis & colors; use plain tokens (ERR/WARN/INFO/OK/DBG)
 -v | --verbose                   Set debug level 2
 -h | --help                      Show help
 ```
@@ -150,7 +156,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
 
-### Logging System (v2.3.31)
+### Logging System (v2.3.32)
 
 Unified logging helper:
 
@@ -170,6 +176,33 @@ log "E" "Failed to build cache"                # Always shown
 ```
 
 Legacy inline patterns like `[[ $DEBUG_LEVEL -ge 2 ]] && ...` have been replaced for consistency, reducing conditional clutter and centralizing verbosity control. Former level 4 (TRACE) output has been folded into level 3 (VERBOSE); maximum DEBUG_LEVEL is now 3.
+
+#### Plain / No-Emoji Mode
+
+Some CI systems or minimal terminals render emojis poorly or strip ANSI colors. Enable plain mode with `--plain` (alias: `--no-emoji`) to output ASCII tokens instead of emojis and omit color escapes.
+
+Token mapping:
+
+| Emoji Context | Plain Token |
+|---------------|-------------|
+| ❌ error      | ERR         |
+| ⚠️ warning    | WARN        |
+| ✅ success    | OK          |
+| ⏳ / 📘 info   | INFO        |
+| (debug)       | DBG         |
+
+Example:
+```
+./myrepo.sh --plain --dry-run --name-filter '^bash$'
+```
+
+Environment variable alternative:
+```
+export PLAIN_MODE=1
+./myrepo.sh
+```
+
+Plain mode also removes ANSI color sequences for maximum log parser friendliness.
 
 ### Test / Development Hooks
 
@@ -355,7 +388,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.31
+# myrepo.cfg - Configuration file for myrepo.sh v2.3.32
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -726,7 +759,7 @@ Sample output (pretty-printed for readability):
 
 ```json
 {
-   "version": "2.3.31",
+   "version": "2.3.32",
    "ok": 1,
    "bash_ok": 1,
    "dnf_query_ok": 1,
@@ -766,7 +799,7 @@ Behavior:
 Schema (keys always present; arrays may be empty):
 ```json
 {
-   "version": "2.3.31",
+   "version": "2.3.32",
    "duration_sec": 135,
    "repos": [
       { "name": "ol9_appstream", "new": 2, "updated": 1, "exists": 173 },

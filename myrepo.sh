@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.31"
+VERSION="2.3.32"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -30,6 +30,16 @@ SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 MANUAL_REPOS=("ol9_edge")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
+PLAIN_MODE=${PLAIN_MODE:-0}  # 1 = disable emojis & colors in log output (plain tokens)
+# Early pre-scan of arguments for plain mode so even initial configuration logs honor it
+if [[ $PLAIN_MODE -eq 0 ]]; then
+    for __arg in "$@"; do
+        case "$__arg" in
+            --plain|--no-emoji|--plain-output)
+                PLAIN_MODE=1; break;;
+        esac
+    done
+fi
 # Debug level semantic constants (use in place of raw numbers when adding new log lines)
 DEBUG_LVL_INFO=1        # Important high-level informational events
 DEBUG_LVL_DETAIL=2      # Detailed operational messages (default verbose mode)
@@ -355,6 +365,25 @@ function log() {
     esac
 
     # Prepend standardized emoji (omit for debug if empty message)
+    if [[ $PLAIN_MODE -eq 1 ]]; then
+        # Map levels/emojis to plain tokens
+        local token="INFO"
+        case "$level" in
+            E) token="ERR" ;;
+            W) token="WARN" ;;
+            I)
+                if [[ $prefix == "✅" ]]; then token="OK"; else token="INFO"; fi ;;
+            D) token="DBG" ;;
+        esac
+        # Strip any auto-chosen emoji from start of message to avoid duplication
+        if [[ -n "$prefix" ]]; then
+            message="${message#${prefix} }"
+        fi
+        message="$token $message"
+        echo -e "[$(date '+%H:%M:%S')] [$level] $message" >&2
+        return 0
+    fi
+
     if [[ -n "$prefix" ]]; then
         message="$prefix $message"
     fi
@@ -2595,6 +2624,10 @@ function parse_args() {
                 DRY_RUN=1
                 shift
                 ;;
+            --plain|--no-emoji|--plain-output)
+                PLAIN_MODE=1
+                shift
+                ;;
             --exclude-repos)
                 EXCLUDE_REPOS="$2"
                 shift 2
@@ -2692,6 +2725,7 @@ function parse_args() {
                 echo "  --no-parallel-compression Disable parallel compression"
                 echo "  --debug LEVEL          Debug level 1-3 (default: $DEBUG_LEVEL)"
                 echo "  --dry-run              Show what would be done without making changes"
+                echo "  --plain / --no-emoji   Disable emojis & colors; use plain tokens (ERR/WARN/INFO/OK/DBG)"
                 echo "  --exclude-repos LIST   Comma-separated list of repositories to exclude"
                 echo "  --full-rebuild         Remove all packages first, then rebuild"
                 echo "  --local-repo-path PATH Local repository path (default: $LOCAL_REPO_PATH)"
