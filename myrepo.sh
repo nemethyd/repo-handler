@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.22"
+VERSION="2.3.23"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -22,6 +22,11 @@ SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
 MANUAL_REPOS=("ol9_edge")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
+# Debug level semantic constants (use in place of raw numbers when adding new log lines)
+DEBUG_LVL_INFO=1        # Important high-level informational events
+DEBUG_LVL_DETAIL=2      # Detailed operational messages (default verbose mode)
+DEBUG_LVL_VERBOSE=3     # Very verbose diagnostic messages
+# (Former DEBUG_LVL_TRACE=4 removed; deepest diagnostics now use DEBUG_LVL_VERBOSE)
 DRY_RUN=${DRY_RUN:-0}
 MAX_PACKAGES=${MAX_PACKAGES:-0}
 MAX_CHANGED_PACKAGES=${MAX_CHANGED_PACKAGES:--1}
@@ -132,7 +137,7 @@ function batch_download_packages() {
     local -A repo_packages
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)\e[0m"
+            log "I" "   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)" 1
             continue
         fi
         local repo_path
@@ -150,7 +155,7 @@ function batch_download_packages() {
         if [[ -d "$repo_path" && $FORCE_REDOWNLOAD -eq 1 ]]; then
             local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
             if [[ -f "$exact_package_file" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Pre-removing existing (FORCE_REDOWNLOAD=1): ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+                log "D" "Pre-removing existing (FORCE_REDOWNLOAD=1): ${package_name}-${package_version}-${package_release}.${package_arch}.rpm" 2
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                     sudo rm -f "$exact_package_file" 2>/dev/null || true
                 else
@@ -195,7 +200,7 @@ function batch_download_packages() {
                 batch_packages+=("${package_array[i]}")
             done
             local batch_package_count=${#batch_packages[@]}
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Batch packages: ${batch_packages[*]}"
+            log "D" "   Batch packages: ${batch_packages[*]}" 2
             local dnf_cmd
             dnf_cmd=$(get_dnf_cmd)
             local dnf_options=(
@@ -207,7 +212,7 @@ function batch_download_packages() {
                 --destdir="$repo_path"
             )
             if ! is_repo_enabled "$repo_name"; then
-                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name"
+                log "I" "   Temporarily enabling disabled repository: $repo_name" 1
                 dnf_options+=(--enablerepo="$repo_name")
             fi
             local batch_start_time
@@ -269,19 +274,19 @@ function batch_download_packages() {
                     # shellcheck disable=SC2086
                     if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
                         success_count=$((success_count + ${#small_batch[@]}))
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"
+                        log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded" 2
                         fallback_processed=$fallback_end
                     else
-                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads"
+                        log "W" "   Small batch failed, trying individual downloads" 2
                         for pkg in "${small_batch[@]}"; do
                             # shellcheck disable=SC2086
                             if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                                 ((success_count++))
-                                [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"
+                                log "I" "   ✓ $pkg" 3
                             else
                                 failed_downloads["$pkg"]="$repo_name"
                                 failed_download_reasons["$pkg"]="DNF download failed"
-                                [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"
+                                log "W" "   ✗ Failed: $pkg" 2
                             fi
                         done
                         fallback_processed=$fallback_end
@@ -361,7 +366,7 @@ function build_repo_cache() {
         fi
     fi
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using cache directory: $cache_dir"
+    log "D" "Using cache directory: $cache_dir" $DEBUG_LVL_DETAIL
     
     # Cache validity check (4 hours by default, configurable)
     local cache_max_age=${CACHE_MAX_AGE:-14400}  # 4 hours in seconds
@@ -409,7 +414,7 @@ function build_repo_cache() {
                 local package_count
                 package_count=$(wc -l < "$cache_file")
                 ((loaded_repos++))
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Loaded $package_count packages from cached $repo"
+                log "D" "Loaded $package_count packages from cached $repo" $DEBUG_LVL_DETAIL
             else
                 log "W" "Cache file missing for $repo, forcing rebuild"
                 cache_valid=false
@@ -434,13 +439,13 @@ function build_repo_cache() {
     local dnf_cmd
     dnf_cmd=$(get_dnf_cmd)
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using DNF command: $dnf_cmd"
+    log "D" "Using DNF command: $dnf_cmd" $DEBUG_LVL_DETAIL
     
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>&1); then
         log "E" "Failed to get installed packages list"
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "E" "DNF error: $installed_packages"
+    log "E" "DNF error: $installed_packages" 1
         log "E" "Failed to build repository metadata cache"
         exit 1
     fi
@@ -463,14 +468,14 @@ function build_repo_cache() {
     local all_packages_to_search
     all_packages_to_search=$(printf '%s\n%s\n' "$unique_packages" "$system_packages" | sort -u)
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Will search for $(echo "$all_packages_to_search" | wc -l) unique packages in repositories (including $(echo "$system_packages" | wc -l) @System packages)"
+    log "D" "Will search for $(echo "$all_packages_to_search" | wc -l) unique packages in repositories (including $(echo "$system_packages" | wc -l) @System packages)" $DEBUG_LVL_DETAIL
     
     # Get list of enabled repositories
     local enabled_repos
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     if ! enabled_repos=$(${dnf_cmd} repolist --enabled --quiet 2>&1 | awk 'NR>1 {print $1}' | grep -v "^$"); then
         log "E" "Failed to get enabled repositories list"
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "E" "DNF repolist error: $enabled_repos"
+    log "E" "DNF repolist error: $enabled_repos" 1
         log "E" "Failed to build repository metadata cache"
         exit 1
     fi
@@ -514,7 +519,7 @@ function build_repo_cache() {
                     # Successfully wrote as current user
                     chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
                     cache_written=true
-                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written directly: $cache_file"
+                    log "D" "Cache written directly: $cache_file" $DEBUG_LVL_VERBOSE
                 fi
             } 2>/dev/null
             
@@ -524,7 +529,7 @@ function build_repo_cache() {
                     # Write with sudo and set proper permissions
                     sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
                     cache_written=true
-                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written with sudo: $cache_file"
+                    log "D" "Cache written with sudo: $cache_file" $DEBUG_LVL_VERBOSE
                 fi
             fi
             
@@ -537,11 +542,11 @@ function build_repo_cache() {
                     if mv "$temp_file" "$cache_file" 2>/dev/null; then
                         chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
                         cache_written=true
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written via temp file: $cache_file"
+                        log "D" "Cache written via temp file: $cache_file" $DEBUG_LVL_VERBOSE
                     elif [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo mv "$temp_file" "$cache_file" 2>/dev/null; then
                         sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
                         cache_written=true
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Cache written via temp file with sudo: $cache_file"
+                        log "D" "Cache written via temp file with sudo: $cache_file" $DEBUG_LVL_VERBOSE
                     else
                         # Clean up temp file if all attempts failed
                         rm -f "$temp_file" 2>/dev/null || true
@@ -568,7 +573,7 @@ function build_repo_cache() {
             fi
         else
             log "W" "⚠️  Failed to cache metadata for repository: $repo"
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Error: $dnf_result"
+            log "D" "   Error: $dnf_result" $DEBUG_LVL_DETAIL
         fi
     done <<< "$enabled_repos"
     
@@ -582,7 +587,7 @@ function build_repo_cache() {
             manual_repo_path=$(get_repo_path "$manual_repo")
             
             if [[ ! -d "$manual_repo_path" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Manual repository directory not found: $manual_repo_path"
+                log "D" "Manual repository directory not found: $manual_repo_path" $DEBUG_LVL_DETAIL
                 continue
             fi
             
@@ -635,14 +640,14 @@ function build_repo_cache() {
     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
         if echo "$current_time" | sudo tee "$timestamp_file" >/dev/null 2>&1; then
             sudo chmod "$CACHE_FILE_PERMISSIONS" "$timestamp_file" 2>/dev/null || true
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache timestamp written to shared location: $timestamp_file"
+            log "D" "Cache timestamp written to shared location: $timestamp_file" $DEBUG_LVL_DETAIL
             timestamp_written=true
         fi
     fi
     
     # Try direct write if sudo didn't work or wasn't used
     if [[ $timestamp_written == false ]] && echo "$current_time" > "$timestamp_file" 2>/dev/null; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache timestamp written to: $timestamp_file"
+    log "D" "Cache timestamp written to: $timestamp_file" $DEBUG_LVL_DETAIL
         timestamp_written=true
     fi
     
@@ -652,26 +657,26 @@ function build_repo_cache() {
     
     # Inform user about shared cache behavior
     log "I" "✅ Repository metadata cache built successfully (shared cache: $cache_dir)"
-    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "✓ Cache is shared between root and user modes"
+    log "I" "✓ Cache is shared between root and user modes" 1
     
     return 0  # Success
 }
 
 # Check command elevation and privileges (with auto-detection)
 function check_command_elevation() {
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking command elevation and privileges (ELEVATE_COMMANDS=$ELEVATE_COMMANDS, EUID=$EUID, SUDO_USER=${SUDO_USER:-unset})"
+    log "D" "Checking command elevation and privileges (ELEVATE_COMMANDS=$ELEVATE_COMMANDS, EUID=$EUID, SUDO_USER=${SUDO_USER:-unset})" $DEBUG_LVL_VERBOSE
     
     # Enhanced auto-detection for elevated privileges
     if [[ $EUID -eq 0 ]] || [[ -n "$SUDO_USER" ]] || [[ -w /root ]]; then
         if [[ $EUID -eq 0 ]]; then
             log "I" "Running as root - DNF commands will run directly without sudo"
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Root privileges detected (EUID=0)"
+            log "D" "Root privileges detected (EUID=0)" $DEBUG_LVL_DETAIL
         elif [[ -n "$SUDO_USER" ]]; then
             log "I" "Running under sudo - DNF commands will run directly without additional sudo"
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Sudo context detected (SUDO_USER=$SUDO_USER)"
+            log "D" "Sudo context detected (SUDO_USER=$SUDO_USER)" $DEBUG_LVL_DETAIL
         else
             log "I" "Elevated privileges detected - DNF commands will run directly"
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Write access to /root detected"
+            log "D" "Write access to /root detected" $DEBUG_LVL_DETAIL
         fi
         return 0
     fi
@@ -679,7 +684,7 @@ function check_command_elevation() {
     # Not running with elevated privileges - check if elevation is enabled
     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
         log "I" "Running as user (EUID=$EUID) - DNF commands will use sudo for elevation"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Auto-detected: user needs sudo for DNF operations"
+    log "D" "Auto-detected: user needs sudo for DNF operations" $DEBUG_LVL_DETAIL
         
         # Test if sudo works (optional test to avoid surprises later)
         local dnf_binary
@@ -690,7 +695,7 @@ function check_command_elevation() {
         fi
         
         if ! sudo -n "$dnf_binary" --version >/dev/null 2>&1; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Passwordless sudo not available, testing with prompt..."
+            log "D" "Passwordless sudo not available, testing with prompt..." $DEBUG_LVL_DETAIL
             if ! timeout "$SUDO_TEST_TIMEOUT" sudo "$dnf_binary" --version >/dev/null 2>&1; then
                 log "E" "Auto-detected sudo requirement but sudo access failed. Please ensure:"
                 log "E" "1. Your user is in the sudoers group (wheel)"
@@ -699,11 +704,11 @@ function check_command_elevation() {
                 exit 1
             fi
         fi
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Sudo privileges verified successfully"
+    log "D" "Sudo privileges verified successfully" $DEBUG_LVL_DETAIL
         return 0
     else
         log "I" "Command elevation disabled - DNF commands will run directly"
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Running as user without elevation - some DNF operations may fail"
+    log "W" "Running as user without elevation - some DNF operations may fail" 1
         
         # Test if user can run dnf directly
         if ! dnf --version >/dev/null 2>&1; then
@@ -711,7 +716,7 @@ function check_command_elevation() {
             log "E" "Consider: 1. Running script as root, or 2. Enabling elevation (ELEVATE_COMMANDS=1)"
             exit 1
         fi
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct DNF access verified (running without sudo)"
+    log "D" "Direct DNF access verified (running without sudo)" $DEBUG_LVL_DETAIL
         return 0
     fi
 }
@@ -783,12 +788,12 @@ function classify_and_queue_packages() {
         if [[ "$repo_name" == "System" || "$repo_name" == "@System" || "$repo_name" == "@commandline" ]]; then
             local original_repo_name="$repo_name"
             repo_name=$(determine_repo_source "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch")
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   $original_repo_name → $repo_name: $package_name\e[0m"
+            log "D" "   $original_repo_name → $repo_name: $package_name" $DEBUG_LVL_DETAIL
             if [[ "$repo_name" == "Invalid" ]]; then
                 local discovered_repo
                 discovered_repo=$(determine_repo_from_installed "$package_name" "$package_version" "$package_release" "$package_arch")
                 if [[ -n "$discovered_repo" ]]; then
-                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found via installed package: $package_name ($discovered_repo - will enable for download)\e[0m"
+                    log "D" "   Found via installed package: $package_name ($discovered_repo - will enable for download)" $DEBUG_LVL_DETAIL
                     repo_name="$discovered_repo"
                 else
                     local found_repo=""
@@ -800,7 +805,7 @@ function classify_and_queue_packages() {
                                 local existing_package
                                 existing_package=$(find "$manual_repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null | head -1)
                                 if [[ -n "$existing_package" ]]; then
-                                    found_repo="$manual_repo"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found in manual repo: $package_name (exists in $manual_repo)\e[0m"; break
+                                    found_repo="$manual_repo"; log "D" "   Found in manual repo: $package_name (exists in $manual_repo)" $DEBUG_LVL_DETAIL; break
                                 fi
                             fi
                         fi
@@ -808,7 +813,7 @@ function classify_and_queue_packages() {
                     if [[ -n "$found_repo" ]]; then
                         repo_name="$found_repo"
                     else
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as unknown)\e[0m"
+                        log "I" "   Skipping unknown: $package_name (not found in any repository - will be reported as unknown)" 1
                         local package_key="${package_name}-${package_version}-${package_release}.${package_arch}"
                         unknown_packages["$package_key"]="@System (source unknown)"
                         unknown_package_reasons["$package_key"]="Package not found in any enabled or manual repository"
@@ -819,49 +824,49 @@ function classify_and_queue_packages() {
         else
             local clean_repo_name="${repo_name#@}"
             if [[ ${GLOBAL_ENABLED_REPOS_CACHE["$clean_repo_name"]:-0} != 1 ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)\e[0m"
+                log "D" "   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)" $DEBUG_LVL_DETAIL
             fi
             repo_name="$clean_repo_name"
         fi
 
         if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m   Skipping invalid package: $package_name ($repo_name)\e[0m"; continue; fi
+            log "D" "   Skipping invalid package: $package_name ($repo_name)" $DEBUG_LVL_DETAIL; continue; fi
         if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository name for $package_name: '$repo_name' - skipping"; continue; fi
+            log "W" "Invalid repository name for $package_name: '$repo_name' - skipping" $DEBUG_LVL_DETAIL; continue; fi
         if ! should_process_repo "$repo_name"; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping package from filtered repository: $package_name ($repo_name)"; continue; fi
+            log "D" "Skipping package from filtered repository: $package_name ($repo_name)" $DEBUG_LVL_DETAIL; continue; fi
 
         ((_processed_packages_ref++))
         local repo_path; repo_path=$(get_repo_path "$repo_name")
         if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Invalid repository path for $package_name: '$repo_path' - skipping"; continue; fi
+            log "W" "Invalid repository path for $package_name: '$repo_path' - skipping" 1; continue; fi
         local status; status=$(get_package_status "$package_name" "$package_version" "$package_release" "$package_arch" "$repo_path")
         case "$status" in
             EXISTS)
                 ((_exists_count_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_exists_count["$repo_name"]++))
-                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
-                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)"; fi
+                log "I" "$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch" 1
+                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)" $DEBUG_LVL_DETAIL; fi
                 ;;
             UPDATE)
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
                 fi
                 ((_update_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]++))
                 echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
                 if [[ $DRY_RUN -eq 0 ]]; then
                     local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                        log "I" "   📋 Using local RPM for update: $(basename "$rpm_path")" 1; log "D" "   Source: $rpm_path" $DEBUG_LVL_DETAIL
                         local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                         local temp_copy="${target_file}.new.$$"
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✓ Updated from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         else
-                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✓ Updated from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--))
+                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--))
                         else
                             _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
@@ -870,22 +875,22 @@ function classify_and_queue_packages() {
                 ;;
             NEW)
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
                 fi
                 ((_new_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]++))
                 echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
                 if [[ $DRY_RUN -eq 0 ]]; then
                     local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                        log "I" "   📋 Using local RPM: $(basename "$rpm_path")" 1; log "D" "   Source: $rpm_path" $DEBUG_LVL_DETAIL
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$repo_path/"; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$repo_path/"; then log "I" "   ✓ Copied from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         else
-                            if cp "$rpm_path" "$repo_path/"; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$repo_path/"; then log "I" "   ✓ Copied from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--))
+                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--))
                         else
                             _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
@@ -914,7 +919,7 @@ function cleanup_old_cache_directories() {
     local removed_tmp=0 removed_cache=0 removed_dirs=0 fixed_perms=0
 
     if [[ -z "$cache_root" || ! -d "$cache_root" ]]; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache cleanup skipped (directory missing): $cache_root"
+    log "D" "Cache cleanup skipped (directory missing): $cache_root" $DEBUG_LVL_DETAIL
         return 0
     fi
 
@@ -931,7 +936,7 @@ function cleanup_old_cache_directories() {
                 fi
             fi
         else
-            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Insufficient permissions to inspect cache directory: $cache_root"
+            log "W" "Insufficient permissions to inspect cache directory: $cache_root" 1
             return 0
         fi
     fi
@@ -984,7 +989,7 @@ function cleanup_old_cache_directories() {
     if [[ $removed_tmp -gt 0 || $removed_cache -gt 0 || $removed_dirs -gt 0 ]]; then
         log "I" "🧹 Cache cleanup: removed ${removed_tmp} tmp, ${removed_cache} stale cache, ${removed_dirs} empty dirs from $(basename "$cache_root")"
     else
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache cleanup: nothing to remove"
+    log "D" "Cache cleanup: nothing to remove" $DEBUG_LVL_DETAIL
     fi
     [[ $fixed_perms -eq 1 ]] && log "I" "✓ Fixed shared cache directory permissions"
 
@@ -998,7 +1003,7 @@ function cleanup_old_repodata() {
     local repo_package_path="$3"
     local cleanup_count=0
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cleaning up old repodata for repository: $repo_name"
+    log "D" "Cleaning up old repodata for repository: $repo_name" $DEBUG_LVL_DETAIL
     
     # Pattern list for old repodata directories
     local cleanup_patterns=(
@@ -1012,7 +1017,7 @@ function cleanup_old_repodata() {
         for pattern in "${cleanup_patterns[@]}"; do 
             while IFS= read -r -d '' old_repodata; do
                 if [[ -d "$old_repodata" ]]; then
-                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Removing old repodata: $old_repodata"
+                    log "D" "   Removing old repodata: $old_repodata" 2
                     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                         sudo rm -rf "$old_repodata" 2>/dev/null || true
                     else
@@ -1053,7 +1058,7 @@ function cleanup_old_repodata() {
     fi
     
     if [[ $cleanup_count -gt 0 ]]; then
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Cleaned up $cleanup_count old/misplaced repodata directories"
+    log "I" "$(align_repo_name "$repo_name"): Cleaned up $cleanup_count old/misplaced repodata directories" 1
     fi
     
     return $cleanup_count
@@ -1142,7 +1147,7 @@ function cleanup_uninstalled_packages() {
             done
             
             if [[ $is_manual == true ]]; then
-                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Skipping cleanup for manual repository"
+                log "I" "$(align_repo_name "$repo_name"): Skipping cleanup for manual repository" 1
                 continue
             fi
             
@@ -1164,7 +1169,7 @@ function cleanup_uninstalled_packages() {
                 continue
             fi
             
-            [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Checking $total_rpms packages for removal"
+            log "I" "$(align_repo_name "$repo_name"): Checking $total_rpms packages for removal" 1
             total_rpms_checked=$((total_rpms_checked + total_rpms))
             
             # PERFORMANCE OPTIMIZATION: Batch process RPM metadata extraction
@@ -1214,7 +1219,7 @@ function cleanup_uninstalled_packages() {
                         
                         local rpm_metadata="${pkg_name}|${epoch}|${version}|${release}|${arch}"
                         
-                        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking: $rpm_metadata"
+                        log "D" "Checking: $rpm_metadata" 3
                         
                         # PERFORMANCE IMPROVEMENT: Use hash lookup instead of grep
                         if ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
@@ -1231,12 +1236,12 @@ function cleanup_uninstalled_packages() {
                             
                             if [[ -n "$rpm_full_path" && -f "$rpm_full_path" ]]; then
                                 if [[ $DRY_RUN -eq 1 ]]; then
-                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔍 Would remove uninstalled: $pkg_name (from $repo_name)"
-                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Metadata: $rpm_metadata"
+                                    log "I" "🔍 Would remove uninstalled: $pkg_name (from $repo_name)" 2
+                                    log "D" "   Metadata: $rpm_metadata" 3
                                     ((would_remove_count++))
                                 else
-                                    [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🗑️  Removing uninstalled: $pkg_name (from $repo_name)"
-                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Metadata: $rpm_metadata"
+                                    log "I" "🗑️  Removing uninstalled: $pkg_name (from $repo_name)" 2
+                                    log "D" "   Metadata: $rpm_metadata" 3
                                     rpms_to_remove+=("$rpm_full_path")
                                     ((removed_count++))
                                 fi
@@ -1245,7 +1250,7 @@ function cleanup_uninstalled_packages() {
                     done <<< "$batch_metadata"
                 else
                     # Fallback: Process individually if batch fails
-                    [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Batch RPM query failed for $repo_name, falling back to individual queries"
+                    log "W" "Batch RPM query failed for $repo_name, falling back to individual queries" 2
                     
                     for rpm_file in "${batch_files[@]}"; do
                         local rpm_metadata
@@ -1259,10 +1264,10 @@ function cleanup_uninstalled_packages() {
                                 package_name=$(echo "$rpm_metadata" | cut -d'|' -f1)
                                 
                                 if [[ $DRY_RUN -eq 1 ]]; then
-                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)"
+                                    log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)" 3
                                     ((would_remove_count++))
                                 else
-                                    [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)"
+                                    log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)" 3
                                     rpms_to_remove+=("$rpm_file")
                                     ((removed_count++))
                                 fi
@@ -1276,7 +1281,7 @@ function cleanup_uninstalled_packages() {
                 # Show progress for large repositories
                 if [[ $total_rpms -gt 100 ]]; then
                     local progress_percent=$(( (processed_rpms * 100) / total_rpms ))
-                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[36m   Progress: $processed_rpms/$total_rpms packages checked (${progress_percent}%)\e[0m"
+                    log "D" "   Progress: $processed_rpms/$total_rpms packages checked (${progress_percent}%)" 2
                 fi
             done
             
@@ -1367,7 +1372,7 @@ function determine_repo_from_installed() {
     if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
         # Clean up repo name (remove @ prefix)
         local clean_repo="${repo_info#@}"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Found installed repo via DNF: $clean_repo"
+    log "D" "Found installed repo via DNF: $clean_repo" 2
         echo "$clean_repo"
         return 0
     fi
@@ -1434,7 +1439,7 @@ function diagnose_permissions() {
     for location in "${locations[@]}"; do
         if [[ -d "$location" ]]; then
             if [[ -w "$location" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ Write access to: $location"
+                log "D" "✓ Write access to: $location" 2
             else
                 log "W" "✗ No write access to: $location"
             fi
@@ -1446,13 +1451,13 @@ function diagnose_permissions() {
     # Check DNF access
     local dnf_cmd
     dnf_cmd=$(get_dnf_cmd)
-    [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "DNF command will be: $dnf_cmd"
+    log "I" "DNF command will be: $dnf_cmd" 1
     
     # Test basic DNF access
     local test_result
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     if test_result=$(timeout "$SUDO_TEST_TIMEOUT" ${dnf_cmd} --version 2>&1); then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "✓ DNF access working"
+    log "D" "✓ DNF access working" 2
     else
         log "E" "✗ DNF access failed: $test_result"
         log "E" "This may indicate permission issues or DNF configuration problems"
@@ -1567,7 +1572,7 @@ function filter_and_prepare_packages() {
     local invalid_skipped=0 filtered_count=0 duplicates_removed=0
     while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
         if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" || -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
-            ((invalid_skipped++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Skipped invalid repo: $package_name ($repo_name)"; continue; fi
+            ((invalid_skipped++)); log "D" "Skipped invalid repo: $package_name ($repo_name)" 3; continue; fi
         [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
         echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_filtered"
         ((filtered_count++))
@@ -1575,7 +1580,7 @@ function filter_and_prepare_packages() {
     sort -t'|' -k6,6 -k1,1 -k3,3V "$temp_filtered" > "$temp_sorted"
     local previous_line=""
     while IFS= read -r line; do
-        if [[ "$line" != "$previous_line" ]]; then echo "$line" >> "$temp_deduped"; previous_line="$line"; else ((duplicates_removed++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Removed duplicate: $line"; fi
+    if [[ "$line" != "$previous_line" ]]; then echo "$line" >> "$temp_deduped"; previous_line="$line"; else ((duplicates_removed++)); log "D" "Removed duplicate: $line" 3; fi
     done < "$temp_sorted"
     local filtered_packages
     if [[ -n "$NAME_FILTER" ]]; then
@@ -1689,7 +1694,7 @@ function full_rebuild_repos() {
                 else
                     rm -rf "$repo_base_path/repodata" 2>/dev/null || true
                 fi
-                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Removed current repodata for full rebuild"
+                log "I" "$(align_repo_name "$repo_name"): Removed current repodata for full rebuild" 1
             fi
             
             echo -e "\e[33m$(align_repo_name "$repo_name"): Repository cleaned for full rebuild\e[0m"
@@ -1718,7 +1723,7 @@ function gather_installed_packages() {
         done <<< "$enabled_repos_list"
         GLOBAL_ENABLED_REPOS_CACHE_POPULATED=1
         log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')" 2
     fi
 
     # Run repoquery with timeout & optional NAME_FILTER pre-filter
@@ -1730,13 +1735,13 @@ function gather_installed_packages() {
     # shellcheck disable=SC2178 # We are intentionally using a scalar string, not an array
     # shellcheck disable=SC2128 # Echoing the scalar is correct; it's not an array
     local repoquery_result=""
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF command will be: ${dnf_cmd}"
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s"
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Name filter: '${NAME_FILTER}'"
+    log "D" "DNF command will be: ${dnf_cmd}" 3
+    log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s" 3
+    log "D" "Name filter: '${NAME_FILTER}'" 3
 
     local dnf_exit_code=0
     if [[ -n "$NAME_FILTER" ]]; then
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query with name filter..."
+    log "D" "Running DNF query with name filter..." 3
         # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
             if [[ "$name" =~ $NAME_FILTER ]]; then
@@ -1744,13 +1749,13 @@ function gather_installed_packages() {
             fi
         done)
         dnf_exit_code=$?
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query with filter completed with exit code: $dnf_exit_code"
+    log "D" "DNF query with filter completed with exit code: $dnf_exit_code" 3
     else
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query without name filter..."
+    log "D" "Running DNF query without name filter..." 3
         # shellcheck disable=SC2086
     repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
         dnf_exit_code=$?
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query without filter completed with exit code: $dnf_exit_code"
+    log "D" "DNF query without filter completed with exit code: $dnf_exit_code" 3
     fi
 
     if [[ $DEBUG_LEVEL -ge 3 ]]; then
@@ -1764,8 +1769,8 @@ function gather_installed_packages() {
 
     if [[ -z "$repoquery_result" ]]; then
         log "E" "Failed to get installed packages list (exit code: ${dnf_exit_code:-unknown})"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Trying manual DNF test..."
-        [[ $DEBUG_LEVEL -ge 2 ]] && ${dnf_cmd} --version >&2 || true
+    log "D" "Trying manual DNF test..." 2
+    (( DEBUG_LEVEL >= 2 )) && ${dnf_cmd} --version >&2 || true
         return 1
     fi
 
@@ -1842,7 +1847,7 @@ function generate_summary_table() {
     for repo in "${all_repos[@]}"; do
         # Additional safety check - skip empty repo names in summary
         if [[ -z "$repo" || "$repo" == "getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping invalid repository name in summary: '$repo'"
+            log "D" "Skipping invalid repository name in summary: '$repo'" 2
             continue
         fi
         
@@ -1899,18 +1904,18 @@ function get_package_status() {
     # This deliberately excludes subpackages like name-libs, name-devel etc.
     local base_version_glob="${package_name}-[0-9]*.${package_arch}.rpm"
     
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Checking status for $exact_filename in $repo_path"
+    log "D" "Checking status for $exact_filename in $repo_path" 3
     
     # Ensure repo path exists - if not, it's definitely NEW
     if [[ ! -d "$repo_path" ]]; then
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Repository directory doesn't exist: $repo_path -> NEW"
+    log "D" "Repository directory doesn't exist: $repo_path -> NEW" 3
         echo "NEW"
         return 0
     fi
     
     # Check for exact match first (EXISTS)
     if [[ -f "$repo_path/$exact_filename" ]]; then
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match: $exact_filename -> EXISTS"
+    log "D" "Found exact match: $exact_filename -> EXISTS" 3
         echo "EXISTS"
         return 0
     fi
@@ -1920,7 +1925,7 @@ function get_package_status() {
         local alt_release="${BASH_REMATCH[1]}.el9"
         local alt_filename="${package_name}-${package_version}-${alt_release}.${package_arch}.rpm"
         if [[ -f "$repo_path/$alt_filename" ]]; then
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found alt match: $alt_filename -> EXISTS"
+            log "D" "Found alt match: $alt_filename -> EXISTS" 3
             echo "EXISTS"
             return 0
         fi
@@ -1933,7 +1938,7 @@ function get_package_status() {
         local normalized_release="${base_version}.${suffix}"
         local normalized_filename="${package_name}-${package_version}-${normalized_release}.${package_arch}.rpm"
         if [[ -f "$repo_path/$normalized_filename" ]]; then
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found normalized match: $normalized_filename (${package_release} -> ${normalized_release}) -> EXISTS"
+            log "D" "Found normalized match: $normalized_filename (${package_release} -> ${normalized_release}) -> EXISTS" 3
             echo "EXISTS"
             return 0
         fi
@@ -1951,7 +1956,7 @@ function get_package_status() {
             basename_file=$(basename "$existing_file")
             # Guard: exact match should have been caught earlier; keep defensive check
             if [[ "$basename_file" == "$exact_filename" ]]; then
-                [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found exact match in filtered base list: $basename_file -> EXISTS"
+                log "D" "Found exact match in filtered base list: $basename_file -> EXISTS" 3
                 echo "EXISTS"
                 return 0
             fi
@@ -1976,13 +1981,13 @@ function get_package_status() {
     # shellcheck disable=SC2295
     local existing_release="${vr_arch#"${existing_version}"-}"
 
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Comparing base package versions: requested=$package_version-$package_release vs existing=$existing_version-$existing_release"
+    log "D" "Comparing base package versions: requested=$package_version-$package_release vs existing=$existing_version-$existing_release" 3
 
         # If same version and compatible release treat as EXISTS
         local req_base_release="${package_release%.*}"
         local exist_base_release="${existing_release%.*}"
         if [[ "$package_version" == "$existing_version" && ( "$req_base_release" == "$exist_base_release" || "$package_release" == "$existing_release" ) ]]; then
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Compatible base version found: $existing_basename -> EXISTS"
+            log "D" "Compatible base version found: $existing_basename -> EXISTS" 3
             echo "EXISTS"
             return 0
         fi
@@ -1995,13 +2000,13 @@ function get_package_status() {
             if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name_from_path "* ]]; then
                 repo_type="manual"
             fi
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$repo_type repository has newer base version ($existing_version-$existing_release > $package_version-$package_release) -> EXISTS"
+            log "D" "$repo_type repository has newer base version ($existing_version-$existing_release > $package_version-$package_release) -> EXISTS" 3
             echo "EXISTS"
             return 0
         fi
 
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Found $existing_count base package version(s) of $package_name, need UPDATE"
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Example base file: $(echo "$existing_files" | head -1 | xargs basename)"
+    log "D" "Found $existing_count base package version(s) of $package_name, need UPDATE" 3
+    log "D" "Example base file: $(echo "$existing_files" | head -1 | xargs basename)" 3
         echo "UPDATE"
         return 0
     fi
@@ -2017,7 +2022,7 @@ function get_package_status() {
     fi
     
     # No existing package found - this is NEW
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "No existing package found for $package_name -> NEW"
+    log "D" "No existing package found for $package_name -> NEW" 3
     echo "NEW"
     return 0
 }
@@ -2098,7 +2103,7 @@ function load_config() {
             "/var/cache/yum"
             "/tmp"
         )
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using default LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}"
+    log "D" "Using default LOCAL_RPM_SOURCES: ${LOCAL_RPM_SOURCES[*]}" 2
     fi
 }
 
@@ -2111,51 +2116,62 @@ function locate_local_rpm() {
     
     local target_filename="${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
     
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Searching for local RPM: $target_filename"
+    log "D" "Searching for local RPM: $target_filename" 3
     
     # Search in configured LOCAL_RPM_SOURCES directories
     for search_path in "${LOCAL_RPM_SOURCES[@]}"; do
         if [[ -d "$search_path" ]]; then
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Checking: $search_path"
+            log "D" "   Checking: $search_path" 3
             
             # Search recursively to find RPMs in subdirectories (like x86_64/, noarch/, etc.)
             local rpm_path
             rpm_path=$(find "$search_path" -type f -name "$target_filename" 2>/dev/null | head -n 1)
             
             if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Found local RPM: $rpm_path"
+                log "D" "Found local RPM: $rpm_path" 2
                 echo "$rpm_path"
                 return 0
             fi
         else
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "   Source directory not found: $search_path"
+            log "D" "   Source directory not found: $search_path" 3
         fi
     done
     
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "No local RPM found for: $target_filename"
+    log "D" "No local RPM found for: $target_filename" 3
     return 1
 }
 
 # Simple logging function with colors
 function log() {
-    local level="$1"
-    local message="$2"
+    local level="$1"; shift
+    local message="$1"; shift || true
+    local min_debug_threshold=""  # Optional numeric debug threshold
+    if [[ $# -gt 0 ]]; then
+        min_debug_threshold="$1"
+    fi
+
+    # If a threshold is provided and current DEBUG_LEVEL lower, skip
+    if [[ -n "$min_debug_threshold" && "$level" == "D" ]]; then
+        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
+    elif [[ -n "$min_debug_threshold" && "$level" == "I" ]]; then
+        # Allow gated info messages too
+        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
+    fi
+
     local color=""
-    
     case "$level" in
-        "E") color="\e[31m" ;;  # Red for errors
-        "W") color="\e[33m" ;;  # Yellow for warnings  
-        "I") color="\e[32m" ;;  # Green for info
-        "D") color="\e[36m" ;;  # Cyan for debug
+        E) color="\e[31m" ;; # error
+        W) color="\e[33m" ;; # warning
+        I) color="\e[32m" ;; # info
+        D) color="\e[36m" ;; # debug
+        *) color="\e[37m" ;; # default/unknown
     esac
-    
-    # Send log output to stderr to avoid contaminating function return values
     echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
 }
 
 # Parse command-line arguments (like original script)
 function parse_args() {
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "parse_args called with $# arguments: $*"
+    log "D" "parse_args called with $# arguments: $*" 3
     
     # Parse command-line options (overrides config file and defaults)
     while [[ $# -gt 0 ]]; do
@@ -2473,7 +2489,7 @@ function process_packages() {
     
     classify_and_queue_packages "$filtered_packages" new_packages update_packages processed_packages new_count update_count exists_count changed_packages_found "$total_packages"
     # Reference variables to ensure ShellCheck recognizes usage post-function
-    if [[ $DEBUG_LEVEL -ge 3 ]]; then echo "Debug: processed=$processed_packages new=$new_count update=$update_count exists=$exists_count changed=$changed_packages_found"; fi
+    log "D" "Debug: processed=$processed_packages new=$new_count update=$update_count exists=$exists_count changed=$changed_packages_found" 3
     
     perform_batched_downloads new_packages update_packages "$start_time"
     finalize_and_report "$start_time" "$processed_packages" "$new_count" "$update_count" "$exists_count"
@@ -2482,8 +2498,8 @@ function process_packages() {
 # Report failed downloads at the end of script execution
 function report_failed_downloads() {
     # Debug: Show array sizes
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Failed downloads array size: ${#failed_downloads[@]}"
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Failed download reasons array size: ${#failed_download_reasons[@]}"
+    log "D" "Failed downloads array size: ${#failed_downloads[@]}" 2
+    log "D" "Failed download reasons array size: ${#failed_download_reasons[@]}" 2
     
     # Skip if no failures recorded
     if [[ ${#failed_downloads[@]} -eq 0 ]]; then
@@ -2528,8 +2544,8 @@ function report_failed_downloads() {
 # Report unknown packages at the end of script execution
 function report_unknown_packages() {
     # Debug: Show array sizes
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Unknown packages array size: ${#unknown_packages[@]}"
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Unknown package reasons array size: ${#unknown_package_reasons[@]}"
+    log "D" "Unknown packages array size: ${#unknown_packages[@]}" 2
+    log "D" "Unknown package reasons array size: ${#unknown_package_reasons[@]}" 2
     
     # Skip if no unknown packages recorded
     if [[ ${#unknown_packages[@]} -eq 0 ]]; then
@@ -2589,7 +2605,7 @@ function should_process_package() {
     # Apply name filter if specified
     if [[ -n "$NAME_FILTER" ]]; then
         if [[ ! "$package_name" =~ $NAME_FILTER ]]; then
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Skipping package (name filter): $package_name"
+            log "D" "Skipping package (name filter): $package_name" 3
             return 1
         fi
     fi
@@ -2606,7 +2622,7 @@ function should_process_repo() {
         IFS=',' read -ra exclude_array <<< "$EXCLUDE_REPOS"
         for excluded in "${exclude_array[@]}"; do
             if [[ "$repo_name" == "$excluded" ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Excluding repository: $repo_name"
+                log "D" "Excluding repository: $repo_name" 2
                 return 1
             fi
         done
@@ -2621,7 +2637,7 @@ function should_process_repo() {
             fi
         done
         # If specific repos requested but this isn't one of them, skip
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping repository (not in --repos list): $repo_name"
+    log "D" "Skipping repository (not in --repos list): $repo_name" 2
         return 1
     fi
     
@@ -2729,21 +2745,21 @@ function sync_to_shared_repos() {
             
             # Check if this repository should be synced (only enabled repos)
             if ! is_repo_enabled "$repo_name"; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping sync for disabled repository: $repo_name"
+                log "D" "Skipping sync for disabled repository: $repo_name" 2
                 log "I" "$(align_repo_name "$repo_name"): Skipped (disabled repository)"
                 continue
             fi
             
             local shared_repo_dir="$SHARED_REPO_PATH/$repo_name"
             
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Syncing $repo_name..."
+            log "D" "Syncing $repo_name..." 2
             
             # Create shared repo directory if it doesn't exist
             mkdir -p "$shared_repo_dir" 2>/dev/null
             
             # Use rsync for efficient sync
             if command -v rsync >/dev/null 2>&1; then
-                if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                if (( DEBUG_LEVEL >= 2 )); then
                     # Verbose sync for debug mode
                     rsync -av --delete "$repo_dir/" "$shared_repo_dir/"
                 else
@@ -2765,7 +2781,7 @@ function sync_to_shared_repos() {
 # Update metadata for all repositories that had package changes
 function update_all_repository_metadata() {
     if [[ $SYNC_ONLY -eq 1 ]]; then
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "Sync-only mode: skipping metadata updates"
+    log "I" "Sync-only mode: skipping metadata updates" 1
         return 0
     fi
 
@@ -2773,7 +2789,7 @@ function update_all_repository_metadata() {
     if [[ -n "${ENABLE_TEST_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 ]]; then
         if [[ -d "$LOCAL_REPO_PATH/test_repo" ]]; then
             CHANGED_REPOS["test_repo"]=1
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Added test_repo to CHANGED_REPOS"
+            log "D" "Test hook: Added test_repo to CHANGED_REPOS" 2
         fi
     fi
 
@@ -2859,7 +2875,7 @@ function update_manual_repository_metadata() {
         local repo_dir="$LOCAL_REPO_PATH/$manual_repo"
         
         if [[ ! -d "$repo_dir" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): Manual repository directory not found"
+            log "D" "$(align_repo_name "$manual_repo"): Manual repository directory not found" 2
             continue
         fi
         
@@ -2868,7 +2884,7 @@ function update_manual_repository_metadata() {
         rpm_count=$(find "$repo_dir" -name "*.rpm" -type f 2>/dev/null | wc -l)
         
         if [[ $rpm_count -eq 0 ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): No RPM files in manual repository"
+            log "D" "$(align_repo_name "$manual_repo"): No RPM files in manual repository" 2
             continue
         fi
         
@@ -2877,7 +2893,7 @@ function update_manual_repository_metadata() {
         
         if [[ ! -d "$repo_dir/repodata" ]]; then
             needs_update=true
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): No metadata directory found"
+            log "D" "$(align_repo_name "$manual_repo"): No metadata directory found" 2
         else
             # Find newest RPM file
             local newest_rpm
@@ -2891,7 +2907,7 @@ function update_manual_repository_metadata() {
                 
                 if [[ $rpm_time -gt $metadata_time ]]; then
                     needs_update=true
-                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): RPM files newer than metadata"
+                    log "D" "$(align_repo_name "$manual_repo"): RPM files newer than metadata" 2
                 fi
             fi
         fi
@@ -2906,14 +2922,14 @@ function update_manual_repository_metadata() {
                 ((updated_manual++))
             fi
         else
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$manual_repo"): Manual repository metadata is up to date"
+            log "D" "$(align_repo_name "$manual_repo"): Manual repository metadata is up to date" 2
         fi
     done
     
     if [[ $updated_manual -gt 0 ]]; then
         log "I" "✅ Updated metadata for $updated_manual manual repositories"
     else
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "✅ All manual repository metadata is up to date"
+    log "I" "✅ All manual repository metadata is up to date" 1
     fi
 }
 
@@ -2938,13 +2954,13 @@ function update_repository_metadata() {
         # For manual repositories, repo_path is already the base path
         repo_base_path="$repo_path"
         packages_path="$repo_path"
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$(align_repo_name "$repo_name"): Processing as manual repository"
+    log "D" "$(align_repo_name "$repo_name"): Processing as manual repository" 3
     else
         # For regular repositories, we need to get the base path
         repo_base_path=$(get_repo_base_path "$repo_name")
         local get_repo_result=$?
         packages_path="$repo_path"  # This is the getPackage path
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "$(align_repo_name "$repo_name"): Processing as regular repository (getPackage structure)"
+    log "D" "$(align_repo_name "$repo_name"): Processing as regular repository (getPackage structure)" 3
         
         if [[ $get_repo_result -ne 0 ]]; then
             log "E" "Failed to get repository base path for: $repo_name"
@@ -2962,7 +2978,7 @@ function update_repository_metadata() {
     rpm_count=$(find "$packages_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
     
     if [[ $rpm_count -eq 0 ]]; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "$(align_repo_name "$repo_name"): No RPM files found, skipping metadata update"
+    log "D" "$(align_repo_name "$repo_name"): No RPM files found, skipping metadata update" 2
         return 0
     fi
     
@@ -2972,9 +2988,9 @@ function update_repository_metadata() {
     fi
     
     if [[ $is_manual_repo == true ]]; then
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating manual repository metadata..."
+    log "I" "🔄 $(align_repo_name "$repo_name"): Updating manual repository metadata..." 2
     else
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "🔄 $(align_repo_name "$repo_name"): Updating repository metadata (repodata at repository level)..."
+    log "I" "🔄 $(align_repo_name "$repo_name"): Updating repository metadata (repodata at repository level)..." 2
     fi
     
     # Ensure the repository base directory exists
@@ -3023,14 +3039,14 @@ function update_repository_metadata() {
         createrepo_cmd="sudo $createrepo_cmd"
     fi
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Running: $createrepo_cmd"
+    log "D" "Running: $createrepo_cmd" 2
     
     # Execute createrepo command
     if eval "$createrepo_cmd" >/dev/null 2>&1; then
         if [[ $is_manual_repo == true ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Manual repository metadata updated successfully"
+            log "I" "✅ $(align_repo_name "$repo_name"): Manual repository metadata updated successfully" 2
         else
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "✅ $(align_repo_name "$repo_name"): Repository metadata updated successfully (repodata created at repository level)"
+            log "I" "✅ $(align_repo_name "$repo_name"): Repository metadata updated successfully (repodata created at repository level)" 2
         fi
         return 0
     else
@@ -3075,7 +3091,7 @@ function validate_and_handle_modes() {
 
 # Validate repository structure and detect common issues
 function validate_repository_structure() {
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Validating repository structure..."
+    log "D" "Validating repository structure..." 2
     
     # Check for invalid getPackage directory directly under LOCAL_REPO_PATH
     if [[ -d "$LOCAL_REPO_PATH/getPackage" ]]; then
@@ -3099,7 +3115,7 @@ function validate_repository_structure() {
         return 1  # Structure validation failed
     fi
     
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Repository structure validation passed"
+    log "D" "Repository structure validation passed" 2
     return 0
 }
 
@@ -3116,7 +3132,7 @@ function version_is_newer() {
     local ver2="${version2%-*}"
     local rel2="${version2##*-}"
     
-    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2"
+    log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2" $DEBUG_LVL_VERBOSE
     
     # Use rpm --eval with version comparison macros for accurate comparison
     # This handles complex version schemes correctly
@@ -3127,7 +3143,7 @@ function version_is_newer() {
         if [[ $? -eq 0 && -n "$comparison_result" ]]; then
             case "$comparison_result" in
                 "1")
-                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)"
+                    log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)" $DEBUG_LVL_VERBOSE
                     return 0  # version1 is newer
                     ;;
                 "0")
@@ -3136,18 +3152,18 @@ function version_is_newer() {
                     if [[ $? -eq 0 && -n "$comparison_result" ]]; then
                         case "$comparison_result" in
                             "1")
-                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)"
+                                log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)" $DEBUG_LVL_VERBOSE
                                 return 0  # release1 is newer
                                 ;;
                             "0"|"-1")
-                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2"
+                                log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2" $DEBUG_LVL_VERBOSE
                                 return 1  # same or older
                                 ;;
                         esac
                     fi
                     ;;
                 "-1")
-                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 < $ver2 (version is older)"
+                    log "D" "RPM vercmp: $ver1 < $ver2 (version is older)" $DEBUG_LVL_VERBOSE
                     return 1  # version1 is older
                     ;;
             esac
@@ -3176,10 +3192,10 @@ function version_is_newer() {
         num2=${num2:-0}
         
         if [[ $num1 -gt $num2 ]]; then
-            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)"
+            log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)" $DEBUG_LVL_VERBOSE
             return 0  # version1 is newer
         elif [[ $num1 -lt $num2 ]]; then
-            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)"
+            log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)" $DEBUG_LVL_VERBOSE
             return 1  # version1 is older
         fi
         # If equal, continue to next part
@@ -3195,10 +3211,10 @@ function version_is_newer() {
     rel2_num=${rel2_num:-0}
     
     if [[ $rel1_num -gt $rel2_num ]]; then
-        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)"
+    log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)" $DEBUG_LVL_VERBOSE
         return 0  # release1 is newer
     else
-        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)"
+    log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)" $DEBUG_LVL_VERBOSE
         return 1  # same or older
     fi
 }

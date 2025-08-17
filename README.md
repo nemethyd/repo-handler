@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.20)
+# Repo Handler Script (v2.3.25)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -42,7 +42,7 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 
 - NEW / UPDATE / EXISTS classification with filename pattern + version comparison (RPM vercmp + numeric fallback).
 - Local RPM reuse: scans `LOCAL_RPM_SOURCES` before downloading.
-- Batch + fallback download strategy with progress output and throttled status logging.
+- Batch + fallback download strategy with progress output and centralized threshold-based logging (log LEVEL "message" [debug_threshold]).
 - Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
 - Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
 - Metadata generation via `createrepo_c` with optional parallel workers.
@@ -110,7 +110,28 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | MAX_CHANGED_PACKAGES | Cap on new+updated downloads (-1 unlimited, 0 forbid) |
 | ELEVATE_COMMANDS | 1 (auto) or 0 (never sudo) |
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
-| DEBUG_LEVEL | 0–4 impact verbosity |
+| DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
+
+### Logging System (v2.3.25)
+
+Unified logging helper:
+
+```
+log LEVEL "message" [threshold]
+```
+
+Where:
+- LEVEL: E (error), W (warn), I (info), D (debug)
+- threshold (optional numeric): Minimum DEBUG_LEVEL required to emit this message (applies to D and I levels; E/W always shown unless DEBUG_LEVEL=0 and externally suppressed)
+
+Examples:
+```
+log "D" "Using cache directory: $cache_dir" 2   # Shown when DEBUG_LEVEL >=2
+log "I" "   Skipping manual repo: $pkg" 1        # Info gated at level 1+
+log "E" "Failed to build cache"                # Always shown
+```
+
+Legacy inline patterns like `[[ $DEBUG_LEVEL -ge 2 ]] && ...` have been replaced for consistency, reducing conditional clutter and centralizing verbosity control. Former level 4 (TRACE) output has been folded into level 3 (VERBOSE); maximum DEBUG_LEVEL is now 3.
 
 ### Test / Development Hooks
 
@@ -269,7 +290,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
    For example, to change the `DEBUG_LEVEL` to `3`:
 
    ```bash
-   # Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose, 4=very verbose)
+   # Set verbosity level (0=critical, 1=important, 2=normal, 3=verbose)
    DEBUG_LEVEL=3
    ```
 
@@ -432,12 +453,12 @@ The logging system uses two concepts:
 
 #### Verbosity Levels
 
-The `DEBUG_LEVEL` option controls the verbosity of log output:
+The `DEBUG_LEVEL` option controls the verbosity of log output (0–3):
 
-- `0` (Critical): Shows only critical errors that prevent script execution
-- `1` (Important): Shows important messages like warnings, progress, and success notifications  
-- `2` (Normal): Shows normal informational messages and all above levels (default)
-- `3` (Verbose): Shows detailed debugging information and all above levels
+- `0` (Critical): Only critical errors that prevent script execution
+- `1` (Important): Warnings, key progress, success notifications
+- `2` (Normal): Standard informational messages (default)
+- `3` (Verbose): Detailed debugging information (absorbs former ultra‑verbose traces)
 
 #### Message Types and Display Symbols
 
