@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.29"
+VERSION="2.3.30"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -52,6 +52,8 @@ LOG_DIR=${LOG_DIR:-"/var/log/myrepo"}
 SET_PERMISSIONS=${SET_PERMISSIONS:-0}
 REFRESH_METADATA=${REFRESH_METADATA:-0}
 DNF_SERIAL=${DNF_SERIAL:-0}
+# Self-test mode (diagnostic JSON output)
+SELF_TEST=${SELF_TEST:-0}
 # ELEVATE_COMMANDS is now automatically detected based on execution context:
 # - When running as root (EUID=0): Uses 'dnf' directly 
 # - When running under sudo (SUDO_USER set): Uses 'dnf' directly
@@ -75,6 +77,119 @@ function get_dnf_cmd() {
         DNF_CMD=(sudo dnf)
     else
         DNF_CMD=(dnf)
+    fi
+}
+
+# Self-test routine: validates environment and outputs JSON summary then exits.
+function run_self_test() {
+    local ok=1
+    local failures=()
+    local json
+    local required_cmds=(dnf rpm createrepo_c createrepo rsync find awk sed grep sort uniq tee xargs)
+
+    # Collect command availability
+    declare -A cmd_status=()
+    for c in "${required_cmds[@]}"; do
+        if command -v "$c" >/dev/null 2>&1; then
+            cmd_status[$c]=1
+        else
+            cmd_status[$c]=0
+            failures+=("missing_command:$c")
+            ok=0
+        fi
+    done
+
+    # Bash version
+    local bash_ok=0
+    if (( BASH_VERSINFO[0] >= 4 )); then
+        bash_ok=1
+    else
+        failures+=("bash_version_too_old:${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}")
+        ok=0
+    fi
+
+    # Privilege / sudo test (non-fatal unless elevation required later)
+    local sudo_mode
+    if [[ $EUID -eq 0 ]]; then
+        sudo_mode="root"
+    else
+        if command -v sudo >/dev/null 2>&1; then
+            if timeout ${SUDO_TEST_TIMEOUT:-5} sudo -n true 2>/dev/null; then
+                sudo_mode="sudo-nopass"
+            else
+                sudo_mode="sudo-pass"
+            fi
+        else
+            sudo_mode="no-sudo"
+        fi
+    fi
+
+    # Path writability checks
+    local paths=("$LOCAL_REPO_PATH" "$SHARED_CACHE_PATH")
+    local path_json_entries=()
+    for p in "${paths[@]}"; do
+        [[ -z "$p" ]] && continue
+        local writable=0 exists=0
+        if [[ -d "$p" ]]; then
+            exists=1
+            if [[ -w "$p" ]]; then writable=1; fi
+        else
+            exists=0
+            writable=0
+            failures+=("missing_dir:$p")
+            ok=0
+        fi
+        # Attempt a touch test if supposed writable
+        if [[ $exists -eq 1 && $writable -eq 1 ]]; then
+            local tf="$p/.myrepo_selftest_$$"
+            if ( : >"$tf" ) 2>/dev/null; then
+                rm -f "$tf" || true
+            else
+                writable=0
+                failures+=("not_writable:$p")
+                ok=0
+            fi
+        fi
+        path_json_entries+=("{\"path\":\"$p\",\"exists\":$exists,\"writable\":$writable}")
+    done
+
+    # DNF basic query test (lightweight)
+    local dnf_query_ok=0
+    if command -v dnf >/dev/null 2>&1; then
+        if timeout ${DNF_QUERY_TIMEOUT:-10} dnf -q repolist >/dev/null 2>&1; then
+            dnf_query_ok=1
+        else
+            failures+=("dnf_query_failed")
+            ok=0
+        fi
+    fi
+
+    # Build command status JSON fragment
+    local cmd_entries=()
+    for k in "${!cmd_status[@]}"; do
+        cmd_entries+=("{\"name\":\"$k\",\"present\":${cmd_status[$k]}}")
+    done
+
+    # Failures JSON array
+    local failures_json="[]"
+    if ((${#failures[@]} > 0)); then
+        local f_json_parts=()
+        for f in "${failures[@]}"; do
+            f_json_parts+=("\"$f\"")
+        done
+        failures_json="[${f_json_parts[*]}]"
+    fi
+
+    json=$(printf '{"version":"%s","ok":%s,"bash_ok":%s,"dnf_query_ok":%s,"sudo_mode":"%s","commands":[%s],"paths":[%s],"failures":%s}\n' \
+        "$VERSION" "$ok" "$bash_ok" "$dnf_query_ok" "$sudo_mode" \
+        "${cmd_entries[*]}" "${path_json_entries[*]}" "$failures_json")
+
+    echo "$json"
+    # Exit status 0 if ok else 2 (distinct from general errors)
+    if (( ok )); then
+        exit 0
+    else
+        exit 2
     fi
 }
 
@@ -2547,6 +2662,10 @@ function parse_args() {
                 BENCHMARK_LOOKUP=1
                 shift
                 ;;
+            --self-test)
+                SELF_TEST=1
+                shift
+                ;;
             -v|--verbose)
                 DEBUG_LEVEL=2
                 shift
@@ -2581,6 +2700,7 @@ function parse_args() {
                 echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
                 echo "  --dnf-serial           Force serial DNF operations"
                 echo "  --benchmark-lookup     Run repository lookup benchmark (diagnostic)"
+                echo "  --self-test            Environment diagnostic (JSON output) and exit"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
                 echo ""
@@ -3338,6 +3458,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     get_dnf_cmd
     load_config
     parse_args "$@" 
+    if [[ $SELF_TEST -eq 1 ]]; then
+        run_self_test
+    fi
     check_command_elevation
     validate_repository_structure
     show_runtime_status

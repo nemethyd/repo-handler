@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.29)
+# Repo Handler Script (v2.3.30)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -130,6 +130,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 --no-sync                        Skip sync stage
 --no-metadata-update             Skip createrepo_c
 --dnf-serial                     Hint to avoid parallel DNF (currently advisory)
+--self-test                      Run environment diagnostics and output JSON then exit
 -v | --verbose                   Set debug level 2
 -h | --help                      Show help
 ```
@@ -148,7 +149,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
 
-### Logging System (v2.3.26)
+### Logging System (v2.3.30)
 
 Unified logging helper:
 
@@ -349,7 +350,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.29
+# myrepo.cfg - Configuration file for myrepo.sh v2.3.30
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -677,6 +678,12 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 # Run with parallel compression enabled (default behavior)
 ./myrepo.sh --parallel-compression --debug 2
+
+# Quick environment diagnostic producing JSON (no repository work)
+./myrepo.sh --self-test
+
+# Self-test then run normal operation (separate runs)
+./myrepo.sh --self-test && ./myrepo.sh --debug 2 --repos ol9_appstream
 ```
 
 ### How It Works
@@ -698,6 +705,50 @@ The script implements a sophisticated workflow that efficiently manages local pa
 6. **Synchronization**: Uses rsync to efficiently synchronize the local repositories with shared storage, ensuring consistency across environments.
 
 7. **Performance Optimization**: Continuously monitors and adjusts processing parameters (batch size, parallelism) based on real-time performance metrics to maximize throughput.
+
+## Self-Test Mode (`--self-test`)
+
+The `--self-test` flag performs a fast, side‑effect free diagnostic of the runtime environment and prints a single JSON object, then exits (0 on success, 2 on failure). This is ideal for CI health checks or pre‑flight validation before scheduling large runs.
+
+Checks performed:
+- Bash version (requires 4+)
+- Presence of required commands (`dnf`, `rpm`, `createrepo_c` or fallback `createrepo`, `rsync`, core text utils)
+- Basic `dnf repolist` query (verifies DNF operational)
+- Writable status (with actual write probe) for `LOCAL_REPO_PATH` and `SHARED_CACHE_PATH`
+- Sudo capability detection (`root`, `sudo-nopass`, `sudo-pass`, or `no-sudo`)
+
+Sample output (pretty-printed for readability):
+
+```json
+{
+   "version": "2.3.30",
+   "ok": 1,
+   "bash_ok": 1,
+   "dnf_query_ok": 1,
+   "sudo_mode": "sudo-nopass",
+   "commands": [
+      { "name": "dnf", "present": 1 },
+      { "name": "rpm", "present": 1 }
+   ],
+   "paths": [
+      { "path": "/repo", "exists": 1, "writable": 1 },
+      { "path": "/var/cache/myrepo", "exists": 1, "writable": 1 }
+   ],
+   "failures": []
+}
+```
+
+Failure entries (e.g. `missing_command:dnf`, `not_writable:/repo`, `dnf_query_failed`) appear in the `failures` array and set `ok` to 0. Exit status is 2 when any failures are present.
+
+Typical CI usage:
+
+```bash
+if ./myrepo.sh --self-test > selftest.json; then
+   echo "Environment OK";
+else
+   echo "Environment NOT OK"; cat selftest.json; exit 1;
+fi
+```
 
 ## Tips
 
