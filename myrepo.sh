@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.27"
+VERSION="2.3.28"
 
 # --- Safety Guards (Priority 1 Implementation) ---
 # Bash version guard (requires >= 4 for associative arrays used extensively)
@@ -186,6 +186,7 @@ declare -A CHANGED_REPOS  # Repos with added/updated/removed RPMs this run
 
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
+declare -A repo_package_lookup  # key: package signature name|epoch|version|release|arch -> repo
 
 # Helper to reference rarely-touched associative arrays so static analyzers (SC2034) see legitimate use.
 function _touch_internal_state_refs() {
@@ -649,6 +650,7 @@ function build_repo_cache() {
         
         if [[ $cache_valid == true ]]; then
             log "I" "Successfully loaded cache for $loaded_repos repositories"
+            build_repo_lookup_index
             return 0
         fi
     fi
@@ -798,6 +800,9 @@ function build_repo_cache() {
             log "D" "   Error: $dnf_result" $DEBUG_LVL_DETAIL
         fi
     done <<< "$enabled_repos"
+
+    # Build fast lookup index now that we've populated available_repo_packages
+    build_repo_lookup_index
     
     # IMPORTANT: Also process manual repositories by scanning their RPM files directly
     if [[ ${#MANUAL_REPOS[@]} -gt 0 ]]; then
@@ -1621,9 +1626,17 @@ function determine_repo_source() {
         expected_package="${package_name}|0|${package_version}|${package_release}|${package_arch}"
     fi
     
-    # Search through cached repo metadata (same logic as original)
+    # Fast path: direct hash lookup
+    local repo_found="${repo_package_lookup[$expected_package]:-}"
+    if [[ -n "$repo_found" ]]; then
+        echo "$repo_found"
+        return 0
+    fi
+
+    # Fallback (should be rare): linear scan then populate index entry
     for repo in "${!available_repo_packages[@]}"; do
         if echo "${available_repo_packages[$repo]}" | grep -Fxq "$expected_package"; then
+            repo_package_lookup["$expected_package"]="$repo"
             echo "$repo"
             return 0
         fi
@@ -1632,6 +1645,55 @@ function determine_repo_source() {
     # Default to Invalid if no matching repo is found (same as original)
     echo "Invalid"
     return 1
+}
+
+# Build or rebuild the repo_package_lookup index for O(1) package->repo resolution.
+function build_repo_lookup_index() {
+    # Avoid rebuilding if already populated and not forced; size heuristic
+    if [[ ${#repo_package_lookup[@]} -gt 0 ]]; then
+        log "D" "Repo lookup index already populated (${#repo_package_lookup[@]} entries)" 3
+        return 0
+    fi
+    local start_ts=$(date +%s)
+    local repo
+    local count=0
+    for repo in "${!available_repo_packages[@]}"; do
+        # Read each line (package signature) and assign repo
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            repo_package_lookup["$line"]="$repo"
+            ((count++))
+        done <<< "${available_repo_packages[$repo]}"
+    done
+    local dur=$(( $(date +%s) - start_ts ))
+    log "D" "Built repo lookup index with $count entries in ${dur}s" 2
+}
+
+# Benchmark repository lookup performance (diagnostic)
+function benchmark_repo_lookup() {
+    local iterations=${1:-2000}
+    local keys_file
+    keys_file=$(mktemp)
+    # Collect up to N keys from index (or rebuild if empty)
+    if [[ ${#repo_package_lookup[@]} -eq 0 ]]; then
+        build_repo_lookup_index
+    fi
+    printf '%s\n' "${!repo_package_lookup[@]}" | head -n "$iterations" > "$keys_file"
+    local count=$(wc -l < "$keys_file")
+    if [[ $count -eq 0 ]]; then
+        log "W" "Benchmark skipped: no indexed packages" 1
+        rm -f "$keys_file"; return 0
+    fi
+    local start=$(date +%s%3N 2>/dev/null || date +%s)
+    local key repo
+    while IFS= read -r key; do
+        repo="${repo_package_lookup[$key]}"
+        [[ -z "$repo" ]] && { log "D" "Lookup miss in benchmark (unexpected)" 3; }
+    done < "$keys_file"
+    local end=$(date +%s%3N 2>/dev/null || date +%s)
+    local elapsed_ms=$((end - start))
+    log "I" "📊 Lookup benchmark: $count lookups in ${elapsed_ms}ms (~$(( elapsed_ms>0 ? (count*1000/elapsed_ms) : 0 )) ops/sec)" 1
+    rm -f "$keys_file"
 }
 
 # Check and diagnose permission issues
@@ -1861,6 +1923,9 @@ function finalize_and_report() {
     else
         # Single consolidated metadata update handles both regular and manual repositories
         update_all_repository_metadata
+    fi
+    if [[ ${BENCHMARK_LOOKUP:-0} -eq 1 ]]; then
+        benchmark_repo_lookup 3000
     fi
     return 0
 }
@@ -2442,6 +2507,10 @@ function parse_args() {
                 DNF_SERIAL=1
                 shift
                 ;;
+            --benchmark-lookup)
+                BENCHMARK_LOOKUP=1
+                shift
+                ;;
             -v|--verbose)
                 DEBUG_LEVEL=2
                 shift
@@ -2475,6 +2544,7 @@ function parse_args() {
                 echo "  --no-sync              Skip synchronization to shared location"
                 echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
                 echo "  --dnf-serial           Force serial DNF operations"
+                echo "  --benchmark-lookup     Run repository lookup benchmark (diagnostic)"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
                 echo ""
