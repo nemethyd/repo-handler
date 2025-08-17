@@ -2,6 +2,7 @@
 # shellcheck shell=bash
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
+# Assisted iteratively by AI automation (GitHub Copilot Chat) per documented prompts.
 # Last Updated: 2025-08-16
 
 # MIT licensing
@@ -14,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.32"
+VERSION="2.4.0"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -2705,6 +2706,10 @@ function parse_args() {
                 JSON_SUMMARY=1
                 shift
                 ;;
+            --write-default-config)
+                WRITE_DEFAULT_CONFIG=1
+                shift
+                ;;
             --self-test)
                 SELF_TEST=1
                 shift
@@ -2745,6 +2750,7 @@ function parse_args() {
                 echo "  --dnf-serial           Force serial DNF operations"
                 echo "  --benchmark-lookup     Run repository lookup benchmark (diagnostic)"
                 echo "  --json-summary         Emit machine-readable JSON summary at end"
+                echo "  --write-default-config Write a full commented myrepo.cfg to current directory and exit"
                 echo "  --self-test            Environment diagnostic (JSON output) and exit"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
@@ -2783,6 +2789,85 @@ function parse_args() {
                 ;;
         esac
     done
+}
+
+function write_default_config_file() {
+    local target="myrepo.cfg"
+    if [[ -e $target ]]; then
+        log "W" "Config file $target already exists - will not overwrite"
+        return 1
+    fi
+    cat > "$target" <<'CFG'
+# myrepo.cfg - Generated template (safe to edit). All lines commented out by default.
+# Copy or uncomment only what you need. CLI flags override these values.
+
+# PATHS
+# LOCAL_REPO_PATH="/repo"
+# SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
+# SHARED_CACHE_PATH="/var/cache/myrepo"
+
+# REPOSITORIES
+# MANUAL_REPOS="ol9_edge"
+# EXCLUDE_REPOS=""
+
+# LOCAL RPM SOURCES (comma-separated directories scanned before downloading)
+# LOCAL_RPM_SOURCES="$HOME/rpmbuild/RPMS,/var/cache/dnf"
+
+# LIMITS & BATCHING
+# MAX_PACKAGES=0
+# MAX_CHANGED_PACKAGES=-1
+# FULL_REBUILD=0
+
+# BEHAVIOR TOGGLES
+# DRY_RUN=0
+# CLEANUP_UNINSTALLED=1
+# USE_PARALLEL_COMPRESSION=1
+# NO_SYNC=0
+# NO_METADATA_UPDATE=0
+# SET_PERMISSIONS=0
+# FORCE_REDOWNLOAD=0
+
+# PERFORMANCE
+# PARALLEL=6
+# CACHE_MAX_AGE=14400
+# PROGRESS_UPDATE_INTERVAL=30
+# DNF_SERIAL=0
+
+# PRIVILEGE / SAFETY
+# ELEVATE_COMMANDS=1
+# SAFE_RM_ROOT_GUARD=1
+
+# OUTPUT / LOGGING
+# DEBUG_LEVEL=1      # 0=crit,1=info,2=detail,3=verbose
+# PLAIN_MODE=0       # 1=disable emojis/colors
+# JSON_SUMMARY=0
+
+# TIMEOUTS (seconds)
+# DNF_QUERY_TIMEOUT=60
+# DNF_CACHE_TIMEOUT=120
+# DNF_DOWNLOAD_TIMEOUT=1800
+# SUDO_TEST_TIMEOUT=5
+
+# FILTERS
+# NAME_FILTER=""
+# REPOS=""
+
+# ADVANCED / TEST HOOKS (Do NOT enable in production)
+# MYREPO_TEST_BREAK_VERSION=0
+# MYREPO_TEST_BREAK_VERSION_COUNT=5
+# MYREPO_TEST_BREAK_DETERMINE=0
+# MYREPO_TEST_BREAK_DETERMINE_COUNT=5
+# MYREPO_TEST_ENABLE_SELECTIVE=0
+
+# END OF FILE
+CFG
+    if [[ -s $target ]]; then
+        log "I" "✅ Wrote template config: $target"
+        return 0
+    else
+        log "E" "Failed to write $target"
+        return 2
+    fi
 }
 
 function perform_batched_downloads() {
@@ -3539,6 +3624,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     get_dnf_cmd
     load_config
     parse_args "$@" 
+    if [[ ${WRITE_DEFAULT_CONFIG:-0} -eq 1 ]]; then
+        write_default_config_file || true
+        exit 0
+    fi
     if [[ $SELF_TEST -eq 1 ]]; then
         run_self_test
     fi

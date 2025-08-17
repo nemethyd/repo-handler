@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.32)
+# Repo Handler Script (v2.4.0)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -40,7 +40,7 @@ Non‑goals (by design):
 - Introducing a build / packaging step.
 - Requiring installation of the project into system paths to function.
 
-Potential future (optional) enhancement (not implemented): a `--write-default-config` flag that would emit a commented template `myrepo.cfg` if missing. Deferred intentionally to avoid side‑effects and because the script already runs well without a config file.
+Implemented convenience: `--write-default-config` writes a commented template `myrepo.cfg` if none exists (will not overwrite).
 
 ## What It Actually Does (Current Implementation)
 
@@ -90,10 +90,6 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Summary table and reports (failed downloads, unknown packages).
 - Plain / no-emoji output mode (`--plain` / `--no-emoji`) for parser-friendly logs.
 
-### Recent Patch (v2.3.32)
-
-Patch bump to 2.3.32: Added and documented plain / no-emoji logging mode (ID 18) with early argument detection so initial configuration lines respect plain output.
-
 ## Configuration (`myrepo.cfg`)
 
 Place `myrepo.cfg` next to `myrepo.sh`. Any shell assignments override defaults. Example snippet:
@@ -108,6 +104,48 @@ DEBUG_LEVEL=1
 ```
 
 You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_edge,custom_repo`).
+
+### Tunables Reference (All Adjustable Variables & Flags)
+
+| Category | Name / Flag | Type | Default | How to Set | Effect |
+|----------|-------------|------|---------|-----------|--------|
+| Paths | LOCAL_REPO_PATH | path | /repo | cfg/env | Root of local repo tree |
+| Paths | SHARED_REPO_PATH | path | /mnt/hgfs/ForVMware/ol9_repos | cfg/env | rsync target |
+| Paths | SHARED_CACHE_PATH | path | /var/cache/myrepo | cfg/env | Shared metadata cache |
+| Repos | MANUAL_REPOS | list | (ol9_edge) | cfg/CLI | Manual repos (no DNF fetch) |
+| Repos | EXCLUDE_REPOS --exclude-repos | list | (empty) | cfg/CLI | Skip listed repos |
+| Filters | NAME_FILTER --name-filter | regex | (none) | cfg/CLI | Limit packages by name |
+| Filters | REPOS --repos | list | (all enabled) | env/CLI | Only process listed repos |
+| Limits | MAX_PACKAGES --max-packages | int | 0 | cfg/CLI | Cap total processed (0=∞) |
+| Limits | MAX_CHANGED_PACKAGES --max-changed-packages | int | -1 | cfg/CLI | Cap downloads (new+update) |
+| Behavior | CLEANUP_UNINSTALLED --cleanup-uninstalled | bool | 1 | cfg/CLI | Remove RPMs no longer installed |
+| Behavior | NO_SYNC --no-sync | bool | 0 | env/CLI | Skip rsync stage |
+| Behavior | SYNC_ONLY -s|--sync-only | bool | 0 | CLI | Only sync, skip processing |
+| Behavior | NO_METADATA_UPDATE --no-metadata-update | bool | 0 | env/CLI | Skip createrepo_c |
+| Behavior | FULL_REBUILD --full-rebuild | bool | 0 | cfg/CLI | Purge repos then rebuild |
+| Behavior | FORCE_REDOWNLOAD | bool | 0 | cfg/env | Remove existing before download |
+| Performance | PARALLEL --parallel | int | 6 | cfg/CLI | Worker hint (metadata compression) |
+| Performance | USE_PARALLEL_COMPRESSION --parallel-compression | bool | 1 | cfg/CLI | Enable parallel createrepo |
+| Performance | CACHE_MAX_AGE --cache-max-age | seconds | 14400 | cfg/CLI | Repo metadata cache TTL |
+| Performance | DNF_SERIAL --dnf-serial | bool | 0 | cfg/CLI | Force serial DNF ops |
+| Performance | PROGRESS_UPDATE_INTERVAL | seconds | 30 | cfg/env | Large download progress cadence |
+| Privilege | ELEVATE_COMMANDS | bool | 1 | cfg/env | Auto sudo when non-root |
+| Output | DEBUG_LEVEL --debug | int | 1 | cfg/CLI/env | Verbosity (0–3) |
+| Output | PLAIN_MODE --plain/--no-emoji | bool | 0 | cfg/CLI/env | Disable emojis & color |
+| Output | JSON_SUMMARY --json-summary | bool | 0 | CLI/env | Emit JSON run summary |
+| Output | SELF_TEST --self-test | bool | 0 | CLI | Environment diagnostics JSON & exit |
+| Output | WRITE_DEFAULT_CONFIG --write-default-config | bool | 0 | CLI | Generate template cfg then exit |
+| Timeouts | DNF_QUERY_TIMEOUT | seconds | 60 | cfg/env | Repoquery/basic ops timeout |
+| Timeouts | DNF_CACHE_TIMEOUT | seconds | 120 | cfg/env | Cache build repoquery timeout |
+| Timeouts | DNF_DOWNLOAD_TIMEOUT | seconds | 1800 | cfg/env | Download operation timeout |
+| Timeouts | SUDO_TEST_TIMEOUT | seconds | 5 | cfg/env | Non-blocking sudo probe |
+| Test Hooks | MYREPO_TEST_BREAK_VERSION(_COUNT) | bool/int | 0 / 5 | env | Step debugger in version compare |
+| Test Hooks | MYREPO_TEST_BREAK_DETERMINE(_COUNT) | bool/int | 0 / 5 | env | Step debugger for source determination |
+| Test Hooks | MYREPO_TEST_ENABLE_SELECTIVE | bool | 0 | env | Force selective metadata path |
+
+Precedence: CLI > Environment > myrepo.cfg > internal default.
+
+Test hooks are for development only—do not enable them in production automation.
 
 ## Command Line Options (Implemented)
 
@@ -156,7 +194,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
 
-### Logging System (v2.3.32)
+### Logging System (v2.4.0)
 
 Unified logging helper:
 
@@ -301,6 +339,28 @@ Sync only (no processing):
 
 MIT License. See `LICENSE` file.
 
+## Quality & Maintenance (Condensed History)
+
+Implemented improvements (chronological highlights):
+1. Batch formatting restored; core decomposed into focused functions.
+2. Centralized logging with emoji + plain mode fallback (`--plain`).
+3. Adaptive download fallback / regrow logic; counter clamps for safety.
+4. Helper trio (manual repo ensure, epoch parsing, directory validation).
+5. Performance indexing (O(1) lookups) and metadata update minimization.
+6. Bash version guard + `safe_rm_rf` path confinement.
+7. Version comparison tests for edge cases.
+8. Self-test diagnostics (`--self-test`).
+9. Namespaced test hooks `MYREPO_TEST_*` (legacy alias support).
+10. JSON run summary (`--json-summary`).
+11. Plain / no-emoji mode.
+12. Tunables reference table & default config writer (`--write-default-config`).
+
+Final decisions:
+- Modular split explicitly declined to preserve single-file auditability & zero-install UX.
+- Legacy comment cleanup performed; residual cosmetic notes intentionally retained for historical context.
+
+Conventions: lifecycle function grouping; standardized emoji set (📘 ⚠️ ❌ ⏳ ✅) with ASCII tokens in plain mode; all future debugging hooks prefixed `MYREPO_TEST_`. Improvement journey concluded.
+
 - **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
@@ -388,7 +448,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.32
+# myrepo.cfg - Configuration file for myrepo.sh v2.4.0
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -759,7 +819,7 @@ Sample output (pretty-printed for readability):
 
 ```json
 {
-   "version": "2.3.32",
+   "version": "2.4.0",
    "ok": 1,
    "bash_ok": 1,
    "dnf_query_ok": 1,
@@ -799,7 +859,7 @@ Behavior:
 Schema (keys always present; arrays may be empty):
 ```json
 {
-   "version": "2.3.32",
+   "version": "2.4.0",
    "duration_sec": 135,
    "repos": [
       { "name": "ol9_appstream", "new": 2, "updated": 1, "exists": 173 },
