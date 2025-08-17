@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.25)
+# Repo Handler Script (v2.3.26)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -112,7 +112,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
 
-### Logging System (v2.3.25)
+### Logging System (v2.3.26)
 
 Unified logging helper:
 

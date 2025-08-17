@@ -4,7 +4,7 @@
 * Point 3: Centralized threshold-based logging (DONE)
 ### In Progress / Next
 * Point 4: Adaptive fallback batch shrinking (DONE)
-Recent: Point 4 adaptive fallback implemented (shrinks & grows batches); version bumped to v2.3.25.
+Recent: Point 4 adaptive fallback implemented (shrinks & grows batches); version bumped to v2.3.26.
 # Quality & Maintenance Roadmap
 
 This document tracks identified quality, consistency, and maintainability improvements for `myrepo.sh`.
@@ -19,7 +19,7 @@ Last Reviewed: 2025-08-16
 | 2 | Structure | Decide: full alphabetical ordering vs logical grouping; refactor oversized `process_packages` into smaller functions | DONE | Extracted: gather_installed_packages, filter_and_prepare_packages, precreate_repository_directories, classify_and_queue_packages, perform_batched_downloads, finalize_and_report; placeholders removed |
 | 3 | Logging | Centralize verbosity filtering inside `log()` to reduce repeated `[[ $DEBUG_LEVEL -ge N ]]` checks | DONE | Unified log(), added level constants, removed TRACE (max=3) |
 | 4 | Fallback Logic | Clarify or implement true shrinking fallback in `batch_download_packages` (`fallback_batch_size` currently never changes) | DONE | Adaptive halve-to-individual with cautious regrow implemented |
-| 5 | Counters | Guard against negative decrements for stats when skipping manual repos; fix off-by-one for `MAX_PACKAGES` (use `>=`) | TODO | Add `((count<0)) && count=0` safety |
+| 5 | Counters | Guard against negative decrements for stats when skipping manual repos; fix off-by-one for `MAX_PACKAGES` (use `>=`) | DONE | Added clamp helper + applied at manual repo decrements |
 | 6 | Helpers | Add `is_manual_repo`, `ensure_normalized_epoch`, `ensure_repo_directory` helpers and reuse | TODO | Reduces duplication |
 | 7 | Performance | Pre-index `available_repo_packages` into associative map for O(1) lookups in `determine_repo_source` | TODO | Memory trade-off acceptable |
 | 8 | Metadata | Avoid double metadata updates for manual repos (skip in main loop if handled separately) | TODO | Add guard in `update_all_repository_metadata` |
@@ -31,7 +31,7 @@ Last Reviewed: 2025-08-16
 |14 | Version Compare | Add unit tests (bats) for `version_is_newer` edge cases | TODO | Include epoch handling |
 |15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) and centralize gating | TODO | Improves clarity |
 |16 | Cleanup | Remove legacy comments referencing "original script" once stable | LATER | Cosmetic |
-|17 | Emojis | Standardize a minimal consistent emoji set (info, warn, error, progress, success) | TODO | Document legend |
+|17 | Emojis | Standardize a minimal consistent emoji set (info, warn, error, progress, success) | DONE | Implemented in log(): 📘 info, ⚠️ warn, ❌ error, ⏳ progress, ✅ success |
 
 ## Recently Completed
 
@@ -48,7 +48,7 @@ Last Reviewed: 2025-08-16
 ## Conventions To Establish
 
 * Function Ordering: Prefer logical lifecycle grouping (config → environment checks → helpers → processing → metadata → sync/reporting → validation → main) over strict alphabetical.
-* Logging: Standardize emoji usage: `📘` info, `⚠️` warning, `❌` error, `⏳` progress, `✅` success. (Proposed.)
+* Logging: Standardized emoji usage (enforced in log()): `📘` info, `⚠️` warning, `❌` error, `⏳` progress, `✅` success.
 * Test Hooks: All future hooks prefixed with `MYREPO_TEST_`.
 
 ---

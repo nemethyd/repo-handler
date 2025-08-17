@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.25"
+VERSION="2.3.26"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -192,14 +192,40 @@ function log() {
         (( DEBUG_LEVEL < min_debug_threshold )) && return 0
     fi
 
+    # Strip any leading legacy emoji + space to enforce minimal set
+    message="${message#📦 }"; message="${message#📥 }"; message="${message#🔄 }"; message="${message#🧹 }"; message="${message#📋 }"; message="${message#🔍 }"; message="${message#📊 }"; message="${message#🗑️ }"; message="${message#💡 }"; message="${message#📁 }"; message="${message#✅ }"; message="${message#⏳ }"; message="${message#⚠️ }"; message="${message#❌ }"
+
+    local prefix=""
+    case "$level" in
+        E) prefix="❌" ;;
+        W) prefix="⚠️" ;;
+        I)
+            # Detect success/progress heuristically
+            if [[ $message =~ ^(Starting|Processing|Downloading|Building|Syncing|Entering|Still\ downloading|Caching|Cleaning|Checking) ]]; then
+                prefix="⏳"
+            elif [[ $message =~ (Successfully|Completed|successfully|Cache\ built|Created|Updated|Removed|Done) ]]; then
+                prefix="✅"
+            else
+                prefix="📘"
+            fi
+            ;;
+        D) prefix="" ;;
+        *) prefix="📘" ;;
+    esac
+
     local color=""
     case "$level" in
         E) color="\e[31m" ;; # error
         W) color="\e[33m" ;; # warning
-        I) color="\e[32m" ;; # info
+        I) color="\e[32m" ;; # info (general)
         D) color="\e[36m" ;; # debug
-        *) color="\e[37m" ;; # default/unknown
+        *) color="\e[37m" ;;
     esac
+
+    # Prepend standardized emoji (omit for debug if empty message)
+    if [[ -n "$prefix" ]]; then
+        message="$prefix $message"
+    fi
     echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
 }
 
@@ -249,6 +275,12 @@ function version_is_newer() {
     else
         log "D" "Simple comparison: $version1 <= $version2 (release)" $DEBUG_LVL_VERBOSE; return 1
     fi
+}
+
+# Guard helper: clamp possibly decremented counters to zero (defensive)
+function _clamp_non_negative() {
+    local -n ref=$1
+    (( ref < 0 )) && ref=0 || true
 }
 
 # Internal analyzer hint (SC2034) – kept near core
@@ -876,8 +908,8 @@ function classify_and_queue_packages() {
         [[ -z "$package_name" ]] && continue
 
         # Package limit check
-        if [[ $MAX_PACKAGES -gt 0 && ${_processed_packages_ref} -gt $MAX_PACKAGES ]]; then
-            echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping\e[0m"
+        if [[ $MAX_PACKAGES -gt 0 && ${_processed_packages_ref} -ge $MAX_PACKAGES ]]; then
+            echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping (processed=${_processed_packages_ref})\e[0m"
             break
         fi
 
@@ -1003,7 +1035,7 @@ function classify_and_queue_packages() {
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--))
+                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--)); _clamp_non_negative _update_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_update_count["$repo_name"]
                         else
                             _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
@@ -1027,7 +1059,7 @@ function classify_and_queue_packages() {
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--))
+                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--)); _clamp_non_negative _new_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_new_count["$repo_name"]
                         else
                             _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
