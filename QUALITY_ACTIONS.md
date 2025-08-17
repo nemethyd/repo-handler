@@ -1,0 +1,46 @@
+# Quality & Maintenance Roadmap
+
+This document tracks identified quality, consistency, and maintainability improvements for `myrepo.sh`.
+
+Last Reviewed: 2025-08-16
+
+## Action List (Roadmap)
+
+| ID | Area | Description | Status | Notes |
+|----|------|-------------|--------|-------|
+| 1 | Structure | Restore readable formatting for `batch_download_packages` and decide on function ordering approach | DONE | Readability restored (no logic change) |
+| 2 | Structure | Decide: full alphabetical ordering vs logical grouping; refactor oversized `process_packages` into smaller functions | TODO | Proposed sub-functions: gather_installed, filter_packages, classify_package, perform_downloads, summarize |
+| 3 | Logging | Centralize verbosity filtering inside `log()` to reduce repeated `[[ $DEBUG_LEVEL -ge N ]]` checks | TODO | Could add severity numeric mapping |
+| 4 | Fallback Logic | Clarify or implement true shrinking fallback in `batch_download_packages` (`fallback_batch_size` currently never changes) | TODO | Either decrement sizes (e.g. halve) or update comment |
+| 5 | Counters | Guard against negative decrements for stats when skipping manual repos; fix off-by-one for `MAX_PACKAGES` (use `>=`) | TODO | Add `((count<0)) && count=0` safety |
+| 6 | Helpers | Add `is_manual_repo`, `ensure_normalized_epoch`, `ensure_repo_directory` helpers and reuse | TODO | Reduces duplication |
+| 7 | Performance | Pre-index `available_repo_packages` into associative map for O(1) lookups in `determine_repo_source` | TODO | Memory trade-off acceptable |
+| 8 | Metadata | Avoid double metadata updates for manual repos (skip in main loop if handled separately) | TODO | Add guard in `update_all_repository_metadata` |
+| 9 | Testing | Add `--self-test` mode (checks tools: dnf, rpm, createrepo_c, permissions, bash version) | TODO | Outputs JSON/exit codes |
+|10 | Safety | Add Bash version guard (>=4), path safety checks before destructive `rm -rf` | TODO | Early exit with message |
+|11 | Docs | Add full list of tunables + defaults to README; start `CHANGELOG.md` | TODO | Auto-update on version bump |
+|12 | Output | Optional `--json-summary` for machine parsing of results | TODO | Provide table + JSON simultaneously |
+|13 | Refactor | Split monolithic script into modules once churn lowers (e.g. `lib_download.sh`, `lib_metadata.sh`) | LATER | After core refactors |
+|14 | Version Compare | Add unit tests (bats) for `version_is_newer` edge cases | TODO | Include epoch handling |
+|15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) and centralize gating | TODO | Improves clarity |
+|16 | Cleanup | Remove legacy comments referencing "original script" once stable | LATER | Cosmetic |
+|17 | Emojis | Standardize a minimal consistent emoji set (info, warn, error, progress, success) | TODO | Document legend |
+
+## Recently Completed
+
+* Point 1: Restored readable multi-line implementation for `batch_download_packages` (previously compressed for alphabetical reorder attempt).
+
+## Next Recommended Steps
+
+1. Implement helper functions (Point 6) before splitting `process_packages` (Point 2) to reduce merge conflict risk.
+2. Centralize logging severity filtering (Point 3) to simplify subsequent edits.
+3. Address fallback batch size semantics (Point 4) to align behavior with comments.
+
+## Conventions To Establish
+
+* Function Ordering: Prefer logical lifecycle grouping (config → environment checks → helpers → processing → metadata → sync/reporting → validation → main) over strict alphabetical.
+* Logging: Standardize emoji usage: `📘` info, `⚠️` warning, `❌` error, `⏳` progress, `✅` success. (Proposed.)
+* Test Hooks: All future hooks prefixed with `MYREPO_TEST_`.
+
+---
+Generated and maintained by development workflow. Update this file when actions are completed.

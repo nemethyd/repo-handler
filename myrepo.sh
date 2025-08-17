@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.20"
+VERSION="2.3.21"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -135,12 +135,15 @@ function batch_download_packages() {
             [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)\e[0m"
             continue
         fi
-        local repo_path; repo_path=$(get_repo_path "$repo_name")
+        local repo_path
+        repo_path=$(get_repo_path "$repo_name")
         if [[ ! -d "$repo_path" ]]; then
             mkdir -p "$repo_path" 2>/dev/null || {
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                    sudo mkdir -p "$repo_path" && sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
-                    chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_path" 2>/dev/null || true
+                    if sudo mkdir -p "$repo_path" 2>/dev/null; then
+                        sudo chown "$USER:$USER" "$repo_path" 2>/dev/null || true
+                        chmod "$DEFAULT_DIR_PERMISSIONS" "$repo_path" 2>/dev/null || true
+                    fi
                 fi
             }
         fi
@@ -148,7 +151,11 @@ function batch_download_packages() {
             local exact_package_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
             if [[ -f "$exact_package_file" ]]; then
                 [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Pre-removing existing (FORCE_REDOWNLOAD=1): ${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then sudo rm -f "$exact_package_file" 2>/dev/null || true; else rm -f "$exact_package_file" 2>/dev/null || true; fi
+                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                    sudo rm -f "$exact_package_file" 2>/dev/null || true
+                else
+                    rm -f "$exact_package_file" 2>/dev/null || true
+                fi
             fi
         fi
         local package_spec="${package_name}-${package_version}-${package_release}.${package_arch}"
@@ -163,45 +170,131 @@ function batch_download_packages() {
     if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
         log "I" "🔄 Large batch detected ($total_packages_to_download packages) - progress updates every ${PROGRESS_UPDATE_INTERVAL}s"
     fi
-    local global_downloaded=0 current_repo=0
+    local global_downloaded=0
+    local current_repo=0
     for repo_key in "${!repo_packages[@]}"; do
-        local repo_path="${repo_key%|*}" repo_name="${repo_key#*|}" packages="${repo_packages[$repo_key]}"
+    local repo_path="${repo_key%|*}"
+    local repo_name="${repo_key#*|}"
+    local packages="${repo_packages[$repo_key]}"
         [[ -z "$packages" ]] && continue
         ((current_repo++))
-        local total_package_count; total_package_count=$(echo "$packages" | wc -w)
+    local total_package_count
+    total_package_count=$(echo "$packages" | wc -w)
         log "I" "📥 Repository $current_repo/${#repo_packages[@]}: Downloading $total_package_count packages from $repo_name..."
-        local -a package_array; read -ra package_array <<< "$packages"
-        local batch_num=1 processed_packages=0
+    local -a package_array
+    read -ra package_array <<< "$packages"
+    local batch_num=1
+    local processed_packages=0
         while [[ $processed_packages -lt $total_package_count ]]; do
-            local batch_packages=() batch_end=$(( processed_packages + BATCH_SIZE )); [[ $batch_end -gt $total_package_count ]] && batch_end=$total_package_count
-            for ((i=processed_packages; i<batch_end; i++)); do batch_packages+=("${package_array[i]}"); done
+            local batch_packages=()
+            local batch_end=$(( processed_packages + BATCH_SIZE ))
+            if [[ $batch_end -gt $total_package_count ]]; then
+                batch_end=$total_package_count
+            fi
+            for ((i=processed_packages; i<batch_end; i++)); do
+                batch_packages+=("${package_array[i]}")
+            done
             local batch_package_count=${#batch_packages[@]}
             [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Batch packages: ${batch_packages[*]}"
-            local dnf_cmd; dnf_cmd=$(get_dnf_cmd)
-            local dnf_options=( --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS" --setopt=fastestmirror=1 --setopt=deltarpm=0 --setopt=timeout="$DNF_QUERY_TIMEOUT" --setopt=retries="$DNF_RETRIES" --destdir="$repo_path" )
-            if ! is_repo_enabled "$repo_name"; then [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name"; dnf_options+=(--enablerepo="$repo_name"); fi
-            local batch_start_time; batch_start_time=$(date +%s)
-            log "I" "⏳ Starting DNF download for $repo_name..."
-            local show_periodic_progress=0; if [[ $batch_package_count -gt $PROGRESS_BATCH_THRESHOLD || $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then show_periodic_progress=1; fi
-            local download_success=0
-            if [[ $show_periodic_progress -eq 1 ]]; then (
-                sleep "$PROGRESS_UPDATE_INTERVAL"; while true; do log "I" "🔄 Still downloading... ($batch_package_count packages from $repo_name, elapsed: $(($(date +%s) - batch_start_time))s)"; sleep "$PROGRESS_UPDATE_INTERVAL"; done
-            ) & progress_pid=$!; if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then download_success=1; fi; kill $progress_pid 2>/dev/null || true; wait $progress_pid 2>/dev/null || true; else if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then download_success=1; fi; fi
-            if [[ $download_success -eq 1 ]]; then
-                local batch_end_time batch_duration; batch_end_time=$(date +%s); batch_duration=$((batch_end_time - batch_start_time))
-                log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"; CHANGED_REPOS["$repo_name"]=1
-                global_downloaded=$((global_downloaded + batch_package_count)); if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then local progress_percent=$(( (global_downloaded * 100) / total_packages_to_download )); log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"; fi
-            else
-                log "W" "✗ Some downloads failed in batch $batch_num for $repo_name"; log "I" "   Trying optimized fallback downloads..."
-                local success_count=0 fallback_batch_size=$BATCH_SIZE fallback_processed=0
-                while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
-                    local fallback_end=$((fallback_processed + fallback_batch_size)); [[ $fallback_end -gt ${#batch_packages[@]} ]] && fallback_end=${#batch_packages[@]}
-                    local small_batch=(); for ((i=fallback_processed; i<fallback_end; i++)); do small_batch+=("${batch_packages[i]}"); done
-                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then success_count=$((success_count + ${#small_batch[@]})); [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"; fallback_processed=$fallback_end; else [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads"; for pkg in "${small_batch[@]}"; do if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then ((success_count++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"; else failed_downloads["$pkg"]="$repo_name"; failed_download_reasons["$pkg"]="DNF download failed"; [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"; fi; done; fallback_processed=$fallback_end; fi
-                done
-                log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"; [[ $success_count -gt 0 ]] && CHANGED_REPOS["$repo_name"]=1; global_downloaded=$((global_downloaded + success_count))
+            local dnf_cmd
+            dnf_cmd=$(get_dnf_cmd)
+            local dnf_options=(
+                --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
+                --setopt=fastestmirror=1
+                --setopt=deltarpm=0
+                --setopt=timeout="$DNF_QUERY_TIMEOUT"
+                --setopt=retries="$DNF_RETRIES"
+                --destdir="$repo_path"
+            )
+            if ! is_repo_enabled "$repo_name"; then
+                [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "   Temporarily enabling disabled repository: $repo_name"
+                dnf_options+=(--enablerepo="$repo_name")
             fi
-            processed_packages=$((processed_packages + batch_package_count)); ((batch_num++))
+            local batch_start_time
+            batch_start_time=$(date +%s)
+            log "I" "⏳ Starting DNF download for $repo_name..."
+            local show_periodic_progress=0
+            if [[ $batch_package_count -gt $PROGRESS_BATCH_THRESHOLD || $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
+                show_periodic_progress=1
+            fi
+            local download_success=0
+            if [[ $show_periodic_progress -eq 1 ]]; then
+                (
+                    sleep "$PROGRESS_UPDATE_INTERVAL"
+                    while true; do
+                        log "I" "🔄 Still downloading... ($batch_package_count packages from $repo_name, elapsed: $(($(date +%s) - batch_start_time))s)"
+                        sleep "$PROGRESS_UPDATE_INTERVAL"
+                    done
+                ) &
+                local progress_pid=$!
+                # shellcheck disable=SC2086 # Intentional unquoted expansion: dnf options array + packages rely on word splitting
+                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                    download_success=1
+                fi
+                kill $progress_pid 2>/dev/null || true
+                wait $progress_pid 2>/dev/null || true
+            else
+                # shellcheck disable=SC2086 # Intentional unquoted expansion: dnf options array + packages rely on word splitting
+                if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" "${batch_packages[@]}" >/dev/null 2>&1; then
+                    download_success=1
+                fi
+            fi
+            if [[ $download_success -eq 1 ]]; then
+                local batch_end_time
+                local batch_duration
+                batch_end_time=$(date +%s)
+                batch_duration=$((batch_end_time - batch_start_time))
+                log "I" "✅ Successfully downloaded $batch_package_count packages for $repo_name in ${batch_duration}s"
+                CHANGED_REPOS["$repo_name"]=1
+                global_downloaded=$((global_downloaded + batch_package_count))
+                if [[ $total_packages_to_download -gt $LARGE_BATCH_THRESHOLD ]]; then
+                    local progress_percent=$(( (global_downloaded * 100) / total_packages_to_download ))
+                    log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"
+                fi
+            else
+                log "W" "✗ Some downloads failed in batch $batch_num for $repo_name"
+                log "I" "   Trying optimized fallback downloads..."
+                local success_count=0
+                local fallback_batch_size=$BATCH_SIZE
+                local fallback_processed=0
+                while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
+                    local fallback_end=$((fallback_processed + fallback_batch_size))
+                    if [[ $fallback_end -gt ${#batch_packages[@]} ]]; then
+                        fallback_end=${#batch_packages[@]}
+                    fi
+                    local small_batch=()
+                    for ((i=fallback_processed; i<fallback_end; i++)); do
+                        small_batch+=("${batch_packages[i]}")
+                    done
+                    # shellcheck disable=SC2086
+                    if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
+                        success_count=$((success_count + ${#small_batch[@]}))
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded"
+                        fallback_processed=$fallback_end
+                    else
+                        [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   Small batch failed, trying individual downloads"
+                        for pkg in "${small_batch[@]}"; do
+                            # shellcheck disable=SC2086
+                            if timeout "$DNF_DOWNLOAD_TIMEOUT" ${dnf_cmd} download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
+                                ((success_count++))
+                                [[ $DEBUG_LEVEL -ge 3 ]] && log "I" "   ✓ $pkg"
+                            else
+                                failed_downloads["$pkg"]="$repo_name"
+                                failed_download_reasons["$pkg"]="DNF download failed"
+                                [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "   ✗ Failed: $pkg"
+                            fi
+                        done
+                        fallback_processed=$fallback_end
+                    fi
+                done
+                log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"
+                if [[ $success_count -gt 0 ]]; then
+                    CHANGED_REPOS["$repo_name"]=1
+                    global_downloaded=$((global_downloaded + success_count))
+                fi
+            fi
+            processed_packages=$((processed_packages + batch_package_count))
+            ((batch_num++))
         done
     done
 }
@@ -620,6 +713,165 @@ function check_command_elevation() {
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct DNF access verified (running without sudo)"
         return 0
     fi
+}
+
+# Clean up old/stale cache artifacts in the shared cache directory
+# Responsibilities:
+#   * Remove leftover temporary files (*.tmp.*) older than 60 minutes
+#   * Remove stale *.cache files older than 2x CACHE_MAX_AGE (to allow reuse window)
+#   * Remove empty subdirectories (if any were accidentally created) older than 60 minutes
+#   * Fix permissions on the shared cache directory if SET_PERMISSIONS is enabled
+# Notes:
+#   * Safe: only touches files inside $SHARED_CACHE_PATH
+#   * Skips entirely if directory missing or not accessible
+function cleanup_old_cache_directories() {
+    local cache_root="$SHARED_CACHE_PATH"
+    local removed_tmp=0 removed_cache=0 removed_dirs=0 fixed_perms=0
+
+    if [[ -z "$cache_root" || ! -d "$cache_root" ]]; then
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache cleanup skipped (directory missing): $cache_root"
+        return 0
+    fi
+
+    # Ensure we have at least search permission; attempt permission fix if requested
+    if [[ ! -r "$cache_root" || ! -x "$cache_root" ]]; then
+        if [[ $SET_PERMISSIONS -eq 1 ]]; then
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                if sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_root" 2>/dev/null; then
+                    fixed_perms=1
+                fi
+            else
+                if chmod "$SHARED_CACHE_PERMISSIONS" "$cache_root" 2>/dev/null; then
+                    fixed_perms=1
+                fi
+            fi
+        else
+            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Insufficient permissions to inspect cache directory: $cache_root"
+            return 0
+        fi
+    fi
+
+    # Derive stale age for cache files (double cache max age)
+    local stale_seconds=$(( CACHE_MAX_AGE * 2 ))
+    # Convert to minutes for find -mmin (minimum 1)
+    local stale_minutes=$(( stale_seconds / 60 ))
+    [[ $stale_minutes -lt 1 ]] && stale_minutes=1
+
+    # 1. Remove old temporary files (*.tmp.*) older than 60 minutes
+    while IFS= read -r -d '' f; do
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo rm -f -- "$f" 2>/dev/null || true
+        else
+            rm -f -- "$f" 2>/dev/null || true
+        fi
+        ((removed_tmp++))
+    done < <(find "$cache_root" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -print0 2>/dev/null)
+
+    # 2. Remove stale cache files (*.cache) older than stale_minutes
+    while IFS= read -r -d '' f; do
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo rm -f -- "$f" 2>/dev/null || true
+        else
+            rm -f -- "$f" 2>/dev/null || true
+        fi
+        ((removed_cache++))
+    done < <(find "$cache_root" -maxdepth 1 -type f -name '*.cache' -mmin +$stale_minutes -print0 2>/dev/null)
+
+    # 3. Remove empty subdirectories older than 60 minutes (defensive; normally none expected)
+    while IFS= read -r -d '' d; do
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo rmdir -- "$d" 2>/dev/null || true
+        else
+            rmdir -- "$d" 2>/dev/null || true
+        fi
+        ((removed_dirs++))
+    done < <(find "$cache_root" -mindepth 1 -maxdepth 1 -type d -empty -mmin +60 -print0 2>/dev/null)
+
+    # 4. Optionally fix permissions on surviving *.cache files (readable by all)
+    if [[ $SET_PERMISSIONS -eq 1 ]]; then
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo find "$cache_root" -maxdepth 1 -type f -name '*.cache' -exec chmod "$CACHE_FILE_PERMISSIONS" {} + 2>/dev/null || true
+        else
+            find "$cache_root" -maxdepth 1 -type f -name '*.cache' -exec chmod "$CACHE_FILE_PERMISSIONS" {} + 2>/dev/null || true
+        fi
+    fi
+
+    if [[ $removed_tmp -gt 0 || $removed_cache -gt 0 || $removed_dirs -gt 0 ]]; then
+        log "I" "🧹 Cache cleanup: removed ${removed_tmp} tmp, ${removed_cache} stale cache, ${removed_dirs} empty dirs from $(basename "$cache_root")"
+    else
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cache cleanup: nothing to remove"
+    fi
+    [[ $fixed_perms -eq 1 ]] && log "I" "✓ Fixed shared cache directory permissions"
+
+    return 0
+}
+
+# Clean up old repodata directories (both at repository level and inside getPackage)
+function cleanup_old_repodata() {
+    local repo_name="$1"
+    local repo_base_path="$2"
+    local repo_package_path="$3"
+    local cleanup_count=0
+    
+    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cleaning up old repodata for repository: $repo_name"
+    
+    # Pattern list for old repodata directories
+    local cleanup_patterns=(
+        "repodata.old.*"    # Standard backup repodata directories
+        "repodata.bak.*"    # Alternative backup naming
+        ".repodata.*"       # Hidden repodata directories
+    )
+    
+    # Clean up old repodata at repository base level (correct location)
+    if [[ -d "$repo_base_path" ]]; then
+        for pattern in "${cleanup_patterns[@]}"; do 
+            while IFS= read -r -d '' old_repodata; do
+                if [[ -d "$old_repodata" ]]; then
+                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Removing old repodata: $old_repodata"
+                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                        sudo rm -rf "$old_repodata" 2>/dev/null || true
+                    else
+                        rm -rf "$old_repodata" 2>/dev/null || true
+                    fi
+                    ((cleanup_count++))
+                fi
+            done < <(find "$repo_base_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
+        done
+    fi
+    
+    # Clean up incorrectly placed repodata inside getPackage directory (legacy cleanup)
+    if [[ -d "$repo_package_path" ]]; then
+        for pattern in "${cleanup_patterns[@]}"; do 
+            while IFS= read -r -d '' old_repodata; do
+                if [[ -d "$old_repodata" ]]; then
+                    log "W" "   Found misplaced repodata inside getPackage, removing: $old_repodata"
+                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                        sudo rm -rf "$old_repodata" 2>/dev/null || true
+                    else
+                        rm -rf "$old_repodata" 2>/dev/null || true
+                    fi
+                    ((cleanup_count++))
+                fi
+            done < <(find "$repo_package_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
+        done
+        
+        # Also clean up any current repodata that might be misplaced inside getPackage
+        if [[ -d "$repo_package_path/repodata" ]]; then
+            log "W" "   Found misplaced current repodata inside getPackage, removing: $repo_package_path/repodata"
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo rm -rf "$repo_package_path/repodata" 2>/dev/null || true
+            else
+                rm -rf "$repo_package_path/repodata" 2>/dev/null || true
+            fi
+            ((cleanup_count++))
+        fi
+    fi
+    
+    if [[ $cleanup_count -gt 0 ]]; then
+        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Cleaned up $cleanup_count old/misplaced repodata directories"
+    fi
+    
+    return $cleanup_count
 }
 
 # Clean up uninstalled packages from local repositories (performance optimized)
@@ -1115,74 +1367,6 @@ function draw_table_row_flex() {
     printf "║\n"
 }
 
-# Clean up old repodata directories (both at repository level and inside getPackage)
-function cleanup_old_repodata() {
-    local repo_name="$1"
-    local repo_base_path="$2"
-    local repo_package_path="$3"
-    local cleanup_count=0
-    
-    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Cleaning up old repodata for repository: $repo_name"
-    
-    # Pattern list for old repodata directories
-    local cleanup_patterns=(
-        "repodata.old.*"    # Standard backup repodata directories
-        "repodata.bak.*"    # Alternative backup naming
-        ".repodata.*"       # Hidden repodata directories
-    )
-    
-    # Clean up old repodata at repository base level (correct location)
-    if [[ -d "$repo_base_path" ]]; then
-        for pattern in "${cleanup_patterns[@]}"; do 
-            while IFS= read -r -d '' old_repodata; do
-                if [[ -d "$old_repodata" ]]; then
-                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "   Removing old repodata: $old_repodata"
-                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                        sudo rm -rf "$old_repodata" 2>/dev/null || true
-                    else
-                        rm -rf "$old_repodata" 2>/dev/null || true
-                    fi
-                    ((cleanup_count++))
-                fi
-            done < <(find "$repo_base_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
-        done
-    fi
-    
-    # Clean up incorrectly placed repodata inside getPackage directory (legacy cleanup)
-    if [[ -d "$repo_package_path" ]]; then
-        for pattern in "${cleanup_patterns[@]}"; do 
-            while IFS= read -r -d '' old_repodata; do
-                if [[ -d "$old_repodata" ]]; then
-                    log "W" "   Found misplaced repodata inside getPackage, removing: $old_repodata"
-                    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                        sudo rm -rf "$old_repodata" 2>/dev/null || true
-                    else
-                        rm -rf "$old_repodata" 2>/dev/null || true
-                    fi
-                    ((cleanup_count++))
-                fi
-            done < <(find "$repo_package_path" -maxdepth 1 -name "$pattern" -type d -print0 2>/dev/null)
-        done
-        
-        # Also clean up any current repodata that might be misplaced inside getPackage
-        if [[ -d "$repo_package_path/repodata" ]]; then
-            log "W" "   Found misplaced current repodata inside getPackage, removing: $repo_package_path/repodata"
-            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                sudo rm -rf "$repo_package_path/repodata" 2>/dev/null || true
-            else
-                rm -rf "$repo_package_path/repodata" 2>/dev/null || true
-            fi
-            ((cleanup_count++))
-        fi
-    fi
-    
-    if [[ $cleanup_count -gt 0 ]]; then
-        [[ $DEBUG_LEVEL -ge 1 ]] && log "I" "$(align_repo_name "$repo_name"): Cleaned up $cleanup_count old/misplaced repodata directories"
-    fi
-    
-    return $cleanup_count
-}
-
 # Perform full rebuild by removing all packages in local repositories
 function full_rebuild_repos() {
     if [[ $FULL_REBUILD -ne 1 ]]; then
@@ -1341,106 +1525,6 @@ function get_dnf_cmd() {
     else
         # Manual override: no sudo
         echo "dnf"
-    fi
-}
-
-# Compare two package versions to determine if first is newer than second
-# Returns 0 (true) if version1 is newer than version2, 1 (false) otherwise
-# Usage: version_is_newer "17.0.0-1.el9" "9.0.0-14.el9"
-function version_is_newer() {
-    local version1="$1"
-    local version2="$2"
-    
-    # Extract version and release parts
-    local ver1="${version1%-*}"  # Everything before last dash
-    local rel1="${version1##*-}" # Everything after last dash
-    local ver2="${version2%-*}"
-    local rel2="${version2##*-}"
-    
-    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2"
-    
-    # Use rpm --eval with version comparison macros for accurate comparison
-    # This handles complex version schemes correctly
-    local comparison_result
-    if command -v rpm >/dev/null 2>&1; then
-        # Method 1: Use RPM's built-in version comparison (most accurate)
-        comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
-        if [[ $? -eq 0 && -n "$comparison_result" ]]; then
-            case "$comparison_result" in
-                "1")
-                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)"
-                    return 0  # version1 is newer
-                    ;;
-                "0")
-                    # Same version, compare releases
-                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
-                    if [[ $? -eq 0 && -n "$comparison_result" ]]; then
-                        case "$comparison_result" in
-                            "1")
-                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)"
-                                return 0  # release1 is newer
-                                ;;
-                            "0"|"-1")
-                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2"
-                                return 1  # same or older
-                                ;;
-                        esac
-                    fi
-                    ;;
-                "-1")
-                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 < $ver2 (version is older)"
-                    return 1  # version1 is older
-                    ;;
-            esac
-        fi
-    fi
-    
-    # Method 2: Fallback to simple numeric comparison for basic cases
-    # Split versions by dots and compare numerically
-    IFS='.' read -ra ver1_parts <<< "$ver1"
-    IFS='.' read -ra ver2_parts <<< "$ver2"
-    
-    local max_parts=$((${#ver1_parts[@]} > ${#ver2_parts[@]} ? ${#ver1_parts[@]} : ${#ver2_parts[@]}))
-    
-    for ((i=0; i<max_parts; i++)); do
-        local part1=${ver1_parts[i]:-0}
-        local part2=${ver2_parts[i]:-0}
-        
-        # Extract numeric part (handle non-numeric suffixes)
-        local num1
-        num1=${part1//[^0-9]*/}
-        local num2
-        num2=${part2//[^0-9]*/}
-        
-        # Default to 0 if extraction failed
-        num1=${num1:-0}
-        num2=${num2:-0}
-        
-        if [[ $num1 -gt $num2 ]]; then
-            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)"
-            return 0  # version1 is newer
-        elif [[ $num1 -lt $num2 ]]; then
-            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)"
-            return 1  # version1 is older
-        fi
-        # If equal, continue to next part
-    done
-    
-    # Versions are equal at this point, compare releases using simple numeric comparison
-    local rel1_num
-    rel1_num=${rel1//[^0-9]*/}
-    local rel2_num
-    rel2_num=${rel2//[^0-9]*/}
-    
-    rel1_num=${rel1_num:-0}
-    rel2_num=${rel2_num:-0}
-    
-    if [[ $rel1_num -gt $rel2_num ]]; then
-        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)"
-        return 0  # release1 is newer
-    else
-        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)"
-        return 1  # same or older
     fi
 }
 
@@ -3205,6 +3289,106 @@ function validate_repository_structure() {
     
     [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Repository structure validation passed"
     return 0
+}
+
+# Compare two package versions to determine if first is newer than second
+# Returns 0 (true) if version1 is newer than version2, 1 (false) otherwise
+# Usage: version_is_newer "17.0.0-1.el9" "9.0.0-14.el9"
+function version_is_newer() {
+    local version1="$1"
+    local version2="$2"
+    
+    # Extract version and release parts
+    local ver1="${version1%-*}"  # Everything before last dash
+    local rel1="${version1##*-}" # Everything after last dash
+    local ver2="${version2%-*}"
+    local rel2="${version2##*-}"
+    
+    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2"
+    
+    # Use rpm --eval with version comparison macros for accurate comparison
+    # This handles complex version schemes correctly
+    local comparison_result
+    if command -v rpm >/dev/null 2>&1; then
+        # Method 1: Use RPM's built-in version comparison (most accurate)
+        comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+            case "$comparison_result" in
+                "1")
+                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)"
+                    return 0  # version1 is newer
+                    ;;
+                "0")
+                    # Same version, compare releases
+                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
+                    if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+                        case "$comparison_result" in
+                            "1")
+                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)"
+                                return 0  # release1 is newer
+                                ;;
+                            "0"|"-1")
+                                [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2"
+                                return 1  # same or older
+                                ;;
+                        esac
+                    fi
+                    ;;
+                "-1")
+                    [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "RPM vercmp: $ver1 < $ver2 (version is older)"
+                    return 1  # version1 is older
+                    ;;
+            esac
+        fi
+    fi
+    
+    # Method 2: Fallback to simple numeric comparison for basic cases
+    # Split versions by dots and compare numerically
+    IFS='.' read -ra ver1_parts <<< "$ver1"
+    IFS='.' read -ra ver2_parts <<< "$ver2"
+    
+    local max_parts=$((${#ver1_parts[@]} > ${#ver2_parts[@]} ? ${#ver1_parts[@]} : ${#ver2_parts[@]}))
+    
+    for ((i=0; i<max_parts; i++)); do
+        local part1=${ver1_parts[i]:-0}
+        local part2=${ver2_parts[i]:-0}
+        
+        # Extract numeric part (handle non-numeric suffixes)
+        local num1
+        num1=${part1//[^0-9]*/}
+        local num2
+        num2=${part2//[^0-9]*/}
+        
+        # Default to 0 if extraction failed
+        num1=${num1:-0}
+        num2=${num2:-0}
+        
+        if [[ $num1 -gt $num2 ]]; then
+            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)"
+            return 0  # version1 is newer
+        elif [[ $num1 -lt $num2 ]]; then
+            [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)"
+            return 1  # version1 is older
+        fi
+        # If equal, continue to next part
+    done
+    
+    # Versions are equal at this point, compare releases using simple numeric comparison
+    local rel1_num
+    rel1_num=${rel1//[^0-9]*/}
+    local rel2_num
+    rel2_num=${rel2//[^0-9]*/}
+    
+    rel1_num=${rel1_num:-0}
+    rel2_num=${rel2_num:-0}
+    
+    if [[ $rel1_num -gt $rel2_num ]]; then
+        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)"
+        return 0  # release1 is newer
+    else
+        [[ $DEBUG_LEVEL -ge 4 ]] && log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)"
+        return 1  # same or older
+    fi
 }
 
 ### Main execution section ###
