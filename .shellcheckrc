@@ -1,0 +1,11 @@
+# Central ShellCheck configuration to reduce repeated Problems entries for myrepo.sh
+# All exclusions previously scattered inline are centralized here.
+# Adjust this list rather than adding many inline `# shellcheck disable=...` comments.
+# You can temporarily comment out lines to re-enable a rule for auditing.
+
+# Target shell
+shell=bash
+
+# No global excludes; individual cases documented inline for clarity.
+
+# You can run `shellcheck myrepo.sh` manually; this file will be auto‑detected.

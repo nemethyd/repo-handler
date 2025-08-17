@@ -4,7 +4,7 @@
 * Point 3: Centralized threshold-based logging (DONE)
 ### In Progress / Next
 * Point 4: (next planned task)
-Recent: Point 2 refactor completed; Point 3 logging fully migrated to threshold system with constants; TRACE level removed; now at v2.3.25.
+Recent: Point 2 refactor completed; Point 3 logging fully migrated to threshold system with constants; TRACE level removed; now at v2.3.24.
 # Quality & Maintenance Roadmap
 
 This document tracks identified quality, consistency, and maintainability improvements for `myrepo.sh`.
