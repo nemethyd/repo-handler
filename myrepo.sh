@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.3.24"
+VERSION="2.3.25"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -56,6 +56,20 @@ CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
 CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
 USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
 SHARED_CACHE_PATH=${SHARED_CACHE_PATH:-"/var/cache/myrepo"}  # Shared cache directory for root/user access
+
+# DNF command array (declared early so initialization call works when sourced in tests)
+declare -a DNF_CMD  # Global array holding the dnf invocation (sudo dnf | dnf)
+
+# Helper: populate DNF_CMD array (safe, quoted usage everywhere)
+function get_dnf_cmd() {
+    if [[ $EUID -eq 0 ]] || [[ -n "${SUDO_USER:-}" ]] || [[ -w /root ]]; then
+        DNF_CMD=(dnf)
+    elif [[ ${ELEVATE_COMMANDS:-1} -eq 1 ]]; then
+        DNF_CMD=(sudo dnf)
+    else
+        DNF_CMD=(dnf)
+    fi
+}
 
 # Initialize DNF command array early
 get_dnf_cmd
@@ -135,18 +149,121 @@ function _touch_internal_state_refs() {
     : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"
 }
 
-### Function Definitions (Alphabetical Order) ###
+### Function Definitions ###
+#
+# Grouped by dependency layers (low-level -> mid-level -> high-level orchestration)
+# 1. Core utilities & logging (no internal dependencies)
+# 2. Environment / path helpers & validation
+# 3. Metadata & status helpers (use core + env helpers)
+# 4. Classification & batching logic (use status helpers)
+# 5. Download, cache, cleanup, sync logic (use batching + helpers)
+# 6. Reporting & summary (depend on collected state)
+# 7. Main orchestration (glues everything; guarded for sourcing in tests)
+#
+# NOTE: We no longer force strict alphabetical ordering—functions live in the
+#       section matching their dependency level. When adding a new function,
+#       pick the lowest section that satisfies its dependencies. This reduces
+#       required future movement though some relocation may still occur when
+#       refactoring layers.
 
-# Align repository names like the original script
+###############################
+# 1. CORE UTILITIES & LOGGING #
+###############################
+
+# Align repository names (kept lightweight & pure)
 function align_repo_name() {
     local repo_name="$1"
     printf "%-${PADDING_LENGTH}s" "$repo_name"
 }
 
+# Simple logging function with colors (moved early so all later funcs can use it)
+function log() {
+    local level="$1"; shift
+    local message="$1"; shift || true
+    local min_debug_threshold=""  # Optional numeric debug threshold
+    if [[ $# -gt 0 ]]; then
+        min_debug_threshold="$1"
+    fi
+
+    # Threshold gating
+    if [[ -n "$min_debug_threshold" && "$level" == "D" ]]; then
+        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
+    elif [[ -n "$min_debug_threshold" && "$level" == "I" ]]; then
+        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
+    fi
+
+    local color=""
+    case "$level" in
+        E) color="\e[31m" ;; # error
+        W) color="\e[33m" ;; # warning
+        I) color="\e[32m" ;; # info
+        D) color="\e[36m" ;; # debug
+        *) color="\e[37m" ;; # default/unknown
+    esac
+    echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
+}
+
+# Version comparison helper (moved up so status helpers can rely on it)
+function version_is_newer() {
+    local version1="$1"
+    local version2="$2"
+    local ver1="${version1%-*}"  # before last dash
+    local rel1="${version1##*-}" # after last dash
+    local ver2="${version2%-*}"
+    local rel2="${version2##*-}"
+    log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2" $DEBUG_LVL_VERBOSE
+    local comparison_result
+    if command -v rpm >/dev/null 2>&1; then
+        comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+            case "$comparison_result" in
+                1) log "D" "RPM vercmp: $ver1 > $ver2" $DEBUG_LVL_VERBOSE; return 0 ;;
+                0)
+                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
+                    if [[ $? -eq 0 && -n "$comparison_result" && "$comparison_result" == 1 ]]; then
+                        log "D" "RPM vercmp: $rel1 > $rel2" $DEBUG_LVL_VERBOSE; return 0
+                    fi
+                    return 1 ;;
+                -1) log "D" "RPM vercmp: $ver1 < $ver2" $DEBUG_LVL_VERBOSE; return 1 ;;
+            esac
+        fi
+    fi
+    IFS='.' read -ra ver1_parts <<< "$ver1"
+    IFS='.' read -ra ver2_parts <<< "$ver2"
+    local max_parts=$((${#ver1_parts[@]} > ${#ver2_parts[@]} ? ${#ver1_parts[@]} : ${#ver2_parts[@]}))
+    for ((i=0; i<max_parts; i++)); do
+        local part1=${ver1_parts[i]:-0}
+        local part2=${ver2_parts[i]:-0}
+        local num1=${part1//[^0-9]*/}; num1=${num1:-0}
+        local num2=${part2//[^0-9]*/}; num2=${num2:-0}
+        if [[ $num1 -gt $num2 ]]; then
+            log "D" "Simple comparison: $version1 > $version2 (part $i)" $DEBUG_LVL_VERBOSE; return 0
+        elif [[ $num1 -lt $num2 ]]; then
+            log "D" "Simple comparison: $version1 < $version2 (part $i)" $DEBUG_LVL_VERBOSE; return 1
+        fi
+    done
+    local rel1_num=${rel1//[^0-9]*/}; rel1_num=${rel1_num:-0}
+    local rel2_num=${rel2//[^0-9]*/}; rel2_num=${rel2_num:-0}
+    if [[ $rel1_num -gt $rel2_num ]]; then
+        log "D" "Simple comparison: $version1 > $version2 (release)" $DEBUG_LVL_VERBOSE; return 0
+    else
+        log "D" "Simple comparison: $version1 <= $version2 (release)" $DEBUG_LVL_VERBOSE; return 1
+    fi
+}
+
+# Internal analyzer hint (SC2034) – kept near core
+function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"; }
+
+###############################
+# 2. ENV/PATH HELPERS & VALID #
+###############################
+
 # Simplified batch download without complex performance tracking
 function batch_download_packages() {
     local -A repo_packages
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
+    # Skip blank or malformed lines (prevents phantom empty repository aggregation during tests)
+    [[ -z "$repo_name" || "$repo_name" == "getPackage" ]] && continue
         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
             log "I" "   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)" 1
             continue
@@ -268,41 +385,57 @@ function batch_download_packages() {
                 fi
             else
                 log "W" "✗ Some downloads failed in batch $batch_num for $repo_name"
-                log "I" "   Trying optimized fallback downloads..."
+                log "I" "   Entering adaptive fallback (shrinking batch sizes)..."
                 local success_count=0
-                local fallback_batch_size=$BATCH_SIZE
-                local fallback_processed=0
-                while [[ $fallback_processed -lt ${#batch_packages[@]} && $fallback_batch_size -gt 1 ]]; do
-                    local fallback_end=$((fallback_processed + fallback_batch_size))
-                    if [[ $fallback_end -gt ${#batch_packages[@]} ]]; then
-                        fallback_end=${#batch_packages[@]}
-                    fi
+                local total_in_batch=${#batch_packages[@]}
+                local start_index=0
+                # Start with half the original batch size (at least 4) and shrink on failure
+                local fallback_batch_size=$(( BATCH_SIZE / 2 ))
+                (( fallback_batch_size < 4 )) && fallback_batch_size=4
+                (( fallback_batch_size > total_in_batch )) && fallback_batch_size=$total_in_batch
+                while [[ $start_index -lt $total_in_batch ]]; do
+                    local remaining=$(( total_in_batch - start_index ))
+                    (( fallback_batch_size > remaining )) && fallback_batch_size=$remaining
                     local small_batch=()
-                    for ((i=fallback_processed; i<fallback_end; i++)); do
+                    for ((i=start_index; i< start_index + fallback_batch_size; i++)); do
                         small_batch+=("${batch_packages[i]}")
                     done
-                    # intentional word splitting for dnf options
                     if timeout "$DNF_DOWNLOAD_TIMEOUT" "${DNF_CMD[@]}" download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
                         success_count=$((success_count + ${#small_batch[@]}))
-                        log "I" "   ✓ Small batch (${#small_batch[@]} packages) succeeded" 2
-                        fallback_processed=$fallback_end
+                        log "I" "   ✓ Fallback batch (${#small_batch[@]}) succeeded (index $start_index)" 2
+                        start_index=$(( start_index + fallback_batch_size ))
+                        # If we previously shrank heavily and are succeeding, cautiously grow a little (up to original half)
+                        if (( fallback_batch_size < BATCH_SIZE / 2 )); then
+                            fallback_batch_size=$(( fallback_batch_size * 2 ))
+                            (( fallback_batch_size > BATCH_SIZE / 2 )) && fallback_batch_size=$(( BATCH_SIZE / 2 ))
+                            (( fallback_batch_size < 1 )) && fallback_batch_size=1
+                        fi
                     else
-                        log "W" "   Small batch failed, trying individual downloads" 2
-                        for pkg in "${small_batch[@]}"; do
-                            # intentional word splitting for dnf options
+                        # Shrink strategy: halve until size 8, then go individual (size=1)
+                        if (( fallback_batch_size > 8 )); then
+                            fallback_batch_size=$(( (fallback_batch_size + 1) / 2 ))
+                            log "W" "   ↘ Shrinking fallback batch size to $fallback_batch_size (retry same segment)" 2
+                            continue
+                        elif (( fallback_batch_size > 1 )); then
+                            fallback_batch_size=1
+                            log "W" "   ↘ Switching to individual package fallback" 2
+                            continue
+                        else
+                            # Individual mode (fallback_batch_size == 1)
+                            local pkg="${small_batch[0]}"
                             if timeout "$DNF_DOWNLOAD_TIMEOUT" "${DNF_CMD[@]}" download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                                 ((success_count++))
-                                log "I" "   ✓ $pkg" 3
+                                log "I" "      ✓ $pkg" 3
                             else
                                 failed_downloads["$pkg"]="$repo_name"
                                 failed_download_reasons["$pkg"]="DNF download failed"
-                                log "W" "   ✗ Failed: $pkg" 2
+                                log "W" "      ✗ $pkg" 2
                             fi
-                        done
-                        fallback_processed=$fallback_end
+                            start_index=$(( start_index + 1 ))
+                        fi
                     fi
                 done
-                log "I" "   Optimized fallback result: $success_count/$batch_package_count packages downloaded"
+                log "I" "   Adaptive fallback result: $success_count/$batch_package_count packages downloaded"
                 if [[ $success_count -gt 0 ]]; then
                     CHANGED_REPOS["$repo_name"]=1
                     global_downloaded=$((global_downloaded + success_count))
@@ -1872,17 +2005,7 @@ function generate_summary_table() {
     draw_table_row_flex "TOTAL" "$total_new" "$total_update" "$total_exists" "Summary"
     draw_table_border_flex "bottom"
 }
-declare -a DNF_CMD  # Global array holding the dnf invocation (sudo dnf | dnf)
-# Helper: populate DNF_CMD array (safe, quoted usage everywhere)
-function get_dnf_cmd() {
-    if [[ $EUID -eq 0 ]] || [[ -n "$SUDO_USER" ]] || [[ -w /root ]]; then
-        DNF_CMD=(dnf)
-    elif [[ ${ELEVATE_COMMANDS:-1} -eq 1 ]]; then
-        DNF_CMD=(sudo dnf)
-    else
-        DNF_CMD=(dnf)
-    fi
-}
+## (moved get_dnf_cmd earlier to allow early initialization when script is sourced for tests)
 
 # Simple but accurate package status determination - this is the critical function!
 function get_package_status() {
@@ -2037,14 +2160,11 @@ function get_repo_base_path() {
 
 function get_repo_path() {
     local repo_name="$1"
-    
-    # Validate repository name to prevent creating getPackage directly under LOCAL_REPO_PATH
+    # Validate repository name to prevent creating stray getPackage directory
     if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
         log "E" "Invalid repository name: '$repo_name' - this would create getPackage directly under $LOCAL_REPO_PATH"
         return 1
     fi
-    
-    # All repositories use getPackage subdirectory (both regular and manual)
     echo "$LOCAL_REPO_PATH/$repo_name/getPackage"
     return 0
 }
@@ -2133,34 +2253,6 @@ function locate_local_rpm() {
     
     log "D" "No local RPM found for: $target_filename" 3
     return 1
-}
-
-# Simple logging function with colors
-function log() {
-    local level="$1"; shift
-    local message="$1"; shift || true
-    local min_debug_threshold=""  # Optional numeric debug threshold
-    if [[ $# -gt 0 ]]; then
-        min_debug_threshold="$1"
-    fi
-
-    # If a threshold is provided and current DEBUG_LEVEL lower, skip
-    if [[ -n "$min_debug_threshold" && "$level" == "D" ]]; then
-        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
-    elif [[ -n "$min_debug_threshold" && "$level" == "I" ]]; then
-        # Allow gated info messages too
-        (( DEBUG_LEVEL < min_debug_threshold )) && return 0
-    fi
-
-    local color=""
-    case "$level" in
-        E) color="\e[31m" ;; # error
-        W) color="\e[33m" ;; # warning
-        I) color="\e[32m" ;; # info
-        D) color="\e[36m" ;; # debug
-        *) color="\e[37m" ;; # default/unknown
-    esac
-    echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
 }
 
 # Parse command-line arguments (like original script)
@@ -3113,130 +3205,33 @@ function validate_repository_structure() {
     return 0
 }
 
-# Compare two package versions to determine if first is newer than second
-# Returns 0 (true) if version1 is newer than version2, 1 (false) otherwise
-# Usage: version_is_newer "17.0.0-1.el9" "9.0.0-14.el9"
-function version_is_newer() {
-    local version1="$1"
-    local version2="$2"
-    
-    # Extract version and release parts
-    local ver1="${version1%-*}"  # Everything before last dash
-    local rel1="${version1##*-}" # Everything after last dash
-    local ver2="${version2%-*}"
-    local rel2="${version2##*-}"
-    
-    log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2" $DEBUG_LVL_VERBOSE
-    
-    # Use rpm --eval with version comparison macros for accurate comparison
-    # This handles complex version schemes correctly
-    local comparison_result
-    if command -v rpm >/dev/null 2>&1; then
-        # Method 1: Use RPM's built-in version comparison (most accurate)
-        comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
-        if [[ $? -eq 0 && -n "$comparison_result" ]]; then
-            case "$comparison_result" in
-                "1")
-                    log "D" "RPM vercmp: $ver1 > $ver2 (version is newer)" $DEBUG_LVL_VERBOSE
-                    return 0  # version1 is newer
-                    ;;
-                "0")
-                    # Same version, compare releases
-                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
-                    if [[ $? -eq 0 && -n "$comparison_result" ]]; then
-                        case "$comparison_result" in
-                            "1")
-                                log "D" "RPM vercmp: $rel1 > $rel2 (release is newer)" $DEBUG_LVL_VERBOSE
-                                return 0  # release1 is newer
-                                ;;
-                            "0"|"-1")
-                                log "D" "RPM vercmp: $ver1-$rel1 <= $ver2-$rel2" $DEBUG_LVL_VERBOSE
-                                return 1  # same or older
-                                ;;
-                        esac
-                    fi
-                    ;;
-                "-1")
-                    log "D" "RPM vercmp: $ver1 < $ver2 (version is older)" $DEBUG_LVL_VERBOSE
-                    return 1  # version1 is older
-                    ;;
-            esac
-        fi
-    fi
-    
-    # Method 2: Fallback to simple numeric comparison for basic cases
-    # Split versions by dots and compare numerically
-    IFS='.' read -ra ver1_parts <<< "$ver1"
-    IFS='.' read -ra ver2_parts <<< "$ver2"
-    
-    local max_parts=$((${#ver1_parts[@]} > ${#ver2_parts[@]} ? ${#ver1_parts[@]} : ${#ver2_parts[@]}))
-    
-    for ((i=0; i<max_parts; i++)); do
-        local part1=${ver1_parts[i]:-0}
-        local part2=${ver2_parts[i]:-0}
-        
-        # Extract numeric part (handle non-numeric suffixes)
-        local num1
-        num1=${part1//[^0-9]*/}
-        local num2
-        num2=${part2//[^0-9]*/}
-        
-        # Default to 0 if extraction failed
-        num1=${num1:-0}
-        num2=${num2:-0}
-        
-        if [[ $num1 -gt $num2 ]]; then
-            log "D" "Simple comparison: $version1 > $version2 (part $i: $num1 > $num2)" $DEBUG_LVL_VERBOSE
-            return 0  # version1 is newer
-        elif [[ $num1 -lt $num2 ]]; then
-            log "D" "Simple comparison: $version1 < $version2 (part $i: $num1 < $num2)" $DEBUG_LVL_VERBOSE
-            return 1  # version1 is older
-        fi
-        # If equal, continue to next part
-    done
-    
-    # Versions are equal at this point, compare releases using simple numeric comparison
-    local rel1_num
-    rel1_num=${rel1//[^0-9]*/}
-    local rel2_num
-    rel2_num=${rel2//[^0-9]*/}
-    
-    rel1_num=${rel1_num:-0}
-    rel2_num=${rel2_num:-0}
-    
-    if [[ $rel1_num -gt $rel2_num ]]; then
-    log "D" "Simple comparison: $version1 > $version2 (release: $rel1_num > $rel2_num)" $DEBUG_LVL_VERBOSE
-        return 0  # release1 is newer
+
+### Main execution section (guarded so the script can be sourced for tests) ###
+if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
+    SCRIPT_START_TIME=$(date +%s)
+    load_config
+    parse_args "$@" 
+    check_command_elevation
+    validate_repository_structure
+    show_runtime_status
+    validate_and_handle_modes
+    full_rebuild_repos
+    cleanup_old_cache_directories
+    build_repo_cache
+    process_packages
+    sync_to_shared_repos
+    report_failed_downloads
+    report_unknown_packages
+    _touch_internal_state_refs
+
+    SCRIPT_END_TIME=$(date +%s)
+    SCRIPT_DURATION=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+    if [[ $SCRIPT_DURATION -lt 60 ]]; then
+            DURATION_HUMAN="${SCRIPT_DURATION}s"
     else
-    log "D" "Simple comparison: $version1 <= $version2 (release: $rel1_num <= $rel2_num)" $DEBUG_LVL_VERBOSE
-        return 1  # same or older
+            mins=$((SCRIPT_DURATION / 60))
+            secs=$((SCRIPT_DURATION % 60))
+            DURATION_HUMAN="${mins}m${secs}s"
     fi
-}
-
-### Main execution section ###
-SCRIPT_START_TIME=$(date +%s)
-load_config
-parse_args "$@" 
-check_command_elevation
-validate_repository_structure
-show_runtime_status
-validate_and_handle_modes
-full_rebuild_repos
-cleanup_old_cache_directories
-build_repo_cache
-process_packages
-sync_to_shared_repos
-report_failed_downloads
-report_unknown_packages
-_touch_internal_state_refs
-
-SCRIPT_END_TIME=$(date +%s)
-SCRIPT_DURATION=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
-if [[ $SCRIPT_DURATION -lt 60 ]]; then
-    DURATION_HUMAN="${SCRIPT_DURATION}s"
-else
-    mins=$((SCRIPT_DURATION / 60))
-    secs=$((SCRIPT_DURATION % 60))
-    DURATION_HUMAN="${mins}m${secs}s"
+    log "I" "${0##*/} v${VERSION} completed successfully in ${DURATION_HUMAN}"
 fi
-log "I" "${0##*/} v${VERSION} completed successfully in ${DURATION_HUMAN}"
