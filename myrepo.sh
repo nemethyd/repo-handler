@@ -192,26 +192,36 @@ function log() {
         (( DEBUG_LEVEL < min_debug_threshold )) && return 0
     fi
 
-    # Strip any leading legacy emoji + space to enforce minimal set
-    message="${message#📦 }"; message="${message#📥 }"; message="${message#🔄 }"; message="${message#🧹 }"; message="${message#📋 }"; message="${message#🔍 }"; message="${message#📊 }"; message="${message#🗑️ }"; message="${message#💡 }"; message="${message#📁 }"; message="${message#✅ }"; message="${message#⏳ }"; message="${message#⚠️ }"; message="${message#❌ }"
+    # Determine if message already starts with ANY emoji/symbol we consider a user-supplied indicator.
+    # If so, we will NOT prepend a standardized emoji (respect custom markers).
+    local has_leading_emoji=0
+    local -a KNOWN_EMOJI_PREFIXES=(
+        "📦" "📥" "🔄" "🧹" "📋" "🔍" "📊" "🗑️" "💡" "📁" "✅" "⏳" "⚠️" "❌" "📘"
+    )
+    for _e in "${KNOWN_EMOJI_PREFIXES[@]}"; do
+        if [[ $message == "${_e} "* ]]; then
+            has_leading_emoji=1; break
+        fi
+    done
 
     local prefix=""
-    case "$level" in
-        E) prefix="❌" ;;
-        W) prefix="⚠️" ;;
-        I)
-            # Detect success/progress heuristically
-            if [[ $message =~ ^(Starting|Processing|Downloading|Building|Syncing|Entering|Still\ downloading|Caching|Cleaning|Checking) ]]; then
-                prefix="⏳"
-            elif [[ $message =~ (Successfully|Completed|successfully|Cache\ built|Created|Updated|Removed|Done) ]]; then
-                prefix="✅"
-            else
-                prefix="📘"
-            fi
-            ;;
-        D) prefix="" ;;
-        *) prefix="📘" ;;
-    esac
+    if [[ $has_leading_emoji -eq 0 ]]; then
+        case "$level" in
+            E) prefix="❌" ;;
+            W) prefix="⚠️" ;;
+            I)
+                if [[ $message =~ ^(Starting|Processing|Downloading|Building|Syncing|Entering|Still\ downloading|Caching|Cleaning|Checking) ]]; then
+                    prefix="⏳"
+                elif [[ $message =~ (Successfully|Completed|successfully|Cache\ built|Created|Updated|Removed|Done) ]]; then
+                    prefix="✅"
+                else
+                    prefix="📘"
+                fi
+                ;;
+            D) prefix="" ;;
+            *) prefix="📘" ;;
+        esac
+    fi
 
     local color=""
     case "$level" in
@@ -416,7 +426,7 @@ function batch_download_packages() {
                     log "I" "🔄 Global progress: $global_downloaded/$total_packages_to_download packages (${progress_percent}%)"
                 fi
             else
-                log "W" "✗ Some downloads failed in batch $batch_num for $repo_name"
+                log "W" "❌ Some downloads failed in batch $batch_num for $repo_name"
                 log "I" "   Entering adaptive fallback (shrinking batch sizes)..."
                 local success_count=0
                 local total_in_batch=${#batch_packages[@]}
@@ -434,7 +444,7 @@ function batch_download_packages() {
                     done
                     if timeout "$DNF_DOWNLOAD_TIMEOUT" "${DNF_CMD[@]}" download "${dnf_options[@]}" --destdir="$repo_path" "${small_batch[@]}" >/dev/null 2>&1; then
                         success_count=$((success_count + ${#small_batch[@]}))
-                        log "I" "   ✓ Fallback batch (${#small_batch[@]}) succeeded (index $start_index)" 2
+                        log "I" "   ✅ Fallback batch (${#small_batch[@]}) succeeded (index $start_index)" 2
                         start_index=$(( start_index + fallback_batch_size ))
                         # If we previously shrank heavily and are succeeding, cautiously grow a little (up to original half)
                         if (( fallback_batch_size < BATCH_SIZE / 2 )); then
@@ -457,11 +467,11 @@ function batch_download_packages() {
                             local pkg="${small_batch[0]}"
                             if timeout "$DNF_DOWNLOAD_TIMEOUT" "${DNF_CMD[@]}" download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                                 ((success_count++))
-                                log "I" "      ✓ $pkg" 3
+                                log "I" "      ✅ $pkg" 3
                             else
                                 failed_downloads["$pkg"]="$repo_name"
                                 failed_download_reasons["$pkg"]="DNF download failed"
-                                log "W" "      ✗ $pkg" 2
+                                log "W" "      ❌ $pkg" 2
                             fi
                             start_index=$(( start_index + 1 ))
                         fi
@@ -494,12 +504,12 @@ function build_repo_cache() {
             if sudo mkdir -p "$cache_dir" 2>/dev/null; then
                 sudo chown root:root "$cache_dir" 2>/dev/null || true
                 sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_dir" 2>/dev/null || true  # Sticky bit for shared temp-like access
-                log "I" "✓ Created shared cache directory with proper permissions ($SHARED_CACHE_PERMISSIONS)"
+                log "I" "✅ Created shared cache directory with proper permissions ($SHARED_CACHE_PERMISSIONS)"
             else
                 log "W" "Failed to create shared cache with sudo, trying fallback..."
                 if mkdir -p "$HOME/.cache/myrepo" 2>/dev/null; then
                     cache_dir="$HOME/.cache/myrepo"
-                    log "I" "✓ Using fallback cache directory: $cache_dir"
+                    log "I" "✅ Using fallback cache directory: $cache_dir"
                 else
                     log "E" "Cannot create any cache directory"
                     exit 1
@@ -509,7 +519,7 @@ function build_repo_cache() {
             # Create without sudo (running as root or no elevation)
             if mkdir -p "$cache_dir" 2>/dev/null; then
                 chmod "$DEFAULT_DIR_PERMISSIONS" "$cache_dir" 2>/dev/null || true
-                log "I" "✓ Created cache directory: $cache_dir"
+                log "I" "✅ Created cache directory: $cache_dir"
             else
                 log "E" "Cannot create cache directory: $cache_dir"
                 exit 1
@@ -520,12 +530,12 @@ function build_repo_cache() {
         log "I" "Fixing permissions for existing cache directory: $cache_dir"
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             if sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_dir" 2>/dev/null; then
-                log "I" "✓ Fixed shared cache directory permissions"
+                log "I" "✅ Fixed shared cache directory permissions"
             else
                 log "W" "Failed to fix shared cache permissions, using fallback..."
                 if mkdir -p "$HOME/.cache/myrepo" 2>/dev/null; then
                     cache_dir="$HOME/.cache/myrepo"
-                    log "I" "✓ Using fallback cache directory: $cache_dir"
+                    log "I" "✅ Using fallback cache directory: $cache_dir"
                 else
                     log "E" "Cannot access any writable cache directory"
                     exit 1
@@ -533,7 +543,7 @@ function build_repo_cache() {
             fi
         else
             if chmod "$DEFAULT_DIR_PERMISSIONS" "$cache_dir" 2>/dev/null; then
-                log "I" "✓ Fixed cache directory permissions"
+                log "I" "✅ Fixed cache directory permissions"
             else
                 log "E" "Cannot fix permissions for cache directory: $cache_dir"
                 exit 1
@@ -736,7 +746,7 @@ function build_repo_cache() {
             package_count=$(wc -l < "$cache_file")
             if [[ $package_count -gt 0 ]]; then
                 available_repo_packages["$repo"]=$(cat "$cache_file")
-                log "I" "✓ Cached $package_count relevant packages from $repo"
+                log "I" "✅ Cached $package_count relevant packages from $repo"
             else
                 log "I" "→ No relevant packages in $repo"
             fi
@@ -788,7 +798,7 @@ function build_repo_cache() {
                     if [[ $cache_written == true ]]; then
                         available_repo_packages["$manual_repo"]=$(cat "$manual_cache_file")
                         rpm_count=$(wc -l < "$manual_cache_file")
-                        log "I" "✓ Cached $rpm_count packages from manual repository: $manual_repo"
+                        log "I" "✅ Cached $rpm_count packages from manual repository: $manual_repo"
                     else
                         log "W" "Failed to write cache for manual repository: $manual_repo"
                     fi
@@ -826,7 +836,7 @@ function build_repo_cache() {
     
     # Inform user about shared cache behavior
     log "I" "✅ Repository metadata cache built successfully (shared cache: $cache_dir)"
-    log "I" "✓ Cache is shared between root and user modes" 1
+    log "I" "✅ Cache is shared between root and user modes" 1
     
     return 0  # Success
 }
@@ -1029,13 +1039,13 @@ function classify_and_queue_packages() {
                         local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                         local temp_copy="${target_file}.new.$$"
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✓ Updated from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✅ Updated from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         else
-                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✓ Updated from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✅ Updated from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--)); _clamp_non_negative _update_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_update_count["$repo_name"]
+                            log "I" "   ❌ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--)); _clamp_non_negative _update_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_update_count["$repo_name"]
                         else
                             _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
@@ -1053,13 +1063,13 @@ function classify_and_queue_packages() {
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
                         log "I" "   📋 Using local RPM: $(basename "$rpm_path")" 1; log "D" "   Source: $rpm_path" $DEBUG_LVL_DETAIL
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$repo_path/"; then log "I" "   ✓ Copied from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$repo_path/"; then log "I" "   ✅ Copied from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         else
-                            if cp "$rpm_path" "$repo_path/"; then log "I" "   ✓ Copied from local source" 1; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$repo_path/"; then log "I" "   ✅ Copied from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            log "I" "   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--)); _clamp_non_negative _new_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_new_count["$repo_name"]
+                            log "I" "   ❌ Package not found locally and $repo_name is a manual repository (no download attempted)" 1; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--)); _clamp_non_negative _new_count_ref; _clamp_non_negative _changed_packages_found_ref; [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && _clamp_non_negative stats_new_count["$repo_name"]
                         else
                             _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
                         fi
@@ -1160,7 +1170,7 @@ function cleanup_old_cache_directories() {
     else
     log "D" "Cache cleanup: nothing to remove" $DEBUG_LVL_DETAIL
     fi
-    [[ $fixed_perms -eq 1 ]] && log "I" "✓ Fixed shared cache directory permissions"
+    [[ $fixed_perms -eq 1 ]] && log "I" "✅ Fixed shared cache directory permissions"
 
     return 0
 }
@@ -1608,12 +1618,12 @@ function diagnose_permissions() {
     for location in "${locations[@]}"; do
         if [[ -d "$location" ]]; then
             if [[ -w "$location" ]]; then
-                log "D" "✓ Write access to: $location" 2
+                log "D" "✅ Write access to: $location" 2
             else
-                log "W" "✗ No write access to: $location"
+                log "W" "❌ No write access to: $location"
             fi
         else
-            log "W" "✗ Directory does not exist: $location"
+            log "W" "❌ Directory does not exist: $location"
         fi
     done
     
@@ -1626,9 +1636,9 @@ function diagnose_permissions() {
     local test_result
     # Intentional word splitting for dnf command
     if test_result=$(timeout "$SUDO_TEST_TIMEOUT" ${dnf_cmd} --version 2>&1); then
-    log "D" "✓ DNF access working" 2
+    log "D" "✅ DNF access working" 2
     else
-        log "E" "✗ DNF access failed: $test_result"
+    log "E" "❌ DNF access failed: $test_result"
         log "E" "This may indicate permission issues or DNF configuration problems"
         return 1
     fi
@@ -1802,7 +1812,7 @@ function finalize_and_report() {
     fi
     echo
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    echo -e "\e[32m✓ Processing completed in ${elapsed}s\e[0m"
+    echo -e "\e[32m✅ Processing completed in ${elapsed}s\e[0m"
     echo -e "\e[36m  Processed: $processed_packages packages at $rate_display\e[0m"
     echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
@@ -1891,7 +1901,7 @@ function gather_installed_packages() {
             ((cached_repo_count++))
         done <<< "$enabled_repos_list"
         GLOBAL_ENABLED_REPOS_CACHE_POPULATED=1
-        log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
+    log "I" "✅ Cached $cached_repo_count enabled repositories for fast lookup"
     log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')" 2
     fi
 
@@ -2557,7 +2567,7 @@ function precreate_repository_directories() {
             fi
         fi
     done <<< "$unique_repos"
-    log "I" "✓ Pre-created $created_dirs repository directories"
+    log "I" "✅ Pre-created $created_dirs repository directories"
     return 0
 }
 
@@ -2595,7 +2605,7 @@ function process_packages() {
     
     # Count total packages and run filtering
     total_packages=$(printf '%s\n' "$package_list" | wc -l)
-    echo -e "\e[32m✓ Found $total_packages installed packages\e[0m"; echo
+    echo -e "\e[32m✅ Found $total_packages installed packages\e[0m"; echo
     local filtered_packages
     filtered_packages=$(filter_and_prepare_packages "$package_list") || return 1
     total_packages=$(printf '%s\n' "$filtered_packages" | wc -l)
@@ -2648,7 +2658,7 @@ function report_failed_downloads() {
         local packages="${repo_failures[$repo_name]}"
         for package_key in $packages; do
             local reason="${failed_download_reasons[$package_key]:-Unknown error}"
-            echo -e "\e[31m   ✗ $package_key\e[0m"
+            echo -e "\e[31m   ❌ $package_key\e[0m"
             echo -e "\e[37m     Reason: $reason\e[0m"
         done
         echo
