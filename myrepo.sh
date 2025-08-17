@@ -10,14 +10,11 @@
 # and synchronizes it with a shared repository, handling updates and cleanup of
 # local repositories. Optimized for performance with intelligent caching.
 
-# NOTE: This version has been optimized for performance by removing complex load balancing
-# and adaptive features in favor of simple, reliable, fast operation.
+# Lightweight, production-focused version (complex adaptive tuning removed previously).
 
 # Script version
 
-VERSION="2.3.28"
-
-# --- Safety Guards (Priority 1 Implementation) ---
+VERSION="2.3.29"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -26,39 +23,6 @@ if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
         exit 1
     fi
 fi
-
-# Safe removal helper: refuses to act on empty, root, or single-slash-like targets.
-function safe_rm_rf() {
-    # Contract:
-    #   Input: path to remove recursively.
-    #   Safety: rejects empty, root-like, relative parent targets; confines to LOCAL_REPO_PATH or SHARED_CACHE_PATH.
-    #   Elevation: automatically uses sudo when ELEVATE_COMMANDS=1.
-    #   Returns 0 on success (or path absent), 1 on refusal/error.
-    local target="$1"
-    [[ -z "$target" ]] && { log "E" "Refusing to remove empty path (safe_rm_rf)"; return 1; }
-    case "$target" in
-        "/"|"/*"|"."|"..") log "E" "Refusing unsafe removal target: $target"; return 1;;
-    esac
-    if [[ ! -e "$target" ]]; then
-        log "D" "safe_rm_rf: Path not present (nothing to do): $target" 3
-        return 0
-    fi
-    if [[ "$target" != "$LOCAL_REPO_PATH"/* && "$target" != "$SHARED_CACHE_PATH"/* ]]; then
-        log "W" "Skipping removal outside managed roots: $target" 1
-        return 1
-    fi
-    local cmd=(rm -rf -- "$target")
-    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-        cmd=(sudo "${cmd[@]}")
-    fi
-    if "${cmd[@]}" 2>/dev/null; then
-        log "D" "safe_rm_rf: Removed $target" 3
-        return 0
-    else
-        log "E" "safe_rm_rf: Failed to remove $target" 1
-        return 1
-    fi
-}
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="${LOCAL_REPO_PATH:-/repo}"  # Allow external override for testing/isolated runs
@@ -114,7 +78,7 @@ function get_dnf_cmd() {
     fi
 }
 
-# Initialize DNF command array early
+# Initialize DNF_CMD early so later functions have a populated command array
 get_dnf_cmd
 
 # Timeout configuration (in seconds)
@@ -189,9 +153,7 @@ declare -A available_repo_packages
 declare -A repo_package_lookup  # key: package signature name|epoch|version|release|arch -> repo
 
 # Helper to reference rarely-touched associative arrays so static analyzers (SC2034) see legitimate use.
-function _touch_internal_state_refs() {
-    : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"
-}
+function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"; }
 
 ### Function Definitions ###
 #
@@ -283,6 +245,40 @@ function log() {
     echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
 }
 
+
+# Safe removal helper: refuses to act on empty, root, or single-slash-like targets.
+function safe_rm_rf() {
+    # Contract:
+    #   Input: path to remove recursively.
+    #   Safety: rejects empty, root-like, relative parent targets; confines to LOCAL_REPO_PATH or SHARED_CACHE_PATH.
+    #   Elevation: automatically uses sudo when ELEVATE_COMMANDS=1.
+    #   Returns 0 on success (or path absent), 1 on refusal/error.
+    local target="$1"
+    [[ -z "$target" ]] && { log "E" "Refusing to remove empty path (safe_rm_rf)"; return 1; }
+    case "$target" in
+        "/"|"/*"|"."|"..") log "E" "Refusing unsafe removal target: $target"; return 1;;
+    esac
+    if [[ ! -e "$target" ]]; then
+        log "D" "safe_rm_rf: Path not present (nothing to do): $target" 3
+        return 0
+    fi
+    if [[ "$target" != "$LOCAL_REPO_PATH"/* && "$target" != "$SHARED_CACHE_PATH"/* ]]; then
+        log "W" "Skipping removal outside managed roots: $target" 1
+        return 1
+    fi
+    local cmd=(rm -rf -- "$target")
+    if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        cmd=(sudo "${cmd[@]}")
+    fi
+    if "${cmd[@]}" 2>/dev/null; then
+        log "D" "safe_rm_rf: Removed $target" 3
+        return 0
+    else
+        log "E" "safe_rm_rf: Failed to remove $target" 1
+        return 1
+    fi
+}
+
 # Version comparison helper (moved up so status helpers can rely on it)
 function version_is_newer() {
     local version1="$1"
@@ -291,20 +287,56 @@ function version_is_newer() {
     local rel1="${version1##*-}" # after last dash
     local ver2="${version2%-*}"
     local rel2="${version2##*-}"
+    if [[ ${MYREPO_BREAK_VERSION:-0} -eq 1 ]]; then
+        local left_count=${MYREPO_BREAK_VERSION_COUNT:-5}
+        if (( left_count > 0 )); then
+            read -rp "[BREAK version_is_newer #$((MYREPO_BREAK_VERSION_COUNT-left_count+1))] $ver1-$rel1 vs $ver2-$rel2 (Enter step, c=continue, q=quit) > " _brk
+            case "$_brk" in
+                q|Q) echo "Aborted by user at version_is_newer" >&2; exit 1 ;;
+                c|C) export MYREPO_BREAK_VERSION=0 ;;
+            esac
+            left_count=$((left_count-1))
+            export MYREPO_BREAK_VERSION_COUNT=$left_count
+            (( left_count == 0 )) && export MYREPO_BREAK_VERSION=0
+        fi
+    fi
     log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2" $DEBUG_LVL_VERBOSE
+
+    # Normalization: strip trailing .0 segments (treat 1.0 == 1)
+    local nver1="$ver1" nver2="$ver2"
+    while [[ $nver1 == *.0 ]]; do nver1=${nver1%*.0}; done
+    while [[ $nver2 == *.0 ]]; do nver2=${nver2%*.0}; done
+
     local comparison_result
     if command -v rpm >/dev/null 2>&1; then
         comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
         if [[ $? -eq 0 && -n "$comparison_result" ]]; then
+            # If rpm says greater but only due to trailing .0 difference, downgrade to equal
+            if [[ $comparison_result == 1 && $nver1 == $nver2 ]]; then
+                comparison_result=0
+            fi
             case "$comparison_result" in
-                1) log "D" "RPM vercmp: $ver1 > $ver2" $DEBUG_LVL_VERBOSE; return 0 ;;
+                1)
+                    log "D" "RPM vercmp: $ver1 > $ver2 (post-normalization)" $DEBUG_LVL_VERBOSE; return 0 ;;
                 0)
-                    comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$rel1', '$rel2'))}" 2>/dev/null)
-                    if [[ $? -eq 0 && -n "$comparison_result" && "$comparison_result" == 1 ]]; then
-                        log "D" "RPM vercmp: $rel1 > $rel2" $DEBUG_LVL_VERBOSE; return 0
-                    fi
-                    return 1 ;;
-                -1) log "D" "RPM vercmp: $ver1 < $ver2" $DEBUG_LVL_VERBOSE; return 1 ;;
+                    # Releases: treat differing distro suffix .elX as equal if numeric core same
+                    local core_rel1 core_rel2
+                    core_rel1=${rel1%%.el*}
+                    core_rel2=${rel2%%.el*}
+                    # Extract leading numeric chunk for numeric compare fallback
+                    local rel1_num_only rel2_num_only
+                    rel1_num_only=$(echo "$core_rel1" | grep -Eo '^[0-9]+' || echo 0)
+                    rel2_num_only=$(echo "$core_rel2" | grep -Eo '^[0-9]+' || echo 0)
+                    if [[ $rel1_num_only -gt $rel2_num_only ]]; then
+                        log "D" "RPM rel compare (numeric core): $rel1 > $rel2" $DEBUG_LVL_VERBOSE; return 0
+                    elif [[ $rel1_num_only -lt $rel2_num_only ]]; then
+                        log "D" "RPM rel compare (numeric core): $rel1 < $rel2" $DEBUG_LVL_VERBOSE; return 1
+                    else
+                        # Numeric cores equal: treat .el* differences as equal (not newer)
+                        return 1
+                    fi ;;
+                -1)
+                    log "D" "RPM vercmp: $ver1 < $ver2" $DEBUG_LVL_VERBOSE; return 1 ;;
             esac
         fi
     fi
@@ -337,8 +369,7 @@ function _clamp_non_negative() {
     (( ref < 0 )) && ref=0 || true
 }
 
-# Internal analyzer hint (SC2034) – kept near core
-function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"; }
+# (Analyzer helper defined once above)
 
 ###############################
 # 2. ENV/PATH HELPERS & VALID #
@@ -348,7 +379,7 @@ function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update
 function batch_download_packages() {
     local -A repo_packages
     while IFS='|' read -r repo_name package_name epoch package_version package_release package_arch; do
-    # Skip blank or malformed lines (prevents phantom empty repository aggregation during tests)
+    # Skip blank/malformed
     [[ -z "$repo_name" || "$repo_name" == "getPackage" ]] && continue
         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
             log "I" "   Skipping manual repo: $package_name (from $repo_name - manual repositories are not downloadable)" 1
@@ -415,7 +446,7 @@ function batch_download_packages() {
             done
             local batch_package_count=${#batch_packages[@]}
             log "D" "   Batch packages: ${batch_packages[*]}" 2
-            # use global DNF_CMD array
+            # Use global DNF_CMD array
             local dnf_options=(
                 --setopt=max_parallel_downloads="$MAX_PARALLEL_DOWNLOADS"
                 --setopt=fastestmirror=1
@@ -490,14 +521,14 @@ function batch_download_packages() {
                         success_count=$((success_count + ${#small_batch[@]}))
                         log "I" "   ✅ Fallback batch (${#small_batch[@]}) succeeded (index $start_index)" 2
                         start_index=$(( start_index + fallback_batch_size ))
-                        # If we previously shrank heavily and are succeeding, cautiously grow a little (up to original half)
+                        # Grow batch size on success (cautious)
                         if (( fallback_batch_size < BATCH_SIZE / 2 )); then
                             fallback_batch_size=$(( fallback_batch_size * 2 ))
                             (( fallback_batch_size > BATCH_SIZE / 2 )) && fallback_batch_size=$(( BATCH_SIZE / 2 ))
                             (( fallback_batch_size < 1 )) && fallback_batch_size=1
                         fi
                     else
-                        # Shrink strategy: halve until size 8, then go individual (size=1)
+                        # Shrink strategy
                         if (( fallback_batch_size > 8 )); then
                             fallback_batch_size=$(( (fallback_batch_size + 1) / 2 ))
                             log "W" "   ↘ Shrinking fallback batch size to $fallback_batch_size (retry same segment)" 2
@@ -507,7 +538,7 @@ function batch_download_packages() {
                             log "W" "   ↘ Switching to individual package fallback" 2
                             continue
                         else
-                            # Individual mode (fallback_batch_size == 1)
+                            # Individual mode
                             local pkg="${small_batch[0]}"
                             if timeout "$DNF_DOWNLOAD_TIMEOUT" "${DNF_CMD[@]}" download "${dnf_options[@]}" --destdir="$repo_path" "$pkg" >/dev/null 2>&1; then
                                 ((success_count++))
@@ -537,17 +568,17 @@ function batch_download_packages() {
 function build_repo_cache() {
     log "I" "Building repository metadata cache for installed packages..."
     
-    # Use only the shared cache directory
+    # Shared cache directory
     local cache_dir="$SHARED_CACHE_PATH"
     
     # Automatically handle shared cache directory creation and permissions
     if [[ ! -d "$cache_dir" ]]; then
         log "I" "Creating shared cache directory: $cache_dir"
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-            # Create with sudo and set proper shared permissions
+            # Create with sudo
             if sudo mkdir -p "$cache_dir" 2>/dev/null; then
                 sudo chown root:root "$cache_dir" 2>/dev/null || true
-                sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_dir" 2>/dev/null || true  # Sticky bit for shared temp-like access
+                sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_dir" 2>/dev/null || true
                 log "I" "✅ Created shared cache directory with proper permissions ($SHARED_CACHE_PERMISSIONS)"
             else
                 log "W" "Failed to create shared cache with sudo, trying fallback..."
@@ -560,7 +591,7 @@ function build_repo_cache() {
                 fi
             fi
         else
-            # Create without sudo (running as root or no elevation)
+            # Create without sudo
             if mkdir -p "$cache_dir" 2>/dev/null; then
                 chmod "$DEFAULT_DIR_PERMISSIONS" "$cache_dir" 2>/dev/null || true
                 log "I" "✅ Created cache directory: $cache_dir"
@@ -570,7 +601,7 @@ function build_repo_cache() {
             fi
         fi
     elif [[ ! -w "$cache_dir" ]]; then
-        # Directory exists but not writable - try to fix permissions
+    # Directory exists but not writable
         log "I" "Fixing permissions for existing cache directory: $cache_dir"
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             if sudo chmod "$SHARED_CACHE_PERMISSIONS" "$cache_dir" 2>/dev/null; then
@@ -597,7 +628,7 @@ function build_repo_cache() {
     
     log "D" "Using cache directory: $cache_dir" $DEBUG_LVL_DETAIL
     
-    # Cache validity check (4 hours by default, configurable)
+    # Cache validity check
     local cache_max_age=${CACHE_MAX_AGE:-14400}  # 4 hours in seconds
     local cache_valid=true
     local current_time
@@ -621,13 +652,13 @@ function build_repo_cache() {
         cache_valid=false
     fi
     
-    # Force rebuild if --refresh-metadata is specified
+    # Force rebuild if requested
     if [[ $REFRESH_METADATA -eq 1 ]]; then
         log "I" "Force cache rebuild requested via --refresh-metadata"
         cache_valid=false
     fi
     
-    # If cache is valid, try to load existing cache
+    # Load existing cache
     if [[ $cache_valid == true ]]; then
     local loaded_repos=0
     local enabled_repos
@@ -655,18 +686,17 @@ function build_repo_cache() {
         fi
     fi
     
-    # Rebuild cache if needed
+    # Rebuild cache
     log "I" "Rebuilding repository metadata cache..."
     
     # Clear old cache
     rm -f "$cache_dir"/*.cache 2>/dev/null || true
     
-    # Get list of all installed packages first
+    # Installed packages list
     local installed_packages
     log "D" "Using DNF command: ${DNF_CMD[*]}" $DEBUG_LVL_DETAIL
     
-    # Intentional word splitting for dnf command
-    # Intentional word splitting for dnf command
+    # DNF repoquery (word splitting intentional)
     if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>&1); then
         log "E" "Failed to get installed packages list"
     log "E" "DNF error: $installed_packages" 1
@@ -694,9 +724,9 @@ function build_repo_cache() {
     
     log "D" "Will search for $(echo "$all_packages_to_search" | wc -l) unique packages in repositories (including $(echo "$system_packages" | wc -l) @System packages)" $DEBUG_LVL_DETAIL
     
-    # Get list of enabled repositories
+    # Enabled repositories
     local enabled_repos
-    # Intentional word splitting for dnf command
+    # DNF repolist (word splitting intentional)
     if ! enabled_repos=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>&1 | awk 'NR>1 {print $1}' | grep -v "^$"); then
         log "E" "Failed to get enabled repositories list"
     log "E" "DNF repolist error: $enabled_repos" 1
@@ -714,7 +744,7 @@ function build_repo_cache() {
     local total_repos
     total_repos=$(echo "$enabled_repos" | wc -l)
     
-    # Only cache metadata for packages we actually have installed
+    # Cache only installed package metadata
     while IFS= read -r repo; do
         ((repo_count++))
         log "I" "⏳ Caching metadata for repository: $repo ($repo_count/$total_repos)"
@@ -722,22 +752,22 @@ function build_repo_cache() {
         local cache_file="$cache_dir/${repo}.cache"
         local package_list=()
         
-        # Build a targeted package list for this repository
+    # Targeted package list
         while IFS= read -r pkg_name; do
             package_list+=("$pkg_name")
         done <<< "$all_packages_to_search"
         
-        # Query only for our installed packages in this repository (much faster!)
-        local dnf_result
-    # Intentional word splitting for dnf command
-        if dnf_result=$(timeout "$DNF_CACHE_TIMEOUT" ${dnf_cmd} repoquery -y --disablerepo="*" --enablerepo="$repo" \
+    # Query installed packages in this repo
+    local dnf_result
+    # Use populated DNF_CMD array for repoquery
+    if dnf_result=$(timeout "$DNF_CACHE_TIMEOUT" "${DNF_CMD[@]}" repoquery -y --disablerepo="*" --enablerepo="$repo" \
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>&1); then
             
-            # Write to cache file with robust permission handling (prevent error display)
+            # Write cache file (permission resilient)
             local cache_written=false
             
-            # Method 1: Try direct write with full error suppression
+            # Direct write attempt
             {
                 if echo "$dnf_result" > "$cache_file"; then
                     # Successfully wrote as current user
@@ -747,7 +777,7 @@ function build_repo_cache() {
                 fi
             } 2>/dev/null
             
-            # Method 2: If direct write failed, try with sudo
+            # Sudo write fallback
             if [[ $cache_written == false && $ELEVATE_COMMANDS -eq 1 ]]; then
                 if echo "$dnf_result" | sudo tee "$cache_file" >/dev/null 2>&1; then
                     # Write with sudo and set proper permissions
@@ -757,7 +787,7 @@ function build_repo_cache() {
                 fi
             fi
             
-            # Method 3: Final fallback - write to temp file and move
+            # Temp-file fallback
             if [[ $cache_written == false ]]; then
                 local temp_file
                 temp_file=$(mktemp "${cache_file}.tmp.XXXXXX" 2>/dev/null) || temp_file="$cache_file.tmp.$$"
@@ -781,7 +811,7 @@ function build_repo_cache() {
                 fi
             fi
             
-            # Check if we succeeded in writing the cache
+            # Verify write success
             if [[ $cache_written == false ]]; then
                 log "W" "Failed to write cache file: $cache_file (all methods failed)"
                 continue
@@ -801,10 +831,10 @@ function build_repo_cache() {
         fi
     done <<< "$enabled_repos"
 
-    # Build fast lookup index now that we've populated available_repo_packages
+    # Build lookup index
     build_repo_lookup_index
     
-    # IMPORTANT: Also process manual repositories by scanning their RPM files directly
+    # Process manual repositories
     if [[ ${#MANUAL_REPOS[@]} -gt 0 ]]; then
         log "I" "📁 Processing manual repositories for package detection..."
         for manual_repo in "${MANUAL_REPOS[@]}"; do
@@ -821,13 +851,13 @@ function build_repo_cache() {
             local manual_cache_file="$cache_dir/${manual_repo}.cache"
             local rpm_count=0
             
-            # Scan RPM files in the manual repository
+            # Scan RPM files
             if rpm_metadata=$(find "$manual_repo_path" -name "*.rpm" -type f -exec rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n" {} \; 2>/dev/null); then
                 if [[ -n "$rpm_metadata" ]]; then
-                    # Write manual repository cache with same permission handling as regular repos
+                    # Write manual repo cache
                     local cache_written=false
                     
-                    # Method 1: Try direct write
+                    # Direct write
                     {
                         if echo "$rpm_metadata" > "$manual_cache_file"; then
                             chmod "$CACHE_FILE_PERMISSIONS" "$manual_cache_file" 2>/dev/null || true
@@ -835,7 +865,7 @@ function build_repo_cache() {
                         fi
                     } 2>/dev/null
                     
-                    # Method 2: Try with sudo if needed
+                    # Sudo fallback
                     if [[ $cache_written == false && $ELEVATE_COMMANDS -eq 1 ]]; then
                         if echo "$rpm_metadata" | sudo tee "$manual_cache_file" >/dev/null 2>&1; then
                             sudo chmod "$CACHE_FILE_PERMISSIONS" "$manual_cache_file" 2>/dev/null || true
@@ -863,7 +893,7 @@ function build_repo_cache() {
     local timestamp_written=false
     local timestamp_file="$cache_dir/cache_timestamp"
     
-    # Try with sudo if needed for shared cache
+    # Timestamp write (sudo first)
     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
         if echo "$current_time" | sudo tee "$timestamp_file" >/dev/null 2>&1; then
             sudo chmod "$CACHE_FILE_PERMISSIONS" "$timestamp_file" 2>/dev/null || true
@@ -872,7 +902,7 @@ function build_repo_cache() {
         fi
     fi
     
-    # Try direct write if sudo didn't work or wasn't used
+    # Direct timestamp write
     if [[ $timestamp_written == false ]] && echo "$current_time" > "$timestamp_file" 2>/dev/null; then
     log "D" "Cache timestamp written to: $timestamp_file" $DEBUG_LVL_DETAIL
         timestamp_written=true
@@ -882,7 +912,7 @@ function build_repo_cache() {
         log "W" "Could not write cache timestamp to: $timestamp_file"
     fi
     
-    # Inform user about shared cache behavior
+    # Notify user
     log "I" "✅ Repository metadata cache built successfully (shared cache: $cache_dir)"
     log "I" "✅ Cache is shared between root and user modes" 1
     
@@ -975,8 +1005,8 @@ function classify_and_queue_packages() {
             continue
         fi
 
-        # Progress reporting
-        if (( _processed_packages_ref > 0 && _processed_packages_ref % PROGRESS_REPORT_INTERVAL == 0 )); then
+    # Progress reporting
+    if (( _processed_packages_ref > 0 && _processed_packages_ref % PROGRESS_REPORT_INTERVAL == 0 )); then
             local elapsed=$(( $(date +%s) - start_time ))
             local rate_display="" eta_display=""
             if [[ $elapsed -gt 0 ]]; then
@@ -994,7 +1024,8 @@ function classify_and_queue_packages() {
                 local remaining=$(( total_packages - _processed_packages_ref ))
                 if [[ $remaining -gt 0 && _processed_packages_ref -gt 0 ]]; then
                     local eta_seconds
-                    eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining / (_processed_packages_ref / $elapsed)}")
+                    # Use expanded shell variable in awk to avoid treating name as awk variable (which was 0 and caused div-by-zero)
+                    eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining / (${_processed_packages_ref} / $elapsed)}")
                     if [[ $eta_seconds -gt $ETA_DISPLAY_THRESHOLD ]]; then
                         eta_display=" - ETA: $((eta_seconds/60))m"
                     else
@@ -1005,7 +1036,7 @@ function classify_and_queue_packages() {
                 rate_display="calculating..."
             fi
             local progress_percent
-            progress_percent=$(awk "BEGIN {printf \"%.1f\", (_processed_packages_ref * 100) / $total_packages}")
+            progress_percent=$(awk "BEGIN {printf \"%.1f\", (${_processed_packages_ref} * 100) / $total_packages}")
             echo -e "\e[36m⏱️  Progress: ${_processed_packages_ref}/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
             echo -e "\e[36m   📊 Stats: \e[33m${_new_count_ref} new\e[0m, \e[36m${_update_count_ref} updates\e[0m, \e[32m${_exists_count_ref} existing\e[0m"
         fi
@@ -1168,13 +1199,13 @@ function cleanup_old_cache_directories() {
         fi
     fi
 
-    # Derive stale age for cache files (double cache max age)
+    # Derive stale age for cache files
     local stale_seconds=$(( CACHE_MAX_AGE * 2 ))
     # Convert to minutes for find -mmin (minimum 1)
     local stale_minutes=$(( stale_seconds / 60 ))
     [[ $stale_minutes -lt 1 ]] && stale_minutes=1
 
-    # 1. Remove old temporary files (*.tmp.*) older than 60 minutes
+    # 1. Remove old temporary files
     while IFS= read -r -d '' f; do
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             sudo rm -f -- "$f" 2>/dev/null || true
@@ -1184,7 +1215,7 @@ function cleanup_old_cache_directories() {
         ((removed_tmp++))
     done < <(find "$cache_root" -maxdepth 1 -type f -name '*.tmp.*' -mmin +60 -print0 2>/dev/null)
 
-    # 2. Remove stale cache files (*.cache) older than stale_minutes
+    # 2. Remove stale cache files
     while IFS= read -r -d '' f; do
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             sudo rm -f -- "$f" 2>/dev/null || true
@@ -1194,7 +1225,7 @@ function cleanup_old_cache_directories() {
         ((removed_cache++))
     done < <(find "$cache_root" -maxdepth 1 -type f -name '*.cache' -mmin +$stale_minutes -print0 2>/dev/null)
 
-    # 3. Remove empty subdirectories older than 60 minutes (defensive; normally none expected)
+    # 3. Remove empty subdirectories
     while IFS= read -r -d '' d; do
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             sudo rmdir -- "$d" 2>/dev/null || true
@@ -1204,7 +1235,7 @@ function cleanup_old_cache_directories() {
         ((removed_dirs++))
     done < <(find "$cache_root" -mindepth 1 -maxdepth 1 -type d -empty -mmin +60 -print0 2>/dev/null)
 
-    # 4. Optionally fix permissions on surviving *.cache files (readable by all)
+    # 4. Fix permissions (optional)
     if [[ $SET_PERMISSIONS -eq 1 ]]; then
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             sudo find "$cache_root" -maxdepth 1 -type f -name '*.cache' -exec chmod "$CACHE_FILE_PERMISSIONS" {} + 2>/dev/null || true
@@ -1299,15 +1330,15 @@ function cleanup_uninstalled_packages() {
     installed_packages_file=$(mktemp)
     
     log "I" "📋 Building comprehensive installed packages list..."
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
+    # Ensure DNF_CMD array populated
+    get_dnf_cmd
     
     # Use optimized DNF query with better performance
     local dnf_start_time
     dnf_start_time=$(date +%s)
     
     # Intentional word splitting for dnf command
-    if ! timeout "$DNF_CACHE_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
+    if ! timeout "$DNF_CACHE_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
          sed 's/(none)/0/g' | sort -u > "$installed_packages_file"; then
         log "W" "Could not get comprehensive installed package list for cleanup"
         rm -f "$installed_packages_file"
@@ -1579,10 +1610,8 @@ function determine_repo_from_installed() {
     
     # Method 1: Use dnf list installed to get repo info
     local repo_info
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
-    # Intentional word splitting for dnf command
-    repo_info=$(${dnf_cmd} list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
+    get_dnf_cmd
+    repo_info=$("${DNF_CMD[@]}" list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
     
     if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
         # Clean up repo name (remove @ prefix)
@@ -1617,8 +1646,21 @@ function determine_repo_source() {
     local package_version="$3"
     local package_release="$4"
     local package_arch="$5"
+    if [[ ${MYREPO_BREAK_DETERMINE:-0} -eq 1 ]]; then
+        local left_d=${MYREPO_BREAK_DETERMINE_COUNT:-5}
+        if (( left_d > 0 )); then
+            read -rp "[BREAK determine_repo_source #$((MYREPO_BREAK_DETERMINE_COUNT-left_d+1))] $package_name $epoch_version $package_version-$package_release.$package_arch (Enter step, c=continue, q=quit) > " _brk2
+            case "$_brk2" in
+                q|Q) echo "Aborted by user at determine_repo_source" >&2; exit 1 ;;
+                c|C) export MYREPO_BREAK_DETERMINE=0 ;;
+            esac
+            left_d=$((left_d-1))
+            export MYREPO_BREAK_DETERMINE_COUNT=$left_d
+            (( left_d == 0 )) && export MYREPO_BREAK_DETERMINE=0
+        fi
+    fi
     
-    # Reconstruct the expected package string (same logic as original)
+    # Reconstruct expected package string
     local expected_package
     if [[ -n "$epoch_version" && "$epoch_version" != "0" && "$epoch_version" != "(none)" ]]; then
         expected_package="${package_name}|${epoch_version}|${package_version}|${package_release}|${package_arch}"
@@ -1633,7 +1675,7 @@ function determine_repo_source() {
         return 0
     fi
 
-    # Fallback (should be rare): linear scan then populate index entry
+    # Fallback: linear scan then index
     for repo in "${!available_repo_packages[@]}"; do
         if echo "${available_repo_packages[$repo]}" | grep -Fxq "$expected_package"; then
             repo_package_lookup["$expected_package"]="$repo"
@@ -1642,7 +1684,7 @@ function determine_repo_source() {
         fi
     done
     
-    # Default to Invalid if no matching repo is found (same as original)
+    # No match
     echo "Invalid"
     return 1
 }
@@ -1674,7 +1716,7 @@ function benchmark_repo_lookup() {
     local iterations=${1:-2000}
     local keys_file
     keys_file=$(mktemp)
-    # Collect up to N keys from index (or rebuild if empty)
+    # Collect up to N keys (rebuild if empty)
     if [[ ${#repo_package_lookup[@]} -eq 0 ]]; then
         build_repo_lookup_index
     fi
@@ -1700,13 +1742,13 @@ function benchmark_repo_lookup() {
 function diagnose_permissions() {
     log "I" "🔍 Diagnosing permission setup..."
     
-    # Check current user context
+    # Current user context
     log "I" "Current user: $(whoami) (EUID=$EUID)"
     if [[ -n "$SUDO_USER" ]]; then
         log "I" "Original user: $SUDO_USER (running under sudo)"
     fi
     
-    # Check if we can write to common locations
+    # Writable locations
     local locations=("/tmp" "$HOME" "/var/cache" "$LOCAL_REPO_PATH")
     for location in "${locations[@]}"; do
         if [[ -d "$location" ]]; then
@@ -1721,17 +1763,15 @@ function diagnose_permissions() {
     done
     
     # Check DNF access
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
-    log "I" "DNF command will be: $dnf_cmd" 1
+    get_dnf_cmd
+    log "I" "DNF command will be: ${DNF_CMD[*]}" 1
     
-    # Test basic DNF access
+    # Test DNF access
     local test_result
-    # Intentional word splitting for dnf command
-    if test_result=$(timeout "$SUDO_TEST_TIMEOUT" ${dnf_cmd} --version 2>&1); then
-    log "D" "✅ DNF access working" 2
+    if test_result=$(timeout "$SUDO_TEST_TIMEOUT" "${DNF_CMD[@]}" --version 2>&1); then
+        log "D" "✅ DNF access working" 2
     else
-    log "E" "❌ DNF access failed: $test_result"
+        log "E" "❌ DNF access failed: $test_result"
         log "E" "This may indicate permission issues or DNF configuration problems"
         return 1
     fi
@@ -1744,7 +1784,7 @@ function draw_table_border_flex() {
     local border_type="${1:-top}"  # top, middle, bottom
     local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_NEW_WIDTH" "$TABLE_UPDATE_WIDTH" "$TABLE_EXISTS_WIDTH" "$TABLE_STATUS_WIDTH")
     
-    # Define border characters based on type (double outer, single inner)
+    # Border characters
     local left middle right horizontal
     case "$border_type" in
         "top")
@@ -1810,7 +1850,7 @@ function draw_table_row_flex() {
     local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_NEW_WIDTH" "$TABLE_UPDATE_WIDTH" "$TABLE_EXISTS_WIDTH" "$TABLE_STATUS_WIDTH")
     local alignments=("left" "right" "right" "right" "left")  # left or right
     
-    # Truncate repository name if it's longer than the allocated width
+    # Truncate long repo names
     if [[ ${#repo} -gt $TABLE_REPO_WIDTH ]]; then
         values[0]="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
     fi
@@ -1830,7 +1870,7 @@ function draw_table_row_flex() {
 }
 
 function filter_and_prepare_packages() {
-    local input_packages="$1"  # multi-line string
+    local input_packages="$1"  # multiline string
     if [[ -z "$input_packages" ]]; then
         echo ""; return 0
     fi
@@ -1909,9 +1949,7 @@ function finalize_and_report() {
     echo -e "\e[36m  Processed: $processed_packages packages at $rate_display\e[0m"
     echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
-    fi
+    [[ $DRY_RUN -eq 1 ]] && echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
     generate_summary_table
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
         cleanup_uninstalled_packages
@@ -1936,7 +1974,7 @@ function full_rebuild_repos() {
         return 0
     fi
     
-    log "I" "Full rebuild requested - removing all packages from local repositories"
+    log "I" "Full rebuild requested"
     
     # Remove all RPM files from each repository
     for repo_dir in "$LOCAL_REPO_PATH"/*; do
@@ -1951,10 +1989,10 @@ function full_rebuild_repos() {
             
             log "I" "Cleaning repository: $repo_name"
             
-            # Remove all RPM files (both in getPackage and any misplaced ones)
+            # Remove all RPM files
             find "$repo_dir" -name "*.rpm" -type f -delete 2>/dev/null || true
             
-            # Enhanced repodata cleanup using new function
+            # Repodata cleanup
             local repo_base_path
             local repo_package_path
             repo_base_path=$(get_repo_base_path "$repo_name")
@@ -1962,7 +2000,7 @@ function full_rebuild_repos() {
             
             cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_package_path"
             
-            # Also remove current repodata for full rebuild
+            # Remove current repodata
             if [[ -d "$repo_base_path/repodata" ]]; then
                 safe_rm_rf "$repo_base_path/repodata"
                 log "I" "$(align_repo_name "$repo_name"): Removed current repodata for full rebuild" 1
@@ -1979,11 +2017,9 @@ function gather_installed_packages() {
     # Populate GLOBAL_ENABLED_REPOS_CACHE (if not already)
     if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 0 ]]; then
         log "I" "📋 Building enabled repositories cache for performance..."
-        local dnf_cmd
-        dnf_cmd=$(get_dnf_cmd)
         local enabled_repos_list
-    # intentional word splitting
-        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet 2>/dev/null | awk 'NR>1 {print $1}' | grep -v "^$"); then
+    get_dnf_cmd
+    if ! enabled_repos_list=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>/dev/null | awk 'NR>1 {print $1}' | grep -v "^$"); then
             log "W" "Could not enumerate enabled repositories (continuing without cache)"
             enabled_repos_list=""
         fi
@@ -1999,12 +2035,11 @@ function gather_installed_packages() {
     fi
 
     # Run repoquery with timeout & optional NAME_FILTER pre-filter
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
+    get_dnf_cmd
     # repoquery_result is intentionally a plain scalar (multi-line text block), not an array.
     # We later pipe/echo it; indexing is never performed. (Documenting to satisfy SC2178/SC2128.)
     local repoquery_result=""
-    log "D" "DNF command will be: ${dnf_cmd}" 3
+    log "D" "DNF command will be: ${DNF_CMD[*]}" 3
     log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s" 3
     log "D" "Name filter: '${NAME_FILTER}'" 3
 
@@ -2012,7 +2047,8 @@ function gather_installed_packages() {
     if [[ -n "$NAME_FILTER" ]]; then
     log "D" "Running DNF query with name filter..." 3
     # Intentional word splitting for dnf command
-    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
+    get_dnf_cmd
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
             if [[ "$name" =~ $NAME_FILTER ]]; then
                 echo "$name|$rest"
             fi
@@ -2022,7 +2058,8 @@ function gather_installed_packages() {
     else
     log "D" "Running DNF query without name filter..." 3
     # intentional word splitting
-    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+    get_dnf_cmd
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
         dnf_exit_code=$?
     log "D" "DNF query without filter completed with exit code: $dnf_exit_code" 3
     fi
@@ -2311,9 +2348,8 @@ function is_repo_enabled() {
         [[ -n "${GLOBAL_ENABLED_REPOS_CACHE[$repo_name]:-}" ]] && return 0 || return 1
     fi
     # Fallback single check (should rarely happen before cache build)
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
-    if ${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -qx "$repo_name"; then
+    get_dnf_cmd
+    if "${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -qx "$repo_name"; then
         return 0
     fi
     return 1
@@ -2877,10 +2913,8 @@ function show_runtime_status() {
     # Handle refresh metadata option
     if [[ $REFRESH_METADATA -eq 1 ]]; then
         log "I" "Refreshing DNF metadata cache..."
-        local dnf_cmd
-        dnf_cmd=$(get_dnf_cmd)
-    # Intentional word splitting for dnf command
-        ${dnf_cmd} clean metadata >/dev/null 2>&1 || true
+    get_dnf_cmd
+    "${DNF_CMD[@]}" clean metadata >/dev/null 2>&1 || true
         log "I" "DNF metadata cache refreshed"
     fi
 
@@ -3300,6 +3334,8 @@ function validate_repository_structure() {
 ### Main execution section (guarded so the script can be sourced for tests) ###
 if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     SCRIPT_START_TIME=$(date +%s)
+    # Initialize DNF command array early
+    get_dnf_cmd
     load_config
     parse_args "$@" 
     check_command_elevation

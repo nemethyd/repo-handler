@@ -17,6 +17,8 @@ Last Reviewed: 2025-08-17
 | 8 | Metadata | Prevented double metadata updates for manual repos |
 | 17 | Emojis | Standardized emoji set + conditional prefixing |
 | 10 | Safety | Bash version guard + safe_rm_rf path confinement |
+| 7 | Performance | Indexed repo packages for O(1) lookups |
+| 14 | Version Compare | Added tests for `version_is_newer` edge cases |
 
 ## Prioritized Backlog
 
@@ -24,33 +26,21 @@ Ordered by: (1) Safety/Correctness, (2) Functional integrity, (3) Performance, (
 
 | Priority | ID | Area | Description | Status | Rationale |
 |----------|----|------|-------------|--------|-----------|
-| 1 | 7  | Performance | Index repo packages for O(1) lookups (map/set) | TODO | Cuts repeated grep scans in determine_repo_source |
-| 2 | 14 | Version Compare | Add bats tests for `version_is_newer` edge cases | TODO | Locks correctness before further logic changes |
-| 3 | 9  | Testing | `--self-test` mode (tool presence, perms) returning JSON/exit codes | TODO | Fast environment validation & CI hook |
-| 4 | 15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) centrally | TODO | Prevents collisions; improves clarity for tests |
-| 5 | 12 | Output | `--json-summary` machine-readable results alongside table | TODO | Enables integration / automation |
-| 6 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
-| 7 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
-| 8 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
-| 9 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |
-| 3 | 7  | Performance | Index repo packages for O(1) lookups (map/set) | TODO | Cuts repeated grep scans in determine_repo_source |
-| 4 | 14 | Version Compare | Add bats tests for `version_is_newer` edge cases | TODO | Locks correctness before further logic changes |
-| 5 | 9  | Testing | `--self-test` mode (tool presence, perms) returning JSON/exit codes | TODO | Fast environment validation & CI hook |
-| 6 | 15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) centrally | TODO | Prevents collisions; improves clarity for tests |
-| 7 | 12 | Output | `--json-summary` machine-readable results alongside table | TODO | Enables integration / automation |
-| 8 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
-| 9 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
-|10 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
-|11 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |
+| 2 | 9  | Testing | `--self-test` mode (tool presence, perms) returning JSON/exit codes | TODO | Fast environment validation & CI hook |
+| 3 | 15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) centrally | TODO | Prevents collisions; improves clarity for tests |
+| 4 | 12 | Output | `--json-summary` machine-readable results alongside table | TODO | Enables integration / automation |
+| 5 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
+| 6 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
+| 7 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
+| 8 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |
 
 ## Notes on Backlog Ordering
 
-1. With safety (Point 10) and manual metadata dedupe (Point 8) completed, performance indexing (Point 7) now leads.
-2. Version comparison tests (Point 14) next to harden correctness before adding new behaviors.
-3. Self-test mode (Point 9) improves diagnosability before expanding outputs.
-4. Output enhancements (Points 12, 18) follow a stable core for predictable schemas.
-5. Documentation (Point 11) after feature shape solidifies.
-6. Refactor and cosmetic cleanup (Points 13, 16) deferred until churn subsides.
+1. With performance indexing (Point 7) now done, version comparison tests (Point 14) lead to lock correctness.
+2. Self-test mode (Point 9) improves diagnosability before expanding outputs.
+3. Output enhancements (Points 12, 18) follow a stable core for predictable schemas.
+4. Documentation (Point 11) after feature shape solidifies.
+5. Refactor and cosmetic cleanup (Points 13, 16) deferred until churn subsides.
 
 ## Conventions
 

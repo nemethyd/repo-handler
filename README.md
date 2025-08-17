@@ -1,10 +1,46 @@
-# Repo Handler Script (v2.3.26)
+# Repo Handler Script (v2.3.29)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
 ## Purpose
 
 `myrepo.sh` builds and maintains lean local RPM repositories that mirror only the packages actually installed on a host (plus any manually managed repositories). It can then update repository metadata and optionally sync the result to a shared location. Intended for disconnected / controlled environments where you need a reproducible subset of upstream repositories.
+
+## Workflow Diagram
+
+The high‑level flow (golden system -> curated local repos -> optional sync) is illustrated below:
+
+![MyRepo Workflow](images/MyRepo.png)
+
+Legend:
+- Golden / source system: authoritative list of currently installed RPMs.
+- Repo handler (`myrepo.sh`): classifies packages (NEW / UPDATE / EXISTS), downloads only what is missing or newer, prunes removed ones, regenerates metadata.
+- Local lean repositories: minimal per‑repository trees containing just required RPMs + `repodata/`.
+- (Optional) Shared / exported repository location: synchronized mirror for other consumers or air‑gapped hosts.
+
+Result: You retain only the subset of upstream content actually in use, drastically shrinking storage and transfer footprint while preserving reproducibility.
+
+### Single-File Design Philosophy
+
+This project is intentionally delivered as **one self‑contained Bash script** (plus an optional config file):
+
+Why one file:
+1. Zero install friction – copy `myrepo.sh` to a host and run.
+2. Easier auditing – security / change reviews can diff a single artifact.
+3. Air‑gapped friendliness – no module resolution or path dependencies.
+4. Rapid field patching – emergency edits can be applied in place, then replaced later with a clean upstream copy.
+
+What this means:
+- No sourcing of external helper libraries is required (and we keep it that way).
+- `myrepo.cfg` is **optional**; absence falls back to safe internal defaults.
+- Any future feature must justify extraction; preference is structured sections inside the same file with clear comment banners.
+
+Non‑goals (by design):
+- Splitting into many shell modules.
+- Introducing a build / packaging step.
+- Requiring installation of the project into system paths to function.
+
+Potential future (optional) enhancement (not implemented): a `--write-default-config` flag that would emit a commented template `myrepo.cfg` if missing. Deferred intentionally to avoid side‑effects and because the script already runs well without a config file.
 
 ## What It Actually Does (Current Implementation)
 
@@ -139,11 +175,25 @@ These environment variables are intended strictly for testing and development. D
 
 | Variable | Purpose | When Honored |
 |----------|---------|--------------|
-| ENABLE_TEST_SELECTIVE=1 | Activates a deterministic test hook that force-marks one repository as changed so the selective metadata update path (CHANGED_REPOS optimization) can be validated even when no NEW/UPDATE packages occur. | Only during a run when evaluating package statuses; primarily used by `tests/test_selective_metadata_update.sh`. Ignored if normal change tracking already populated `CHANGED_REPOS`. |
+| ENABLE_TEST_SELECTIVE=1 | Force-mark one repo as changed to exercise selective metadata update path during tests. | During package status evaluation; ignored if `CHANGED_REPOS` already populated. |
+| MYREPO_BREAK_VERSION=1 | Interactive step prompts inside `version_is_newer` for the first N comparisons (see count var). | Each version comparison until counter hits 0. |
+| MYREPO_BREAK_VERSION_COUNT=5 | Remaining interactive steps for `version_is_newer`. Decremented automatically. | Set before run to adjust step budget. |
+| MYREPO_BREAK_DETERMINE=1 | Interactive step prompts inside `determine_repo_source`. | Each determine invocation until counter hits 0. |
+| MYREPO_BREAK_DETERMINE_COUNT=5 | Remaining interactive steps for `determine_repo_source`. | Set before run. |
+
+Interactive breakpoint usage example (safe dry‑run):
+
+```bash
+MYREPO_BREAK_VERSION=1 MYREPO_BREAK_VERSION_COUNT=3 \
+MYREPO_BREAK_DETERMINE=1 MYREPO_BREAK_DETERMINE_COUNT=2 \
+DRY_RUN=1 DEBUG_LEVEL=2 ./myrepo.sh --dry-run --name-filter '^bash$'
+```
+
+Enter (newline) to step, `c` to continue (disable further breaks), `q` to abort. These are *development only* diagnostics and should not be enabled in production automation.
 
 Notes:
-- The selective metadata optimization updates metadata only for repositories whose RPM contents changed (added, updated, or removed packages). When `CHANGED_REPOS` is empty the script falls back to scanning all repositories.
-- `ENABLE_TEST_SELECTIVE` should never be set for real runs: it can trigger unnecessary metadata updates and is purely a test facilitation mechanism.
+- The selective metadata optimization updates metadata only for repositories whose RPM contents changed (added / updated / removed). If `CHANGED_REPOS` ends empty we conservatively scan all.
+- `ENABLE_TEST_SELECTIVE` and all `MYREPO_BREAK_*` variables are *testing / debugging aids*; avoid in production runs.
 
 All can be overridden via `myrepo.cfg` or CLI; CLI wins.
 
@@ -299,7 +349,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.7
+# myrepo.cfg - Configuration file for myrepo.sh v2.3.29
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -366,82 +416,8 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # DNF_DOWNLOAD_TIMEOUT=1800
 # SUDO_TEST_TIMEOUT=10
 
-# Performance settings (optimized for speed)
-# BATCH_SIZE=50
-# PROGRESS_REPORT_INTERVAL=50
-# MAX_PARALLEL_DOWNLOADS=8
-# DNF_RETRIES=2
-```
-# LOAD_BALANCE_THRESHOLD=10
+# (Legacy adaptive / load-balancing tuning variables removed; remaining performance-related variables above are sufficient.)
 
-# Minimum adaptive batch size for slow repositories (default: 3)
-# ADAPTIVE_BATCH_SIZE_MIN=3
-
-# Maximum adaptive batch size for fast repositories (default: 20)
-# ADAPTIVE_BATCH_SIZE_MAX=20
-
-# Note: The following options from previous versions are no longer supported in v2.3.3:
-# - SET_PERMISSIONS (permission handling is now automatic)
-# - LOG_DIR (logging is now to stderr, no file logging)
-# - EXCLUDED_REPOS (renamed to EXCLUDE_REPOS for consistency)
-# - RPMBUILD_PATH (use LOCAL_RPM_SOURCES array instead)
-# - Complex adaptive tuning settings (replaced with optimal defaults plus intelligent prioritization)
-```
-
-### Performance Optimizations (v2.3.7)
-
-This version focuses on **maximum performance through simplification**, removing complex adaptive features that were causing overhead while preserving all essential functionality.
-
-#### Key Performance Improvements:
-
-1. **Fixed Progress Updates**: Resolved missing progress reports with configurable `PROGRESS_UPDATE_INTERVAL`
-2. **Eliminated Hardcoded Values**: All magic numbers replaced with configurable variables
-3. **Optimized Package Cleanup**: 20-50x faster cleanup with batch processing and hash table lookups
-4. **Simplified Batch Processing**: Removed complex load balancing for consistent high performance
-5. **Enhanced Error Handling**: Better timeout management and fallback mechanisms
-
-#### Performance Features:
-
-**🚀 Speed Optimizations**:
-- Unified fixed batch processing (BATCH_SIZE=50) for optimal performance
-- Hash table lookups for O(1) package searches instead of O(n) linear searches
-- Batch RPM metadata extraction to reduce subprocess overhead
-- Optimized DNF queries with intelligent caching
-- Improved fallback mechanism with smaller batch retries before individual downloads
-
-**📊 Progress Monitoring**:
-- Configurable progress update intervals (PROGRESS_UPDATE_INTERVAL=30s)
-- Real-time download progress with performance metrics
-- Background progress monitors for large operations
-- Detailed timing information for all operations
-
-**🧹 Cleanup Performance**:
-- Major performance improvement: 20-50x faster package cleanup
-- Batch file operations to minimize filesystem overhead
-- Early exit optimizations for empty repositories
-- Progress reporting for large cleanup operations
-
-#### Performance Settings:
-
-```bash
-# Core performance settings (optimal fixed values)
-BATCH_SIZE=50                   # Fixed optimal batch size for all operations
-PARALLEL=6                      # Optimal parallel processes
-CACHE_MAX_AGE=14400            # 4-hour metadata cache validity
-PROGRESS_UPDATE_INTERVAL=30     # Progress update frequency (seconds)
-PROGRESS_REPORT_INTERVAL=50     # Report progress every N packages
-
-# Timeout configuration (all configurable, no hardcoded values)
-DNF_QUERY_TIMEOUT=60           # Basic DNF query timeout
-DNF_CACHE_TIMEOUT=120          # Cache building timeout  
-DNF_DOWNLOAD_TIMEOUT=1800      # Download operation timeout (30 minutes)
-SUDO_TEST_TIMEOUT=10           # Sudo verification timeout
-
-# Performance thresholds (eliminates all magic numbers)
-LARGE_BATCH_THRESHOLD=200      # Threshold for enhanced progress reporting
-PROGRESS_BATCH_THRESHOLD=50    # Threshold for periodic progress updates
-PACKAGE_LIST_THRESHOLD=100     # Threshold for package list display
-ETA_DISPLAY_THRESHOLD=60       # ETA display threshold in seconds
 ```
 
 ### Log Level Control
