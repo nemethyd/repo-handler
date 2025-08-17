@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.3.30)
+# Repo Handler Script (v2.3.31)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -131,6 +131,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 --no-metadata-update             Skip createrepo_c
 --dnf-serial                     Hint to avoid parallel DNF (currently advisory)
 --self-test                      Run environment diagnostics and output JSON then exit
+--json-summary                   Emit machine-readable run summary (JSON file/stdout)
 -v | --verbose                   Set debug level 2
 -h | --help                      Show help
 ```
@@ -149,7 +150,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | FORCE_REDOWNLOAD | 1 remove existing before download, 0 keep until success |
 | DEBUG_LEVEL | 0–3 impact verbosity (with threshold-aware log function) |
 
-### Logging System (v2.3.30)
+### Logging System (v2.3.31)
 
 Unified logging helper:
 
@@ -174,19 +175,23 @@ Legacy inline patterns like `[[ $DEBUG_LEVEL -ge 2 ]] && ...` have been replaced
 
 These environment variables are intended strictly for testing and development. Do **not** enable them in production workflows.
 
+Current (namespaced) forms:
+
 | Variable | Purpose | When Honored |
 |----------|---------|--------------|
-| ENABLE_TEST_SELECTIVE=1 | Force-mark one repo as changed to exercise selective metadata update path during tests. | During package status evaluation; ignored if `CHANGED_REPOS` already populated. |
-| MYREPO_BREAK_VERSION=1 | Interactive step prompts inside `version_is_newer` for the first N comparisons (see count var). | Each version comparison until counter hits 0. |
-| MYREPO_BREAK_VERSION_COUNT=5 | Remaining interactive steps for `version_is_newer`. Decremented automatically. | Set before run to adjust step budget. |
-| MYREPO_BREAK_DETERMINE=1 | Interactive step prompts inside `determine_repo_source`. | Each determine invocation until counter hits 0. |
-| MYREPO_BREAK_DETERMINE_COUNT=5 | Remaining interactive steps for `determine_repo_source`. | Set before run. |
+| MYREPO_TEST_ENABLE_SELECTIVE=1 | Force-mark one repo as changed to exercise selective metadata update path during tests. | During package status evaluation; ignored if `CHANGED_REPOS` already populated. |
+| MYREPO_TEST_BREAK_VERSION=1 | Interactive step prompts inside `version_is_newer` for the first N comparisons (see count var). | Each version comparison until counter hits 0. |
+| MYREPO_TEST_BREAK_VERSION_COUNT=5 | Remaining interactive steps for `version_is_newer`. Decremented automatically. | Set before run to adjust step budget. |
+| MYREPO_TEST_BREAK_DETERMINE=1 | Interactive step prompts inside `determine_repo_source`. | Each determine invocation until counter hits 0. |
+| MYREPO_TEST_BREAK_DETERMINE_COUNT=5 | Remaining interactive steps for `determine_repo_source`. | Set before run. |
+
+Legacy backward-compatible aliases (still accepted, mapped automatically if the new ones are unset): `ENABLE_TEST_SELECTIVE`, `MYREPO_BREAK_VERSION(_COUNT)`, `MYREPO_BREAK_DETERMINE(_COUNT)`.
 
 Interactive breakpoint usage example (safe dry‑run):
 
 ```bash
-MYREPO_BREAK_VERSION=1 MYREPO_BREAK_VERSION_COUNT=3 \
-MYREPO_BREAK_DETERMINE=1 MYREPO_BREAK_DETERMINE_COUNT=2 \
+MYREPO_TEST_BREAK_VERSION=1 MYREPO_TEST_BREAK_VERSION_COUNT=3 \
+MYREPO_TEST_BREAK_DETERMINE=1 MYREPO_TEST_BREAK_DETERMINE_COUNT=2 \
 DRY_RUN=1 DEBUG_LEVEL=2 ./myrepo.sh --dry-run --name-filter '^bash$'
 ```
 
@@ -194,7 +199,7 @@ Enter (newline) to step, `c` to continue (disable further breaks), `q` to abort.
 
 Notes:
 - The selective metadata optimization updates metadata only for repositories whose RPM contents changed (added / updated / removed). If `CHANGED_REPOS` ends empty we conservatively scan all.
-- `ENABLE_TEST_SELECTIVE` and all `MYREPO_BREAK_*` variables are *testing / debugging aids*; avoid in production runs.
+- All test hook variables are *debugging aids*; avoid in production runs.
 
 All can be overridden via `myrepo.cfg` or CLI; CLI wins.
 
@@ -350,7 +355,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 ### Configuration Options
 
 ```bash
-# myrepo.cfg - Configuration file for myrepo.sh v2.3.30
+# myrepo.cfg - Configuration file for myrepo.sh v2.3.31
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
 
@@ -721,7 +726,7 @@ Sample output (pretty-printed for readability):
 
 ```json
 {
-   "version": "2.3.30",
+   "version": "2.3.31",
    "ok": 1,
    "bash_ok": 1,
    "dnf_query_ok": 1,
@@ -748,6 +753,61 @@ if ./myrepo.sh --self-test > selftest.json; then
 else
    echo "Environment NOT OK"; cat selftest.json; exit 1;
 fi
+
+## JSON Run Summary (`--json-summary`)
+
+The `--json-summary` flag emits a machine‑readable aggregate of the run at normal completion. This allows automation or CI to parse results without scraping colored table output.
+
+Behavior:
+- On success or failure (post-processing path), a single JSON object is produced.
+- Default target: `LOG_DIR/myrepo-summary.json` (if `LOG_DIR` is writable). If file creation fails, JSON is written to stdout.
+- Includes per‑repository counts, list of repos whose contents changed, failed downloads, and unknown packages (those whose source repo could not be determined).
+
+Schema (keys always present; arrays may be empty):
+```json
+{
+   "version": "2.3.31",
+   "duration_sec": 135,
+   "repos": [
+      { "name": "ol9_appstream", "new": 2, "updated": 1, "exists": 173 },
+      { "name": "ol9_baseos_latest", "new": 0, "updated": 0, "exists": 220 }
+   ],
+   "changed_repos": ["ol9_appstream"],
+   "failed": [
+      { "pkg": "foo-1.2.3-1.x86_64", "repo": "ol9_appstream", "reason": "dnf download timeout" }
+   ],
+   "unknown": [
+      { "pkg": "custompkg-0.1-1.x86_64", "source": "(none)", "reason": "not in enabled repos" }
+   ]
+}
+```
+
+Notes:
+- `repos` entries appear only for repositories encountered during classification (counts default to 0 where unset).
+- `changed_repos` is derived from the internal change tracking used for selective metadata updates.
+- `failed` lists only packages whose downloads definitively failed after all retries.
+- `unknown` mirrors the human-readable unknown package report.
+- Duration covers the whole script wall time from process start until emission.
+
+Example dry run usage capturing stdout fallback:
+```bash
+./myrepo.sh --dry-run --max-packages 0 --json-summary > summary.json
+jq '.changed_repos' summary.json
+```
+
+Automation idea (fail build if any downloads failed):
+```bash
+./myrepo.sh --json-summary || true
+summary_file="${LOG_DIR%/}/myrepo-summary.json"
+[[ -f $summary_file ]] || summary_file=<(./myrepo.sh --dry-run --json-summary)
+fails=$(jq '.failed | length' "$summary_file")
+if (( fails > 0 )); then echo "Run had $fails failed downloads"; exit 1; fi
+```
+
+Combine with `--self-test` in CI:
+```bash
+./myrepo.sh --self-test > env.json && ./myrepo.sh --json-summary
+```
 ```
 
 ## Tips

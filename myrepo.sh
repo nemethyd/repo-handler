@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.30"
+VERSION="2.3.31"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -54,6 +54,7 @@ REFRESH_METADATA=${REFRESH_METADATA:-0}
 DNF_SERIAL=${DNF_SERIAL:-0}
 # Self-test mode (diagnostic JSON output)
 SELF_TEST=${SELF_TEST:-0}
+JSON_SUMMARY=${JSON_SUMMARY:-0}
 # ELEVATE_COMMANDS is now automatically detected based on execution context:
 # - When running as root (EUID=0): Uses 'dnf' directly 
 # - When running under sudo (SUDO_USER set): Uses 'dnf' directly
@@ -402,17 +403,19 @@ function version_is_newer() {
     local rel1="${version1##*-}" # after last dash
     local ver2="${version2%-*}"
     local rel2="${version2##*-}"
-    if [[ ${MYREPO_BREAK_VERSION:-0} -eq 1 ]]; then
-        local left_count=${MYREPO_BREAK_VERSION_COUNT:-5}
+    if [[ -n ${MYREPO_BREAK_VERSION+x} && -z ${MYREPO_TEST_BREAK_VERSION+x} ]]; then export MYREPO_TEST_BREAK_VERSION=$MYREPO_BREAK_VERSION; fi
+    if [[ -n ${MYREPO_BREAK_VERSION_COUNT+x} && -z ${MYREPO_TEST_BREAK_VERSION_COUNT+x} ]]; then export MYREPO_TEST_BREAK_VERSION_COUNT=$MYREPO_BREAK_VERSION_COUNT; fi
+    if [[ ${MYREPO_TEST_BREAK_VERSION:-0} -eq 1 ]]; then
+        local left_count=${MYREPO_TEST_BREAK_VERSION_COUNT:-5}
         if (( left_count > 0 )); then
-            read -rp "[BREAK version_is_newer #$((MYREPO_BREAK_VERSION_COUNT-left_count+1))] $ver1-$rel1 vs $ver2-$rel2 (Enter step, c=continue, q=quit) > " _brk
+            read -rp "[BREAK version_is_newer #$((MYREPO_TEST_BREAK_VERSION_COUNT-left_count+1))] $ver1-$rel1 vs $ver2-$rel2 (Enter step, c=continue, q=quit) > " _brk
             case "$_brk" in
                 q|Q) echo "Aborted by user at version_is_newer" >&2; exit 1 ;;
-                c|C) export MYREPO_BREAK_VERSION=0 ;;
+                c|C) export MYREPO_TEST_BREAK_VERSION=0 ;;
             esac
             left_count=$((left_count-1))
-            export MYREPO_BREAK_VERSION_COUNT=$left_count
-            (( left_count == 0 )) && export MYREPO_BREAK_VERSION=0
+            export MYREPO_TEST_BREAK_VERSION_COUNT=$left_count
+            (( left_count == 0 )) && export MYREPO_TEST_BREAK_VERSION=0
         fi
     fi
     log "D" "Version comparison: $ver1-$rel1 vs $ver2-$rel2" $DEBUG_LVL_VERBOSE
@@ -1218,7 +1221,8 @@ function classify_and_queue_packages() {
             EXISTS)
                 ((_exists_count_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_exists_count["$repo_name"]++))
                 log "I" "$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch" 1
-                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)" $DEBUG_LVL_DETAIL; fi
+                if [[ -n ${ENABLE_TEST_SELECTIVE+x} && -z ${MYREPO_TEST_ENABLE_SELECTIVE+x} ]]; then export MYREPO_TEST_ENABLE_SELECTIVE=$ENABLE_TEST_SELECTIVE; fi
+                if [[ $DRY_RUN -eq 1 && -n "${MYREPO_TEST_ENABLE_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; log "D" "Test hook: Marked $repo_name as changed (MYREPO_TEST_ENABLE_SELECTIVE)" $DEBUG_LVL_DETAIL; fi
                 ;;
             UPDATE)
                 if [[ $DRY_RUN -eq 0 ]]; then
@@ -1761,17 +1765,19 @@ function determine_repo_source() {
     local package_version="$3"
     local package_release="$4"
     local package_arch="$5"
-    if [[ ${MYREPO_BREAK_DETERMINE:-0} -eq 1 ]]; then
-        local left_d=${MYREPO_BREAK_DETERMINE_COUNT:-5}
+    if [[ -n ${MYREPO_BREAK_DETERMINE+x} && -z ${MYREPO_TEST_BREAK_DETERMINE+x} ]]; then export MYREPO_TEST_BREAK_DETERMINE=$MYREPO_BREAK_DETERMINE; fi
+    if [[ -n ${MYREPO_BREAK_DETERMINE_COUNT+x} && -z ${MYREPO_TEST_BREAK_DETERMINE_COUNT+x} ]]; then export MYREPO_TEST_BREAK_DETERMINE_COUNT=$MYREPO_BREAK_DETERMINE_COUNT; fi
+    if [[ ${MYREPO_TEST_BREAK_DETERMINE:-0} -eq 1 ]]; then
+        local left_d=${MYREPO_TEST_BREAK_DETERMINE_COUNT:-5}
         if (( left_d > 0 )); then
-            read -rp "[BREAK determine_repo_source #$((MYREPO_BREAK_DETERMINE_COUNT-left_d+1))] $package_name $epoch_version $package_version-$package_release.$package_arch (Enter step, c=continue, q=quit) > " _brk2
+            read -rp "[BREAK determine_repo_source #$((MYREPO_TEST_BREAK_DETERMINE_COUNT-left_d+1))] $package_name $epoch_version $package_version-$package_release.$package_arch (Enter step, c=continue, q=quit) > " _brk2
             case "$_brk2" in
                 q|Q) echo "Aborted by user at determine_repo_source" >&2; exit 1 ;;
-                c|C) export MYREPO_BREAK_DETERMINE=0 ;;
+                c|C) export MYREPO_TEST_BREAK_DETERMINE=0 ;;
             esac
             left_d=$((left_d-1))
-            export MYREPO_BREAK_DETERMINE_COUNT=$left_d
-            (( left_d == 0 )) && export MYREPO_BREAK_DETERMINE=0
+            export MYREPO_TEST_BREAK_DETERMINE_COUNT=$left_d
+            (( left_d == 0 )) && export MYREPO_TEST_BREAK_DETERMINE=0
         fi
     fi
     
@@ -2662,6 +2668,10 @@ function parse_args() {
                 BENCHMARK_LOOKUP=1
                 shift
                 ;;
+            --json-summary)
+                JSON_SUMMARY=1
+                shift
+                ;;
             --self-test)
                 SELF_TEST=1
                 shift
@@ -2700,6 +2710,7 @@ function parse_args() {
                 echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
                 echo "  --dnf-serial           Force serial DNF operations"
                 echo "  --benchmark-lookup     Run repository lookup benchmark (diagnostic)"
+                echo "  --json-summary         Emit machine-readable JSON summary at end"
                 echo "  --self-test            Environment diagnostic (JSON output) and exit"
                 echo "  -v, --verbose          Enable verbose output (debug level 2)"
                 echo "  -h, --help             Show this help message"
@@ -2920,6 +2931,41 @@ function report_failed_downloads() {
     echo -e "\e[31m📊 Total failed downloads: $total_failures packages\e[0m"
     echo -e "\e[36m💡 Tip: Check if these packages are available in enabled repositories or if network connectivity is working.\e[0m"
     echo -e "\e[31m═══════════════════════════════════════════════════════════════\e[0m"
+}
+
+# Emit JSON summary of run statistics (packages per repo, failures, timing)
+function emit_json_summary() {
+    local end_time=$(date +%s)
+    local duration=$((end_time - SCRIPT_START_TIME))
+    local repo_entries=()
+    for repo in "${!stats_new_count[@]}"; do
+        local new_c=${stats_new_count[$repo]:-0}
+        local upd_c=${stats_update_count[$repo]:-0}
+        local ex_c=${stats_exists_count[$repo]:-0}
+        repo_entries+=("{\"name\":\"$repo\",\"new\":$new_c,\"updated\":$upd_c,\"exists\":$ex_c}")
+    done
+    # Unknown packages
+    local unknown_entries=()
+    for pkg in "${!unknown_packages[@]}"; do
+        local src=${unknown_packages[$pkg]}
+        local reason=${unknown_package_reasons[$pkg]:-""}
+        unknown_entries+=("{\"pkg\":\"$pkg\",\"source\":\"$src\",\"reason\":\"${reason//"/\\"}\"}")
+    done
+    # Failures
+    local fail_entries=()
+    for pkg in "${!failed_downloads[@]}"; do
+        local repo=${failed_downloads[$pkg]}
+        local reason=${failed_download_reasons[$pkg]:-""}
+        fail_entries+=("{\"pkg\":\"$pkg\",\"repo\":\"$repo\",\"reason\":\"${reason//"/\\"}\"}")
+    done
+    local changed_entries=()
+    for repo in "${!CHANGED_REPOS[@]}"; do
+        changed_entries+=("\"$repo\"")
+    done
+    local json
+    json=$(printf '{"version":"%s","duration_sec":%s,"repos":[%s],"changed_repos":[%s],"failed":[%s],"unknown":[%s]}\n' \
+        "$VERSION" "$duration" "${repo_entries[*]}" "${changed_entries[*]}" "${fail_entries[*]}" "${unknown_entries[*]}")
+    echo "$json"
 }
 
 # Report unknown packages at the end of script execution
@@ -3170,7 +3216,8 @@ function update_all_repository_metadata() {
     fi
 
     # Test hook: seed a changed repo if requested
-    if [[ -n "${ENABLE_TEST_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 && -d "$LOCAL_REPO_PATH/test_repo" ]]; then
+    if [[ -n ${ENABLE_TEST_SELECTIVE+x} && -z ${MYREPO_TEST_ENABLE_SELECTIVE+x} ]]; then export MYREPO_TEST_ENABLE_SELECTIVE=$ENABLE_TEST_SELECTIVE; fi
+    if [[ -n "${MYREPO_TEST_ENABLE_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 && -d "$LOCAL_REPO_PATH/test_repo" ]]; then
         CHANGED_REPOS["test_repo"]=1
         log "D" "Test hook: Added test_repo to CHANGED_REPOS" 2
     fi
@@ -3484,4 +3531,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
             DURATION_HUMAN="${mins}m${secs}s"
     fi
     log "I" "${0##*/} v${VERSION} completed successfully in ${DURATION_HUMAN}"
+    if [[ $JSON_SUMMARY -eq 1 ]]; then
+        emit_json_summary > "${LOG_DIR%/}/myrepo-summary.json" 2>/dev/null || emit_json_summary
+    fi
 fi

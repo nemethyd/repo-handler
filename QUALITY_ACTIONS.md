@@ -19,6 +19,9 @@ Last Reviewed: 2025-08-17
 | 10 | Safety | Bash version guard + safe_rm_rf path confinement |
 | 7 | Performance | Indexed repo packages for O(1) lookups |
 | 14 | Version Compare | Added tests for `version_is_newer` edge cases |
+| 9 | Testing | Implemented `--self-test` JSON environment diagnostics |
+| 15 | Hook Names | Namespaced test hooks to `MYREPO_TEST_*` with backward compat |
+| 12 | Output | Implemented `--json-summary` machine-readable run results |
 
 ## Prioritized Backlog
 
@@ -26,13 +29,10 @@ Ordered by: (1) Safety/Correctness, (2) Functional integrity, (3) Performance, (
 
 | Priority | ID | Area | Description | Status | Rationale |
 |----------|----|------|-------------|--------|-----------|
-| 2 | 9  | Testing | `--self-test` mode (tool presence, perms) returning JSON/exit codes | TODO | Fast environment validation & CI hook |
-| 3 | 15 | Hook Names | Namespace test hooks (`MYREPO_TEST_*`) centrally | TODO | Prevents collisions; improves clarity for tests |
-| 4 | 12 | Output | `--json-summary` machine-readable results alongside table | TODO | Enables integration / automation |
-| 5 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
-| 6 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
-| 7 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
-| 8 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |
+| 2 | 18 | Output | No-emoji / plain mode (map emojis to INFO/WARN/ERR/OK) | TODO | Terminal compatibility / log parsers |
+| 3 | 11 | Docs | Tunables reference + initial CHANGELOG.md | TODO | Documentation debt reduction; supports users |
+| 4 | 13 | Refactor | Split into modular libs (`lib_*`) once stable | LATER | Defer until feature churn settles |
+| 5 | 16 | Cleanup | Remove legacy historical comments | LATER | Cosmetic; safe last |
 
 ## Notes on Backlog Ordering
 
