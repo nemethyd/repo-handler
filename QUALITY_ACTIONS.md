@@ -9,7 +9,7 @@ Last Reviewed: 2025-08-16
 | ID | Area | Description | Status | Notes |
 |----|------|-------------|--------|-------|
 | 1 | Structure | Restore readable formatting for `batch_download_packages` and decide on function ordering approach | DONE | Readability restored (no logic change) |
-| 2 | Structure | Decide: full alphabetical ordering vs logical grouping; refactor oversized `process_packages` into smaller functions | TODO | Proposed sub-functions: gather_installed, filter_packages, classify_package, perform_downloads, summarize |
+| 2 | Structure | Decide: full alphabetical ordering vs logical grouping; refactor oversized `process_packages` into smaller functions | DONE | Extracted: gather_installed_packages, filter_and_prepare_packages, precreate_repository_directories, classify_and_queue_packages, perform_batched_downloads, finalize_and_report; placeholders removed |
 | 3 | Logging | Centralize verbosity filtering inside `log()` to reduce repeated `[[ $DEBUG_LEVEL -ge N ]]` checks | TODO | Could add severity numeric mapping |
 | 4 | Fallback Logic | Clarify or implement true shrinking fallback in `batch_download_packages` (`fallback_batch_size` currently never changes) | TODO | Either decrement sizes (e.g. halve) or update comment |
 | 5 | Counters | Guard against negative decrements for stats when skipping manual repos; fix off-by-one for `MAX_PACKAGES` (use `>=`) | TODO | Add `((count<0)) && count=0` safety |
@@ -29,12 +29,14 @@ Last Reviewed: 2025-08-16
 ## Recently Completed
 
 * Point 1: Restored readable multi-line implementation for `batch_download_packages` (previously compressed for alphabetical reorder attempt).
+* Point 2: Broke down `process_packages` into six focused functions (gather + filter + precreate + classify + batched downloads + finalize). Behavioral parity maintained; eliminated obsolete placeholder comments.
 
 ## Next Recommended Steps
 
-1. Implement helper functions (Point 6) before splitting `process_packages` (Point 2) to reduce merge conflict risk.
+1. Implement helper functions (Point 6) to reduce repeated inline logic (repo dir creation, epoch normalization, manual repo checks).
 2. Centralize logging severity filtering (Point 3) to simplify subsequent edits.
 3. Address fallback batch size semantics (Point 4) to align behavior with comments.
+4. Add defensive counter guards (Point 5) now that refactor stabilized.
 
 ## Conventions To Establish
 

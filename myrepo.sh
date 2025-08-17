@@ -14,7 +14,7 @@
 
 # Script version
 
-VERSION="2.3.21"
+VERSION="2.3.22"
 
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="/repo"
@@ -399,8 +399,8 @@ function build_repo_cache() {
         local enabled_repos
         local dnf_cmd
         dnf_cmd=$(get_dnf_cmd)
-        # shellcheck disable=SC2086 # Intentional word splitting for dnf command  
-        enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    enabled_repos=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
         
         while IFS= read -r repo; do
             local cache_file="$cache_dir/${repo}.cache"
@@ -436,6 +436,7 @@ function build_repo_cache() {
     
     [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Using DNF command: $dnf_cmd"
     
+    # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     # shellcheck disable=SC2086 # Intentional word splitting for dnf command
     if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>&1); then
         log "E" "Failed to get installed packages list"
@@ -713,6 +714,190 @@ function check_command_elevation() {
         [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Direct DNF access verified (running without sudo)"
         return 0
     fi
+}
+
+function classify_and_queue_packages() {
+    local filtered_packages="$1"
+    local -n _new_packages_ref="$2"
+    local -n _update_packages_ref="$3"
+    local -n _processed_packages_ref="$4"
+    local -n _new_count_ref="$5"
+    local -n _update_count_ref="$6"
+    local -n _exists_count_ref="$7"
+    local -n _changed_packages_found_ref="$8"
+    local total_packages="$9"
+
+    local start_time
+    start_time=$(date +%s)
+
+    while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+        [[ -z "$package_name" ]] && continue
+
+        # Package limit check
+        if [[ $MAX_PACKAGES -gt 0 && ${_processed_packages_ref} -gt $MAX_PACKAGES ]]; then
+            echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping\e[0m"
+            break
+        fi
+
+        if ! should_process_package "$package_name"; then
+            continue
+        fi
+
+        # Progress reporting
+        if (( ${_processed_packages_ref} > 0 && ${_processed_packages_ref} % PROGRESS_REPORT_INTERVAL == 0 )); then
+            local elapsed=$(($(date +%s) - start_time))
+            local rate_display="" eta_display=""
+            if [[ $elapsed -gt 0 ]]; then
+                local rate_decimal
+                rate_decimal=$(awk "BEGIN {printf \"%.1f\", ${_processed_packages_ref} / $elapsed}")
+                if (( $(awk "BEGIN {print (${_processed_packages_ref} / $elapsed >= 1)}") )); then
+                    rate_display="${rate_decimal} pkg/sec"
+                else
+                    local sec_per_pkg="N/A"
+                    if [[ ${_processed_packages_ref} -gt 0 ]]; then
+                        sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / ${_processed_packages_ref}}")
+                    fi
+                    rate_display="${sec_per_pkg} sec/pkg"
+                fi
+                local remaining=$((total_packages - ${_processed_packages_ref}))
+                if [[ $remaining -gt 0 && ${_processed_packages_ref} -gt 0 ]]; then
+                    local eta_seconds
+                    eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining / (${_processed_packages_ref} / $elapsed)}")
+                    if [[ $eta_seconds -gt $ETA_DISPLAY_THRESHOLD ]]; then
+                        eta_display=" - ETA: $((eta_seconds/60))m"
+                    else
+                        eta_display=" - ETA: ${eta_seconds}s"
+                    fi
+                fi
+            else
+                rate_display="calculating..."
+            fi
+            local progress_percent
+            progress_percent=$(awk "BEGIN {printf \"%.1f\", (${_processed_packages_ref} * 100) / $total_packages}")
+            echo -e "\e[36m⏱️  Progress: ${_processed_packages_ref}/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
+            echo -e "\e[36m   📊 Stats: \e[33m${_new_count_ref} new\e[0m, \e[36m${_update_count_ref} updates\e[0m, \e[32m${_exists_count_ref} existing\e[0m"
+        fi
+
+        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+
+        if [[ "$repo_name" == "System" || "$repo_name" == "@System" || "$repo_name" == "@commandline" ]]; then
+            local original_repo_name="$repo_name"
+            repo_name=$(determine_repo_source "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch")
+            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   $original_repo_name → $repo_name: $package_name\e[0m"
+            if [[ "$repo_name" == "Invalid" ]]; then
+                local discovered_repo
+                discovered_repo=$(determine_repo_from_installed "$package_name" "$package_version" "$package_release" "$package_arch")
+                if [[ -n "$discovered_repo" ]]; then
+                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found via installed package: $package_name ($discovered_repo - will enable for download)\e[0m"
+                    repo_name="$discovered_repo"
+                else
+                    local found_repo=""
+                    for manual_repo in "${MANUAL_REPOS[@]}"; do
+                        if [[ " ${REPOSITORIES[*]} " == *" $manual_repo "* ]]; then
+                            local manual_repo_path
+                            manual_repo_path=$(get_repo_path "$manual_repo")
+                            if [[ -d "$manual_repo_path" ]]; then
+                                local existing_package
+                                existing_package=$(find "$manual_repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null | head -1)
+                                if [[ -n "$existing_package" ]]; then
+                                    found_repo="$manual_repo"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found in manual repo: $package_name (exists in $manual_repo)\e[0m"; break
+                                fi
+                            fi
+                        fi
+                    done
+                    if [[ -n "$found_repo" ]]; then
+                        repo_name="$found_repo"
+                    else
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as unknown)\e[0m"
+                        local package_key="${package_name}-${package_version}-${package_release}.${package_arch}"
+                        unknown_packages["$package_key"]="@System (source unknown)"
+                        unknown_package_reasons["$package_key"]="Package not found in any enabled or manual repository"
+                        continue
+                    fi
+                fi
+            fi
+        else
+            local clean_repo_name="${repo_name#@}"
+            if [[ ${GLOBAL_ENABLED_REPOS_CACHE["$clean_repo_name"]:-0} != 1 ]]; then
+                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)\e[0m"
+            fi
+            repo_name="$clean_repo_name"
+        fi
+
+        if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m   Skipping invalid package: $package_name ($repo_name)\e[0m"; continue; fi
+        if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository name for $package_name: '$repo_name' - skipping"; continue; fi
+        if ! should_process_repo "$repo_name"; then
+            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping package from filtered repository: $package_name ($repo_name)"; continue; fi
+
+        ((_processed_packages_ref++))
+        local repo_path; repo_path=$(get_repo_path "$repo_name")
+        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
+            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Invalid repository path for $package_name: '$repo_path' - skipping"; continue; fi
+        local status; status=$(get_package_status "$package_name" "$package_version" "$package_release" "$package_arch" "$repo_path")
+        case "$status" in
+            EXISTS)
+                ((_exists_count_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_exists_count["$repo_name"]++))
+                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
+                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)"; fi
+                ;;
+            UPDATE)
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                fi
+                ((_update_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]++))
+                echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+                    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                        local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
+                        local temp_copy="${target_file}.new.$$"
+                        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                        else
+                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                        fi
+                    else
+                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
+                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"; ((_update_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]--))
+                        else
+                            _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        fi
+                    fi
+                fi
+                ;;
+            NEW)
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                fi
+                ((_new_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]++))
+                echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
+                    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
+                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"; [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
+                        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                            if sudo cp "$rpm_path" "$repo_path/"; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                        else
+                            if cp "$rpm_path" "$repo_path/"; then [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"; else echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                        fi
+                    else
+                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
+                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"; ((_new_count_ref--)); ((_changed_packages_found_ref--)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]--))
+                        else
+                            _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                        fi
+                    fi
+                fi
+                ;;
+            *)
+                echo -e "\e[31m$(align_repo_name "$repo_name"): [?] Unknown status '$status' for $package_name\e[0m"
+                ;;
+        esac
+    done <<< "$filtered_packages"
+    return 0
 }
 
 # Clean up old/stale cache artifacts in the shared cache directory
@@ -1367,6 +1552,104 @@ function draw_table_row_flex() {
     printf "║\n"
 }
 
+function filter_and_prepare_packages() {
+    local input_packages="$1"  # multi-line string
+    if [[ -z "$input_packages" ]]; then
+        echo ""; return 0
+    fi
+    local total_packages
+    total_packages=$(printf '%s\n' "$input_packages" | wc -l)
+    local filter_start_time
+    filter_start_time=$(date +%s)
+    local temp_raw temp_filtered temp_sorted temp_deduped
+    temp_raw=$(mktemp); temp_filtered=$(mktemp); temp_sorted=$(mktemp); temp_deduped=$(mktemp)
+    printf '%s\n' "$input_packages" > "$temp_raw"
+    local invalid_skipped=0 filtered_count=0 duplicates_removed=0
+    while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+        if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" || -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
+            ((invalid_skipped++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Skipped invalid repo: $package_name ($repo_name)"; continue; fi
+        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+        echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_filtered"
+        ((filtered_count++))
+    done < "$temp_raw"
+    sort -t'|' -k6,6 -k1,1 -k3,3V "$temp_filtered" > "$temp_sorted"
+    local previous_line=""
+    while IFS= read -r line; do
+        if [[ "$line" != "$previous_line" ]]; then echo "$line" >> "$temp_deduped"; previous_line="$line"; else ((duplicates_removed++)); [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Removed duplicate: $line"; fi
+    done < "$temp_sorted"
+    local filtered_packages
+    if [[ -n "$NAME_FILTER" ]]; then
+        local temp_name_filtered; temp_name_filtered=$(mktemp); local name_filtered_count=0
+        while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
+            if [[ "$package_name" =~ $NAME_FILTER ]]; then echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_name_filtered"; ((name_filtered_count++)); fi
+        done < "$temp_deduped"
+        filtered_packages=$(cat "$temp_name_filtered"); rm -f "$temp_name_filtered"; log "I" "📝 Applied name filter '$NAME_FILTER': $name_filtered_count packages match"
+    else
+        filtered_packages=$(cat "$temp_deduped")
+    fi
+    rm -f "$temp_raw" "$temp_filtered" "$temp_sorted" "$temp_deduped"
+    local final_count
+    final_count=$(printf '%s\n' "$filtered_packages" | wc -l)
+    local filter_end_time
+    filter_end_time=$(date +%s)
+    local filter_duration=$((filter_end_time - filter_start_time))
+    local packages_saved=$((total_packages - final_count))
+    log "I" "✅ Smart filtering completed in ${filter_duration}s:";
+    [[ $invalid_skipped -gt 0 ]] && log "I" "   📋 Skipped $invalid_skipped packages with invalid repositories"
+    [[ $duplicates_removed -gt 0 ]] && log "I" "   🔄 Removed $duplicates_removed duplicate packages"
+    if [[ $packages_saved -gt 0 ]]; then local efficiency_gain; efficiency_gain=$(awk "BEGIN {printf \"%.1f\", ($packages_saved * 100.0) / $total_packages}"); log "I" "   ⚡ Processing efficiency improved by ${efficiency_gain}% ($packages_saved fewer packages to process)"; fi
+    log "I" "📦 Processing $final_count optimized packages"
+    printf '%s\n' "$filtered_packages"
+    return 0
+}
+
+function finalize_and_report() {
+    local start_time="$1"
+    local processed_packages="$2"
+    local new_count="$3"
+    local update_count="$4"
+    local exists_count="$5"
+    local elapsed=$(($(date +%s) - start_time))
+    local rate_display="N/A"
+    if [[ $elapsed -gt 0 ]]; then
+        local rate_decimal
+        rate_decimal=$(awk "BEGIN {printf \"%.1f\", $processed_packages / $elapsed}")
+        if (( $(awk "BEGIN {print ($processed_packages / $elapsed >= 1)}") )); then
+            rate_display="${rate_decimal} pkg/sec"
+        else
+            local sec_per_pkg
+            if [[ $processed_packages -gt 0 ]]; then
+                sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
+            else
+                sec_per_pkg="N/A"
+            fi
+            rate_display="${sec_per_pkg} sec/pkg"
+        fi
+    fi
+    echo
+    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
+    echo -e "\e[32m✓ Processing completed in ${elapsed}s\e[0m"
+    echo -e "\e[36m  Processed: $processed_packages packages at $rate_display\e[0m"
+    echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
+    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
+    fi
+    generate_summary_table
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        cleanup_uninstalled_packages
+    else
+        log "I" "Cleanup of uninstalled packages disabled"
+    fi
+    if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
+        log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
+    else
+        update_all_repository_metadata
+        update_manual_repository_metadata
+    fi
+    return 0
+}
+
 # Perform full rebuild by removing all packages in local repositories
 function full_rebuild_repos() {
     if [[ $FULL_REBUILD -ne 1 ]]; then
@@ -1414,6 +1697,80 @@ function full_rebuild_repos() {
     done
     
     log "I" "Full rebuild preparation completed"
+}
+
+function gather_installed_packages() {
+    # Populate GLOBAL_ENABLED_REPOS_CACHE (if not already)
+    if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 0 ]]; then
+        log "I" "📋 Building enabled repositories cache for performance..."
+        local dnf_cmd
+        dnf_cmd=$(get_dnf_cmd)
+        local enabled_repos_list
+        # shellcheck disable=SC2086
+        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
+            log "E" "Failed to get enabled repositories list for caching"
+            return 1
+        fi
+        local cached_repo_count=0
+        while IFS= read -r repo; do
+            GLOBAL_ENABLED_REPOS_CACHE["$repo"]=1
+            ((cached_repo_count++))
+        done <<< "$enabled_repos_list"
+        GLOBAL_ENABLED_REPOS_CACHE_POPULATED=1
+        log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
+    fi
+
+    # Run repoquery with timeout & optional NAME_FILTER pre-filter
+    local dnf_cmd
+    dnf_cmd=$(get_dnf_cmd)
+    # NOTE: ShellCheck (SC2178/SC2128) occasionally misclassifies this scalar as an array if
+    # similar variable names were previously used as arrays in other contexts. We explicitly
+    # treat it as a simple string holding the multi-line repoquery output.
+    # shellcheck disable=SC2178 # We are intentionally using a scalar string, not an array
+    # shellcheck disable=SC2128 # Echoing the scalar is correct; it's not an array
+    local repoquery_result=""
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF command will be: ${dnf_cmd}"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s"
+    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Name filter: '${NAME_FILTER}'"
+
+    local dnf_exit_code=0
+    if [[ -n "$NAME_FILTER" ]]; then
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query with name filter..."
+        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
+            if [[ "$name" =~ $NAME_FILTER ]]; then
+                echo "$name|$rest"
+            fi
+        done)
+        dnf_exit_code=$?
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query with filter completed with exit code: $dnf_exit_code"
+    else
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query without name filter..."
+        # shellcheck disable=SC2086
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+        dnf_exit_code=$?
+        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query without filter completed with exit code: $dnf_exit_code"
+    fi
+
+    if [[ $DEBUG_LEVEL -ge 3 ]]; then
+        # Count lines (packages) instead of character length for more meaningful debug output
+        local repoquery_line_count
+        repoquery_line_count=$(printf '%s\n' "$repoquery_result" | wc -l | tr -d ' ')
+        log "D" "Package list lines: ${repoquery_line_count}"
+        log "D" "First few lines of package list:"
+        printf '%s\n' "$repoquery_result" | head -3 >&2
+    fi
+
+    if [[ -z "$repoquery_result" ]]; then
+        log "E" "Failed to get installed packages list (exit code: ${dnf_exit_code:-unknown})"
+        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Trying manual DNF test..."
+        [[ $DEBUG_LEVEL -ge 2 ]] && ${dnf_cmd} --version >&2 || true
+        return 1
+    fi
+
+    printf '%s\n' "$repoquery_result"
+    return 0
 }
 
 # Generate the beautiful summary table
@@ -1986,217 +2343,74 @@ function parse_args() {
     done
 }
 
-# Simple package processing with efficient batch downloading
-function process_packages() {
-    local total_packages=0
-    local processed_packages=0
-    local new_count=0
-    local update_count=0
-    local exists_count=0
-    local changed_packages_found=0  # Combined counter for new + updated packages
-    
-    # Arrays to collect packages for batch downloading
-    local new_packages=()
-    local update_packages=()
-    # Removed unused not_found_packages (was never populated)
-    
-    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
-    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    
-    # PERFORMANCE OPTIMIZATION: Build global enabled repositories cache once
-    if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 0 ]]; then
-        log "I" "📋 Building enabled repositories cache for performance..."
-        local dnf_cmd
-        dnf_cmd=$(get_dnf_cmd)
-        local enabled_repos_list
-        # shellcheck disable=SC2086
-        if ! enabled_repos_list=$(${dnf_cmd} repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$"); then
-            log "E" "Failed to get enabled repositories list for caching"
-            return 1
-        fi
-        local cached_repo_count=0
-        while IFS= read -r repo; do
-            GLOBAL_ENABLED_REPOS_CACHE["$repo"]=1
-            ((cached_repo_count++))
-        done <<< "$enabled_repos_list"
-        GLOBAL_ENABLED_REPOS_CACHE_POPULATED=1
-        log "I" "✓ Cached $cached_repo_count enabled repositories for fast lookup"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Enabled repos: $(echo "$enabled_repos_list" | tr '\n' ' ')"
-    fi
+function perform_batched_downloads() {
+    local new_array_name="$1"
+    local update_array_name="$2"
+    local start_time="$3"  # optional start time for future use
 
-    # Show legend for status markers
-    echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
-    echo
+    # Helper to print array elements by name safely
+    _print_array_by_name() { eval 'printf "%s\\n" "${'"$1"'[@]}"'; }
 
-    # Get installed packages using dnf (like original script) - this includes repo info!
-    echo -e "\e[33m📦 Getting list of installed packages with repository information...\e[0m"
-    local package_list
-    local dnf_cmd
-    dnf_cmd=$(get_dnf_cmd)
-    
-    # Use the original script's efficient method with timeout
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF command will be: ${dnf_cmd}"
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query timeout: ${DNF_QUERY_TIMEOUT}s"
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Name filter: '${NAME_FILTER}'"
-    
-    if [[ -n "$NAME_FILTER" ]]; then
-        # Get all packages first, then filter by package name (first field before |)
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query with name filter..."
-        # shellcheck disable=SC2086 # Intentional word splitting for dnf command
-        package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
-            if [[ "$name" =~ $NAME_FILTER ]]; then
-                echo "$name|$rest"
-            fi
-        done)
-        local dnf_exit_code=$?
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query with filter completed with exit code: $dnf_exit_code"
-    else
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Running DNF query without name filter..."
-        # shellcheck disable=SC2086
-        package_list=$(timeout "$DNF_QUERY_TIMEOUT" ${dnf_cmd} repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
-        local dnf_exit_code=$?
-        [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "DNF query without filter completed with exit code: $dnf_exit_code"
-    fi
-    
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Package list length: ${#package_list}"
-    [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "First few lines of package list:"
-    [[ $DEBUG_LEVEL -ge 3 ]] && echo "$package_list" | head -3 >&2
-    
-    if [[ -z "$package_list" ]]; then
-        log "E" "Failed to get installed packages list (exit code: ${dnf_exit_code:-unknown})"
-        [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Trying manual DNF test..."
-        [[ $DEBUG_LEVEL -ge 2 ]] && ${dnf_cmd} --version >&2
-        return 1
-    fi
-    
-    # Count total packages
-    total_packages=$(echo "$package_list" | wc -l)
-    echo -e "\e[32m✓ Found $total_packages installed packages\e[0m"
-    echo
-    
-    # PERFORMANCE OPTIMIZATION 4: Smart Package Filtering and Deduplication
-    log "I" "🔍 Applying smart package filtering and deduplication..."
-    local filter_start_time
-    filter_start_time=$(date +%s)
-    
-    # Pre-filter the package list for optimal processing
-    local filtered_packages
-    local duplicates_removed=0
-    local invalid_skipped=0
-    local filtered_count=0
-    
-    # Create temporary files for processing
-    local temp_raw
-    local temp_filtered
-    local temp_sorted
-    local temp_deduped
-    temp_raw=$(mktemp)
-    temp_filtered=$(mktemp)
-    temp_sorted=$(mktemp)
-    temp_deduped=$(mktemp)
-    
-    # Write package list to temp file for processing
-    echo "$package_list" > "$temp_raw"
-    
-    # Step 1: Remove packages with invalid/problematic repository names
-    while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
-        # Skip invalid repository names early
-        if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" || -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
-            ((invalid_skipped++))
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Skipped invalid repo: $package_name ($repo_name)"
-            continue
-        fi
-        
-        # Normalize epoch for consistent processing
-        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
-        
-        echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_filtered"
-        ((filtered_count++))
-    done < "$temp_raw"
-    
-    # Step 2: Sort packages for optimal processing order (by repo, then name, then version)
-    # This groups packages by repository for better batch processing efficiency
-    sort -t'|' -k6,6 -k1,1 -k3,3V "$temp_filtered" > "$temp_sorted"
-    
-    # Step 3: Remove exact duplicates (same package-version-arch combination)
-    local previous_line=""
-    
-    while IFS= read -r line; do
-        if [[ "$line" != "$previous_line" ]]; then
-            echo "$line" >> "$temp_deduped"
-            previous_line="$line"
+    # NEW packages
+    local total_new_packages
+    total_new_packages=$(eval "echo \${#${new_array_name}[@]}")
+    if [[ $total_new_packages -gt 0 && $DRY_RUN -eq 0 ]]; then
+        if [[ $total_new_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
+            log "I" "📥 Batch downloading $total_new_packages new packages..."
+            log "I" "🔄 Large download detected - enhanced progress reporting will activate during processing"
+            log "I" "📊 Expect periodic progress updates every ${PROGRESS_UPDATE_INTERVAL}s during large batch operations"
         else
-            ((duplicates_removed++))
-            [[ $DEBUG_LEVEL -ge 3 ]] && log "D" "Removed duplicate: $line"
+            log "I" "📊📥 Batch downloading $total_new_packages new packages..."
         fi
-    done < "$temp_sorted"
-    
-    # Step 4: Apply name filter if specified (do this after deduplication for efficiency)
-    if [[ -n "$NAME_FILTER" ]]; then
-        local temp_name_filtered
-        temp_name_filtered=$(mktemp)
-        local name_filtered_count=0
-        
-        while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
-            if [[ "$package_name" =~ $NAME_FILTER ]]; then
-                echo "${package_name}|${epoch}|${package_version}|${package_release}|${package_arch}|${repo_name}" >> "$temp_name_filtered"
-                ((name_filtered_count++))
-            fi
-        done < "$temp_deduped"
-        
-        # Use name-filtered list
-        filtered_packages=$(cat "$temp_name_filtered")
-        rm -f "$temp_name_filtered"
-        log "I" "📝 Applied name filter '$NAME_FILTER': $name_filtered_count packages match"
-    else
-        # Use deduplicated list
-        filtered_packages=$(cat "$temp_deduped")
+        local batch_start_time batch_end_time batch_duration
+        batch_start_time=$(date +%s)
+        local new_list
+        new_list=$(_print_array_by_name "$new_array_name")
+        batch_download_packages <<< "$new_list"
+        batch_end_time=$(date +%s)
+        batch_duration=$((batch_end_time - batch_start_time))
+        if [[ $total_new_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
+            log "I" "✅ New packages download completed in ${batch_duration}s ($total_new_packages packages processed)"
+        else
+            log "I" "✅ New packages download completed in ${batch_duration}s"
+        fi
     fi
-    
-    # Clean up temporary files
-    rm -f "$temp_raw" "$temp_filtered" "$temp_sorted" "$temp_deduped"
-    
-    # Update counts and show optimization results
-    local final_count
-    final_count=$(echo "$filtered_packages" | wc -l)
-    local filter_end_time
-    local filter_duration
-    filter_end_time=$(date +%s)
-    filter_duration=$((filter_end_time - filter_start_time))
-    
-    local packages_saved=$((total_packages - final_count))
-    
-    log "I" "✅ Smart filtering completed in ${filter_duration}s:"
-    [[ $invalid_skipped -gt 0 ]] && log "I" "   📋 Skipped $invalid_skipped packages with invalid repositories"
-    [[ $duplicates_removed -gt 0 ]] && log "I" "   🔄 Removed $duplicates_removed duplicate packages"
-    if [[ $packages_saved -gt 0 ]]; then
-        local efficiency_gain
-        efficiency_gain=$(awk "BEGIN {printf \"%.1f\", ($packages_saved * 100.0) / $total_packages}")
-        log "I" "   ⚡ Processing efficiency improved by ${efficiency_gain}% ($packages_saved fewer packages to process)"
-    fi
-    log "I" "📦 Processing $final_count optimized packages"
 
-    # Update total packages count for accurate progress reporting
-    total_packages=$final_count
-    
-    # PERFORMANCE OPTIMIZATION 2: Pre-create all repository directories upfront
-    log "I" "📁 Pre-creating repository directories for performance..."
+    # UPDATE packages
+    local total_update_packages
+    total_update_packages=$(eval "echo \${#${update_array_name}[@]}")
+    if [[ $total_update_packages -gt 0 && $DRY_RUN -eq 0 ]]; then
+        if [[ $total_update_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
+            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
+            log "I" "🔄 Large update batch detected - enhanced progress reporting active"
+        else
+            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
+        fi
+        local batch_start_time batch_end_time batch_duration
+        batch_start_time=$(date +%s)
+        local update_list
+        update_list=$(_print_array_by_name "$update_array_name")
+        batch_download_packages <<< "$update_list"
+        batch_end_time=$(date +%s)
+        batch_duration=$((batch_end_time - batch_start_time))
+        if [[ $total_update_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
+            log "I" "✅ Updated packages download completed in ${batch_duration}s ($total_update_packages packages processed)"
+        else
+            log "I" "✅ Updated packages download completed in ${batch_duration}s"
+        fi
+    fi
+    return 0
+}
+
+function precreate_repository_directories() {
+    local filtered_packages="$1"
     local created_dirs=0
     local unique_repos
     unique_repos=$(printf '%s\n' "$filtered_packages" | cut -d'|' -f6 | sort -u | grep -v -E '^(@System|System|@commandline|Invalid|getPackage)$')
-    
     while IFS= read -r repo_name; do
         [[ -z "$repo_name" ]] && continue
-        local repo_path
-        repo_path=$(get_repo_path "$repo_name")
-        
-        # Skip invalid repository paths
-        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            continue
-        fi
-        
-        # Create directory if it doesn't exist
+        local repo_path; repo_path=$(get_repo_path "$repo_name")
+        [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]] && continue
         if [[ ! -d "$repo_path" ]]; then
             if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                 if sudo mkdir -p "$repo_path" 2>/dev/null; then
@@ -2205,466 +2419,64 @@ function process_packages() {
                     ((created_dirs++))
                 fi
             else
-                if mkdir -p "$repo_path" 2>/dev/null; then
-                    ((created_dirs++))
-                fi
+                if mkdir -p "$repo_path" 2>/dev/null; then ((created_dirs++)); fi
             fi
         fi
     done <<< "$unique_repos"
-    
     log "I" "✓ Pre-created $created_dirs repository directories"
+    return 0
+}
+
+# Simple package processing with efficient batch downloading
+function process_packages() {
+    local total_packages=0
+    local processed_packages=0
+    local new_count=0
+    local update_count=0
+    local exists_count=0
+    local changed_packages_found=0  # Combined counter for new + updated packages (updated via nameref in classify_and_queue_packages)
+    export changed_packages_found  # Mark as exported so shell tools consider it used
+    
+    # Arrays to collect packages for batch downloading
+    local new_packages=()
+    local update_packages=()
+    # shellcheck disable=SC2178,SC2128  # Intentionally referencing arrays (may be empty) so analyzer marks them used
+    : "${new_packages[@]:-}" "${update_packages[@]:-}"
+    # Removed unused not_found_packages (was never populated)
+    
+    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
+    echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
+    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
+    
+    # Show legend for status markers
+    echo -e "\e[36m📋 Package Status Legend: \e[33m[N] New\e[0m, \e[36m[U] Update\e[0m, \e[32m[E] Exists\e[0m"
+    echo
+    # Get installed packages using repoquery (includes repo info)
+    echo -e "\e[33m📦 Getting list of installed packages with repository information...\e[0m"
+    local package_list
+    if ! package_list=$(gather_installed_packages); then
+        log "E" "Failed to gather installed packages"
+        return 1
+    fi
+    
+    # Count total packages and run filtering
+    total_packages=$(printf '%s\n' "$package_list" | wc -l)
+    echo -e "\e[32m✓ Found $total_packages installed packages\e[0m"; echo
+    local filtered_packages
+    filtered_packages=$(filter_and_prepare_packages "$package_list") || return 1
+    total_packages=$(printf '%s\n' "$filtered_packages" | wc -l)
+    precreate_repository_directories "$filtered_packages"
 
     # Start processing
     local start_time
     start_time=$(date +%s)
     
-    while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
-        # Skip empty lines or lines with missing package_name
-        if [[ -z "$package_name" ]]; then
-            continue
-        fi
-
-        # Skip if we've hit the package limit
-        if [[ $MAX_PACKAGES -gt 0 && $processed_packages -gt $MAX_PACKAGES ]]; then
-            echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping\e[0m"
-            break
-        fi
-
-        # Apply name filter (already filtered by dnf query, but double-check)
-        if ! should_process_package "$package_name"; then
-            continue
-        fi
-
-        # NOTE: Repository filtering moved to AFTER repository identification
-        # This allows @System packages to be identified first before filtering
-
-        # Don't increment processed_packages yet - do it after repository filtering
-        
-        # Progress reporting every N packages (OPTIMIZATION 3: Improved progress with ETA)
-        if (( processed_packages > 0 && processed_packages % PROGRESS_REPORT_INTERVAL == 0 )); then
-            local elapsed=$(($(date +%s) - start_time))
-            local rate_display=""
-            local eta_display=""
-            
-            if [[ $elapsed -gt 0 ]]; then
-                # Use awk for decimal precision in rate calculation
-                local rate_decimal
-                rate_decimal=$(awk "BEGIN {printf \"%.1f\", $processed_packages / $elapsed}")
-                if (( $(awk "BEGIN {print ($processed_packages / $elapsed >= 1)}") )); then
-                    rate_display="${rate_decimal} pkg/sec"
-                else
-                    # Show seconds per package when rate is less than 1 pkg/sec
-                    local sec_per_pkg
-                    if [[ $processed_packages -gt 0 ]]; then
-                        sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
-                    else
-                        sec_per_pkg="N/A"
-                    fi
-                    rate_display="${sec_per_pkg} sec/pkg"
-                fi
-                
-                # Calculate ETA for remaining packages
-                local remaining_packages=$((total_packages - processed_packages))
-                if [[ $remaining_packages -gt 0 && $processed_packages -gt 0 ]]; then
-                    local eta_seconds
-                    eta_seconds=$(awk "BEGIN {printf \"%.0f\", $remaining_packages / ($processed_packages / $elapsed)}")
-                    if [[ $eta_seconds -gt $ETA_DISPLAY_THRESHOLD ]]; then
-                        local eta_minutes=$((eta_seconds / 60))
-                        eta_display=" - ETA: ${eta_minutes}m"
-                    else
-                        eta_display=" - ETA: ${eta_seconds}s"
-                    fi
-                fi
-            else
-                rate_display="calculating..."
-            fi
-            
-            # Show processing statistics
-            local progress_percent
-            progress_percent=$(awk "BEGIN {printf \"%.1f\", ($processed_packages * 100) / $total_packages}")
-            echo -e "\e[36m⏱️  Progress: $processed_packages/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
-            echo -e "\e[36m   📊 Stats: \e[33m$new_count new\e[0m, \e[36m$update_count updates\e[0m, \e[32m$exists_count existing\e[0m"
-        fi
-        
-        # Normalize epoch
-        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
-        
-        # Determine actual repository for @System packages (like original script)
-        if [[ "$repo_name" == "System" || "$repo_name" == "@System" || "$repo_name" == "@commandline" ]]; then
-            local original_repo_name="$repo_name"
-            repo_name=$(determine_repo_source "$package_name" "$epoch" "$package_version" "$package_release" "$package_arch")
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   $original_repo_name → $repo_name: $package_name\e[0m"
-            
-            # If package not found in enabled repos, try to determine from installed package
-            if [[ "$repo_name" == "Invalid" ]]; then
-                # First, try to determine repo from installed package info
-                local discovered_repo
-                discovered_repo=$(determine_repo_from_installed "$package_name" "$package_version" "$package_release" "$package_arch")
-                
-                if [[ -n "$discovered_repo" ]]; then
-                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found via installed package: $package_name ($discovered_repo - will enable for download)\e[0m"
-                    repo_name="$discovered_repo"
-                else
-                    # Only check manual repositories for @System packages - no guessing!
-                    local found_repo=""
-                    for manual_repo in "${MANUAL_REPOS[@]}"; do
-                        if [[ " ${REPOSITORIES[*]} " == *" $manual_repo "* ]]; then
-                            # Check if this package might exist in this manual repo by looking at the filesystem
-                            local manual_repo_path
-                            manual_repo_path=$(get_repo_path "$manual_repo")
-                            if [[ -d "$manual_repo_path" ]]; then
-                                # Look for any version of this package in the manual repo
-                                local existing_package
-                                existing_package=$(find "$manual_repo_path" -maxdepth 1 -name "${package_name}-*-*.${package_arch}.rpm" -type f 2>/dev/null | head -1)
-                                if [[ -n "$existing_package" ]]; then
-                                    found_repo="$manual_repo"
-                                    [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Found in manual repo: $package_name (exists in $manual_repo)\e[0m"
-                                    break
-                                fi
-                            fi
-                        fi
-                    done
-                    
-                    if [[ -n "$found_repo" ]]; then
-                        repo_name="$found_repo"
-                    else
-                        # No manual repo contains this package - record as unknown for final report
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping unknown: $package_name (not found in any repository - will be reported as unknown)\e[0m"
-                        local package_key="${package_name}-${package_version}-${package_release}.${package_arch}"
-                        unknown_packages["$package_key"]="@System (source unknown)"
-                        unknown_package_reasons["$package_key"]="Package not found in any enabled or manual repository"
-                        continue
-                    fi
-                fi
-            fi
-        else
-            # For non-@System repositories, check if repository is enabled
-            local clean_repo_name="${repo_name#@}"  # Remove @ prefix if present
-            
-            # Use populated global enabled repos cache; default to 0 (treated as disabled) if key absent
-            if [[ ${GLOBAL_ENABLED_REPOS_CACHE["$clean_repo_name"]:-0} != 1 ]]; then
-                [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[93m   Processing disabled repo: $package_name ($clean_repo_name - will enable temporarily for downloads)\e[0m"
-                # Don't skip - we'll handle disabled repos by temporarily enabling them during downloads
-            fi
-            
-            repo_name="$clean_repo_name"
-        fi
-        
-        # Skip invalid packages (like original script)
-        if [[ "$repo_name" == "@commandline" || "$repo_name" == "Invalid" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[90m   Skipping invalid package: $package_name ($repo_name)\e[0m"
-            continue
-        fi
-        
-        # Additional validation to prevent empty repo names that could cause getPackage under LOCAL_REPO_PATH
-        if [[ -z "$repo_name" || "$repo_name" == "getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "W" "Invalid repository name detected for package $package_name: '$repo_name' - skipping"
-            continue
-        fi
-        
-        # Apply repository filters AFTER repository identification is complete
-        if ! should_process_repo "$repo_name"; then
-            [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Skipping package from filtered repository: $package_name ($repo_name)"
-            continue
-        fi
-        
-        # Only increment processed_packages AFTER all filtering is done
-        ((processed_packages++))
-        
-        # Ensure repository directory exists for each package
-        local repo_path
-        repo_path=$(get_repo_path "$repo_name")
-        
-        # Additional safety check - ensure repo_path is valid
-        if [[ -z "$repo_path" || "$repo_path" == "$LOCAL_REPO_PATH/getPackage" ]]; then
-            [[ $DEBUG_LEVEL -ge 1 ]] && log "W" "Invalid repository path generated for $package_name: '$repo_path' - skipping"
-            continue
-        fi
-        
-        # Directory is already pre-created - no need to create it here
-        
-        # Get package status using simple, reliable method
-        local status
-        status=$(get_package_status "$package_name" "$package_version" "$package_release" "$package_arch" "$repo_path")
-        
-        # Handle based on status with colorful, aligned reporting
-        case "$status" in
-            "EXISTS")
-                ((exists_count++))
-                # Validate repo_name before using as array key
-                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
-                    ((stats_exists_count["$repo_name"]++))
-                fi
-                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch\e[0m"
-                # Test hook: allow selective metadata unit test to force a repo into CHANGED_REPOS during DRY_RUN
-                if [[ $DRY_RUN -eq 1 && -n "${ENABLE_TEST_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then
-                    CHANGED_REPOS["$repo_name"]=1
-                    CHANGED_REPOS_MARKED_FOR_TEST=1
-                    [[ $DEBUG_LEVEL -ge 2 ]] && log "D" "Test hook: Marked $repo_name as changed (ENABLE_TEST_SELECTIVE)"
-                fi
-                ;;
-            "UPDATE")
-                # Check if we've hit the MAX_CHANGED_PACKAGES limit BEFORE processing
-                if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then
-                        # 0 means no changed packages allowed
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"
-                        continue
-                    elif [[ $MAX_CHANGED_PACKAGES -gt 0 && $changed_packages_found -ge $MAX_CHANGED_PACKAGES ]]; then
-                        # Positive number means specific limit reached
-                        echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"
-                        break
-                    fi
-                    # -1 or any negative number means unlimited (no limit check needed)
-                fi
-                
-                ((update_count++))
-                ((changed_packages_found++))  # Count updates toward changed packages limit
-                # Validate repo_name before using as array key
-                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
-                    ((stats_update_count["$repo_name"]++))
-                fi
-                echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"
-                # Mark repo as changed (will refine after successful download if needed)
-                CHANGED_REPOS["$repo_name"]=1
-                
-                if [[ $DRY_RUN -eq 0 ]]; then
-                    # Try to find local RPM first
-                    local rpm_path
-                    rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
-                    
-                    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-                        # Found local copy of the updated package - use it instead of downloading
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM for update: $(basename "$rpm_path")\e[0m"
-                        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
-                        
-                        # Safe replacement: copy new file first, then remove old if different
-                        local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
-                        local temp_copy="${target_file}.new.$$"
-                        # Copy the local RPM to a temp file then move atomically
-                        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then
-                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
-                            else
-                                echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                            fi
-                        else
-                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then
-                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Updated from local source\e[0m"
-                            else
-                                echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                            fi
-                        fi
-                    else
-                        # No local copy found - check if this is a manual repository
-                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
-                            # Skip this package entirely - don't count it in stats and don't add to download queues
-                            ((update_count--))  # Subtract from count since we already incremented it
-                            ((changed_packages_found--))  # Also subtract from changed packages count
-                            # Remove from stats if we added it
-                            if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
-                                ((stats_update_count["$repo_name"]--))
-                            fi
-                        else
-                            # Add to update batch for download from regular repositories
-                            update_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                        fi
-                    fi
-                fi
-                ;;
-            "NEW")
-                # Check if we've hit the MAX_CHANGED_PACKAGES limit BEFORE processing
-                if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then
-                        # 0 means no changed packages allowed
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name\e[0m"
-                        continue
-                    elif [[ $MAX_CHANGED_PACKAGES -gt 0 && $changed_packages_found -ge $MAX_CHANGED_PACKAGES ]]; then
-                        # Positive number means specific limit reached
-                        echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"
-                        break
-                    fi
-                    # -1 or any negative number means unlimited (no limit check needed)
-                fi
-                
-                # Process the new package
-                ((new_count++))
-                ((changed_packages_found++))  # Count new packages toward changed packages limit
-                # Validate repo_name before using as array key
-                if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
-                    ((stats_new_count["$repo_name"]++))
-                fi
-                echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"
-                # Mark repo as changed (will refine after successful download if needed)
-                CHANGED_REPOS["$repo_name"]=1
-                
-                if [[ $DRY_RUN -eq 0 ]]; then
-                    
-                    # Try to find local RPM first
-                    local rpm_path
-                    rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
-                    
-                    if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
-                        # Found local copy - use it instead of downloading
-                        [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[36m   📋 Using local RPM: $(basename "$rpm_path")\e[0m"
-                        [[ $DEBUG_LEVEL -ge 2 ]] && echo -e "\e[37m   Source: $rpm_path\e[0m"
-                        
-                        # Copy the local RPM to the repository
-                        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$repo_path/"; then
-                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"
-                            else
-                                echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                            fi
-                        else
-                            if cp "$rpm_path" "$repo_path/"; then
-                                [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[32m   ✓ Copied from local source\e[0m"
-                            else
-                                echo -e "\e[31m   ✗ Failed to copy local RPM, will try download\e[0m"
-                                new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                            fi
-                        fi
-                    else
-                        # No local copy found - check if this is a manual repository
-                        if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
-                            [[ $DEBUG_LEVEL -ge 1 ]] && echo -e "\e[90m   ✗ Package not found locally and $repo_name is a manual repository (no download attempted)\e[0m"
-                            # Skip this package entirely - don't count it in stats and don't add to download queues
-                            ((new_count--))  # Subtract from count since we already incremented it
-                            ((changed_packages_found--))  # Also subtract from changed packages count
-                            # Remove from stats if we added it
-                            if [[ -n "$repo_name" && "$repo_name" != "getPackage" ]]; then
-                                ((stats_new_count["$repo_name"]--))
-                            fi
-                        else
-                            # Add to new batch for download from regular repositories
-                            new_packages+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
-                        fi
-                    fi
-                fi
-                ;;
-            *)
-                echo -e "\e[31m$(align_repo_name "$repo_name"): [?] Unknown status '$status' for $package_name\e[0m"
-                ;;
-        esac
-        
-    done <<< "$filtered_packages"
+    classify_and_queue_packages "$filtered_packages" new_packages update_packages processed_packages new_count update_count exists_count changed_packages_found "$total_packages"
+    # Reference variables to ensure ShellCheck recognizes usage post-function
+    if [[ $DEBUG_LEVEL -ge 3 ]]; then echo "Debug: processed=$processed_packages new=$new_count update=$update_count exists=$exists_count changed=$changed_packages_found"; fi
     
-    # Second pass: batch download all NEW packages
-    if [[ ${#new_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        local total_new_packages=${#new_packages[@]}
-        
-        # Enhanced progress reporting for large downloads
-        if [[ $total_new_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
-            log "I" "📥 Batch downloading $total_new_packages new packages..."
-            log "I" "🔄 Large download detected - enhanced progress reporting will activate during processing"
-            log "I" "📊 Expect periodic progress updates every ${PROGRESS_UPDATE_INTERVAL}s during large batch operations"
-        else
-            log "I" "📊📥 Batch downloading $total_new_packages new packages..."
-        fi
-        
-        local batch_start_time
-        local batch_end_time
-        local batch_duration
-        batch_start_time=$(date +%s)
-        # Use here-document to avoid subshell issue with pipeline
-        batch_download_packages <<< "$(printf '%s\n' "${new_packages[@]}")"
-        batch_end_time=$(date +%s)
-        batch_duration=$((batch_end_time - batch_start_time))
-        
-        if [[ $total_new_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
-            log "I" "✅ New packages download completed in ${batch_duration}s ($total_new_packages packages processed)"
-        else
-            log "I" "✅ New packages download completed in ${batch_duration}s"
-        fi
-    fi
-    
-    # Third pass: batch download all UPDATE packages
-    if [[ ${#update_packages[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
-        local total_update_packages=${#update_packages[@]}
-        
-        # Enhanced progress reporting for large downloads
-        if [[ $total_update_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
-            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
-            log "I" "🔄 Large update batch detected - enhanced progress reporting active"
-        else
-            log "I" "🔄 Batch downloading $total_update_packages updated packages..."
-        fi
-        
-        local batch_start_time
-        local batch_end_time
-        local batch_duration
-        batch_start_time=$(date +%s)
-        # Use here-document to avoid subshell issue with pipeline
-        batch_download_packages <<< "$(printf '%s\n' "${update_packages[@]}")"
-        batch_end_time=$(date +%s)
-        batch_duration=$((batch_end_time - batch_start_time))
-        
-        if [[ $total_update_packages -gt $PACKAGE_LIST_THRESHOLD ]]; then
-            log "I" "✅ Updated packages download completed in ${batch_duration}s ($total_update_packages packages processed)"
-        else
-            log "I" "✅ Updated packages download completed in ${batch_duration}s"
-        fi
-    fi
-    
-    # Final statistics with colors
-    local elapsed=$(($(date +%s) - start_time))
-    local rate_display=""
-    if [[ $elapsed -gt 0 ]]; then
-        # Use awk for decimal precision in rate calculation
-        local rate_decimal
-        rate_decimal=$(awk "BEGIN {printf \"%.1f\", $processed_packages / $elapsed}")
-        if (( $(awk "BEGIN {print ($processed_packages / $elapsed >= 1)}") )); then
-            rate_display="${rate_decimal} pkg/sec"
-        else
-            # Show seconds per package when rate is less than 1 pkg/sec
-            local sec_per_pkg
-            if [[ $processed_packages -gt 0 ]]; then
-                sec_per_pkg=$(awk "BEGIN {printf \"%.1f\", $elapsed / $processed_packages}")
-            else
-                sec_per_pkg="N/A"
-            fi
-            rate_display="${sec_per_pkg} sec/pkg"
-        fi
-    else
-        rate_display="N/A"
-    fi
-    
-    echo
-    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    echo -e "\e[32m✓ Processing completed in ${elapsed}s\e[0m"
-    echo -e "\e[36m  Processed: $processed_packages packages at $rate_display\e[0m"
-    echo -e "\e[33m  Results: \e[33m$new_count new [N]\e[0m, \e[36m$update_count updates [U]\e[0m, \e[32m$exists_count existing [E]\e[0m"
-    echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
-    
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
-    fi
-    
-    # Generate the beautiful summary table
-    generate_summary_table
-
-    # (Not-found packages reporting removed)
-    
-    # Clean up uninstalled packages after processing (if enabled)
-    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
-        cleanup_uninstalled_packages
-    else
-        log "I" "Cleanup of uninstalled packages disabled"
-    fi
-    
-    # Update repository metadata for all modified repositories
-    if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
-        log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
-    else
-        update_all_repository_metadata
-        
-        # Update metadata for manual repositories if they have changes
-        update_manual_repository_metadata
-    fi
+    perform_batched_downloads new_packages update_packages "$start_time"
+    finalize_and_report "$start_time" "$processed_packages" "$new_count" "$update_count" "$exists_count"
 }
 
 # Report failed downloads at the end of script execution
