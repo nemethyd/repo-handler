@@ -15,7 +15,7 @@
 
 # Script version
 
-VERSION="2.4.0"
+VERSION="2.4.1"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -1250,7 +1250,8 @@ function classify_and_queue_packages() {
         case "$status" in
             EXISTS)
                 ((_exists_count_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_exists_count["$repo_name"]++))
-                log "I" "$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch" 1
+                # Suppress noisy per-package [E] logs by default; show only when DEBUG_LEVEL >= 2
+                log "D" "$(align_repo_name "$repo_name"): [E] $package_name-$package_version-$package_release.$package_arch" 2
                 if [[ -n ${ENABLE_TEST_SELECTIVE+x} && -z ${MYREPO_TEST_ENABLE_SELECTIVE+x} ]]; then export MYREPO_TEST_ENABLE_SELECTIVE=$ENABLE_TEST_SELECTIVE; fi
                 if [[ $DRY_RUN -eq 1 && -n "${MYREPO_TEST_ENABLE_SELECTIVE:-}" && -z "${CHANGED_REPOS_MARKED_FOR_TEST:-}" ]]; then CHANGED_REPOS["$repo_name"]=1; CHANGED_REPOS_MARKED_FOR_TEST=1; log "D" "Test hook: Marked $repo_name as changed (MYREPO_TEST_ENABLE_SELECTIVE)" $DEBUG_LVL_DETAIL; fi
                 ;;
