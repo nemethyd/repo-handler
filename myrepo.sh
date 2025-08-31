@@ -1,5 +1,6 @@
 #!/bin/bash
 # shellcheck shell=bash
+# shellcheck disable=SC2155  # Allow 'local var=$(...)' style across the script
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (GitHub Copilot Chat) per documented prompts.
@@ -126,7 +127,7 @@ function run_self_test() {
         sudo_mode="root"
     else
         if command -v sudo >/dev/null 2>&1; then
-            if timeout ${SUDO_TEST_TIMEOUT:-5} sudo -n true 2>/dev/null; then
+            if timeout "${SUDO_TEST_TIMEOUT:-5}" sudo -n true 2>/dev/null; then
                 sudo_mode="sudo-nopass"
             else
                 sudo_mode="sudo-pass"
@@ -168,7 +169,7 @@ function run_self_test() {
     # DNF basic query test (lightweight)
     local dnf_query_ok=0
     if command -v dnf >/dev/null 2>&1; then
-        if timeout ${DNF_QUERY_TIMEOUT:-10} dnf -q repolist >/dev/null 2>&1; then
+    if timeout "${DNF_QUERY_TIMEOUT:-10}" dnf -q repolist >/dev/null 2>&1; then
             dnf_query_ok=1
         else
             failures+=("dnf_query_failed")
@@ -216,7 +217,8 @@ SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
 
 # Performance and monitoring configuration
 PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-50}  # Report progress every N packages
-PROGRESS_UPDATE_INTERVAL=${PROGRESS_UPDATE_INTERVAL:-30}  # Update interval for download progress reporting (seconds)
+PROGRESS_UPDATE_INTERVAL=${PROGRESS_UPDATE_INTERVAL:-30}  # Update interval for progress heartbeats (seconds)
+PROGRESS_OVERLAY=${PROGRESS_OVERLAY:-1}  # 1=overwrite single line for progress/stats when TTY
 CONFIG_FILE_MAX_LINES=${CONFIG_FILE_MAX_LINES:-500}       # Maximum lines to read from config file
 MAX_PARALLEL_DOWNLOADS=${MAX_PARALLEL_DOWNLOADS:-8}       # DNF parallel downloads
 DNF_RETRIES=${DNF_RETRIES:-2}                             # DNF retry attempts
@@ -378,7 +380,7 @@ function log() {
         esac
         # Strip any auto-chosen emoji from start of message to avoid duplication
         if [[ -n "$prefix" ]]; then
-            message="${message#${prefix} }"
+            message="${message#"${prefix}" }"
         fi
         message="$token $message"
         echo -e "[$(date '+%H:%M:%S')] [$level] $message" >&2
@@ -460,7 +462,7 @@ function version_is_newer() {
         comparison_result=$(rpm --eval "%{lua: print(rpm.vercmp('$ver1', '$ver2'))}" 2>/dev/null)
         if [[ $? -eq 0 && -n "$comparison_result" ]]; then
             # If rpm says greater but only due to trailing .0 difference, downgrade to equal
-            if [[ $comparison_result == 1 && $nver1 == $nver2 ]]; then
+            if [[ $comparison_result == 1 && $nver1 == "$nver2" ]]; then
                 comparison_result=0
             fi
             case "$comparison_result" in
@@ -514,7 +516,9 @@ function version_is_newer() {
 # Guard helper: clamp possibly decremented counters to zero (defensive)
 function _clamp_non_negative() {
     local -n ref=$1
-    (( ref < 0 )) && ref=0 || true
+    if (( ref < 0 )); then
+        ref=0
+    fi
 }
 
 # (Analyzer helper defined once above)
@@ -810,7 +814,8 @@ function build_repo_cache() {
     if [[ $cache_valid == true ]]; then
     local loaded_repos=0
     local enabled_repos
-    enabled_repos=$("${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -v "^$")
+    # Skip the header line ("repo id repo name") reliably
+    enabled_repos=$("${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 && $1 != "repo" {print $1}' | grep -v "^$")
         
         while IFS= read -r repo; do
             local cache_file="$cache_dir/${repo}.cache"
@@ -875,7 +880,7 @@ function build_repo_cache() {
     # Enabled repositories
     local enabled_repos
     # DNF repolist (word splitting intentional)
-    if ! enabled_repos=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>&1 | awk 'NR>1 {print $1}' | grep -v "^$"); then
+    if ! enabled_repos=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>&1 | awk 'NR>1 && $1 != "repo" {print $1}' | grep -v "^$"); then
         log "E" "Failed to get enabled repositories list"
     log "E" "DNF repolist error: $enabled_repos" 1
         log "E" "Failed to build repository metadata cache"
@@ -1137,8 +1142,9 @@ function classify_and_queue_packages() {
     local -n _changed_packages_found_ref="$8"
     local total_packages="$9"
 
-    local start_time
+    local start_time last_heartbeat
     start_time=$(date +%s)
+    last_heartbeat=$start_time
 
     while IFS='|' read -r package_name epoch package_version package_release package_arch repo_name; do
         [[ -z "$package_name" ]] && continue
@@ -1153,8 +1159,18 @@ function classify_and_queue_packages() {
             continue
         fi
 
-    # Progress reporting
-    if (( _processed_packages_ref > 0 && _processed_packages_ref % PROGRESS_REPORT_INTERVAL == 0 )); then
+    # Progress reporting (count-based and time-based)
+    local now
+    now=$(date +%s)
+    local show_progress=0
+    if (( _processed_packages_ref == 0 )); then
+        show_progress=1  # Always show an initial progress line
+    elif (( _processed_packages_ref % PROGRESS_REPORT_INTERVAL == 0 )); then
+        show_progress=1
+    elif (( now - last_heartbeat >= PROGRESS_UPDATE_INTERVAL )); then
+        show_progress=1
+    fi
+    if (( show_progress )); then
             local elapsed=$(( $(date +%s) - start_time ))
             local rate_display="" eta_display=""
             if [[ $elapsed -gt 0 ]]; then
@@ -1185,8 +1201,15 @@ function classify_and_queue_packages() {
             fi
             local progress_percent
             progress_percent=$(awk "BEGIN {printf \"%.1f\", (${_processed_packages_ref} * 100) / $total_packages}")
-            echo -e "\e[36m⏱️  Progress: ${_processed_packages_ref}/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
-            echo -e "\e[36m   📊 Stats: \e[33m${_new_count_ref} new\e[0m, \e[36m${_update_count_ref} updates\e[0m, \e[32m${_exists_count_ref} existing\e[0m"
+            local overlay_line="⏱️  Progress: ${_processed_packages_ref}/$total_packages (${progress_percent}% - $rate_display$eta_display) | 📊 ${_new_count_ref} new, ${_update_count_ref} updates, ${_exists_count_ref} existing"
+            if [[ $PROGRESS_OVERLAY -eq 1 && -t 1 ]]; then
+                # Carriage return + clear to end of line; no trailing newline to overlay in place
+                printf "\r\e[36m%s\e[0m\e[K" "$overlay_line"
+            else
+                echo -e "\e[36m⏱️  Progress: ${_processed_packages_ref}/$total_packages packages (${progress_percent}% - $rate_display$eta_display)\e[0m"
+                echo -e "\e[36m   📊 Stats: \e[33m${_new_count_ref} new\e[0m, \e[36m${_update_count_ref} updates\e[0m, \e[32m${_exists_count_ref} existing\e[0m"
+            fi
+            last_heartbeat=$now
         fi
 
         [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
@@ -1310,6 +1333,12 @@ function classify_and_queue_packages() {
                 ;;
         esac
     done <<< "$filtered_packages"
+    # Ensure a visible final progress line and a newline after overlay
+    if [[ $PROGRESS_OVERLAY -eq 1 && -t 1 ]]; then
+        # Reprint the last overlay line with a newline to finalize it in the output
+        printf "\r\e[36m⏱️  Progress: %s/%s (done) | 📊 %s new, %s updates, %s existing\e[0m\e[K\n" \
+            "${_processed_packages_ref}" "$total_packages" "${_new_count_ref}" "${_update_count_ref}" "${_exists_count_ref}"
+    fi
     return 0
 }
 
@@ -2171,7 +2200,7 @@ function gather_installed_packages() {
         log "I" "📋 Building enabled repositories cache for performance..."
         local enabled_repos_list
     get_dnf_cmd
-    if ! enabled_repos_list=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>/dev/null | awk 'NR>1 {print $1}' | grep -v "^$"); then
+    if ! enabled_repos_list=$("${DNF_CMD[@]}" repolist --enabled --quiet 2>/dev/null | awk 'NR>1 && $1 != "repo" {print $1}' | grep -v "^$"); then
             log "W" "Could not enumerate enabled repositories (continuing without cache)"
             enabled_repos_list=""
         fi
@@ -2501,7 +2530,7 @@ function is_repo_enabled() {
     fi
     # Fallback single check (should rarely happen before cache build)
     get_dnf_cmd
-    if "${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 {print $1}' | grep -qx "$repo_name"; then
+    if "${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 && $1 != "repo" {print $1}' | grep -qx "$repo_name"; then
         return 0
     fi
     return 1
