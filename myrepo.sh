@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.1"
+VERSION="2.4.3"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -3227,10 +3227,50 @@ function show_runtime_status() {
 
     # Handle refresh metadata option
     if [[ $REFRESH_METADATA -eq 1 ]]; then
-        log "I" "Refreshing DNF metadata cache..."
-    get_dnf_cmd
-    "${DNF_CMD[@]}" clean metadata >/dev/null 2>&1 || true
-        log "I" "DNF metadata cache refreshed"
+        log "I" "Refreshing DNF metadata cache (targeted) ..."
+        get_dnf_cmd
+
+        # Build list of repos to refresh
+        local refresh_list=()
+        local excluded_set=()
+        # Build exclusion set from EXCLUDE_REPOS (CSV)
+        if [[ -n "$EXCLUDE_REPOS" ]]; then
+            local _ex
+            IFS=',' read -ra _ex <<< "$EXCLUDE_REPOS"
+            for _e in "${_ex[@]}"; do excluded_set["$_e"]=1; done
+        fi
+
+        if [[ -n "$REPOS" ]]; then
+            # Use explicitly requested repos
+            local _req
+            IFS=',' read -ra _req <<< "$REPOS"
+            for r in "${_req[@]}"; do
+                # Skip excluded
+                if [[ -n ${excluded_set["$r"]+x} ]]; then continue; fi
+                refresh_list+=("$r")
+            done
+        else
+            # Default: all enabled repos (filtered by EXCLUDE_REPOS)
+            local enabled
+            enabled=$("${DNF_CMD[@]}" repolist --enabled --quiet | awk 'NR>1 && $1 != "repo" {print $1}' | grep -v "^$" || true)
+            while IFS= read -r r; do
+                [[ -z "$r" ]] && continue
+                if [[ -n ${excluded_set["$r"]+x} ]]; then continue; fi
+                refresh_list+=("$r")
+            done <<< "$enabled"
+        fi
+
+        # Join to CSV for --enablerepo; if empty, skip to avoid cleaning everything
+        if (( ${#refresh_list[@]} > 0 )); then
+            local IFS=','
+            local refresh_csv="${refresh_list[*]}"
+            log "D" "Refreshing DNF metadata for repos: $refresh_csv" 2
+            "${DNF_CMD[@]}" clean metadata --disablerepo='*' --enablerepo="$refresh_csv" >/dev/null 2>&1 || true
+            "${DNF_CMD[@]}" makecache --refresh --disablerepo='*' --enablerepo="$refresh_csv" >/dev/null 2>&1 || true
+            log "I" "DNF metadata cache refreshed for ${#refresh_list[@]} repo(s)"
+        else
+            log "W" "No repositories selected for metadata refresh; skipping targeted DNF clean"
+        fi
     fi
 
     # Show elevation status
@@ -3303,50 +3343,57 @@ function sync_to_shared_repos() {
     log "I" "Syncing repositories to shared location: $SHARED_REPO_PATH"
     log "I" "Note: Disabled repositories will be excluded from sync"
     
-    # Sync each repository (but only enabled ones)
+    # Build selection when --repos was provided (limit sync scope)
+    local -a selected_repos=()
+    if [[ -n "$REPOS" ]]; then
+        IFS=',' read -ra selected_repos <<< "$REPOS"
+        log "I" "Sync limited to repositories: $REPOS"
+    fi
+
+    # Sync each repository (but only enabled ones and, if provided, only selected via --repos)
     for repo_dir in "$LOCAL_REPO_PATH"/*; do
-        if [[ -d "$repo_dir" ]]; then
-            local repo_name
-            repo_name=$(basename "$repo_dir")
-            
-            # Skip and warn about invalid getPackage directory directly under LOCAL_REPO_PATH
-            if [[ "$repo_name" == "getPackage" ]]; then
-                log "W" "Found invalid getPackage directory at $LOCAL_REPO_PATH/getPackage"
-                log "W" "   getPackage should only exist as subdirectories under repository directories"
-                log "W" "   Skipping sync for this invalid directory"
-                continue
-            fi
-            
-            # Check if this repository should be synced (only enabled repos)
-            if ! is_repo_enabled "$repo_name"; then
-                log "D" "Skipping sync for disabled repository: $repo_name" 2
-                log "I" "$(align_repo_name "$repo_name"): Skipped (disabled repository)"
-                continue
-            fi
-            
-            local shared_repo_dir="$SHARED_REPO_PATH/$repo_name"
-            
-            log "D" "Syncing $repo_name..." 2
-            
-            # Create shared repo directory if it doesn't exist
-            mkdir -p "$shared_repo_dir" 2>/dev/null
-            
-            # Use rsync for efficient sync
-            if command -v rsync >/dev/null 2>&1; then
-                if (( DEBUG_LEVEL >= 2 )); then
-                    # Verbose sync for debug mode
-                    rsync -av --delete "$repo_dir/" "$shared_repo_dir/"
-                else
-                    # Quiet sync for normal operation
-                    rsync -a --delete "$repo_dir/" "$shared_repo_dir/" >/dev/null 2>&1
-                fi
-            else
-                # Fallback to cp
-                cp -r "$repo_dir/"* "$shared_repo_dir/" 2>/dev/null
-            fi
-            
-            log "I" "$(align_repo_name "$repo_name"): Synced to shared repository"
+        [[ -d "$repo_dir" ]] || continue
+        local repo_name
+        repo_name=$(basename "$repo_dir")
+
+        # Skip invalid getPackage directory directly under LOCAL_REPO_PATH
+        if [[ "$repo_name" == "getPackage" ]]; then
+            log "W" "Found invalid getPackage directory at $LOCAL_REPO_PATH/getPackage"
+            log "W" "   getPackage should only exist as subdirectories under repository directories"
+            log "W" "   Skipping sync for this invalid directory"
+            continue
         fi
+
+        # If --repos was provided, skip repos not in the list
+        if [[ ${#selected_repos[@]} -gt 0 ]]; then
+            local match=0
+            for _r in "${selected_repos[@]}"; do [[ "$repo_name" == "$_r" ]] && match=1 && break; done
+            if [[ $match -eq 0 ]]; then
+                log "D" "Skipping sync (not in --repos): $repo_name" 2
+                continue
+            fi
+        fi
+
+        # Check if this repository is enabled
+        if ! is_repo_enabled "$repo_name"; then
+            log "D" "Skipping sync for disabled repository: $repo_name" 2
+            log "I" "$(align_repo_name "$repo_name"): Skipped (disabled repository)"
+            continue
+        fi
+
+        local shared_repo_dir="$SHARED_REPO_PATH/$repo_name"
+        log "D" "Syncing $repo_name..." 2
+        mkdir -p "$shared_repo_dir" 2>/dev/null
+        if command -v rsync >/dev/null 2>&1; then
+            if (( DEBUG_LEVEL >= 2 )); then
+                rsync -av --delete "$repo_dir/" "$shared_repo_dir/"
+            else
+                rsync -a --delete "$repo_dir/" "$shared_repo_dir/" >/dev/null 2>&1
+            fi
+        else
+            cp -r "$repo_dir/"* "$shared_repo_dir/" 2>/dev/null
+        fi
+        log "I" "$(align_repo_name "$repo_name"): Synced to shared repository"
     done
     
     log "I" "Repository sync completed (disabled repositories excluded)"
@@ -3364,16 +3411,13 @@ function update_all_repository_metadata() {
         return 0
     fi
 
-    # Test hook: seed a changed repo if requested
-    if [[ -n ${ENABLE_TEST_SELECTIVE+x} && -z ${MYREPO_TEST_ENABLE_SELECTIVE+x} ]]; then export MYREPO_TEST_ENABLE_SELECTIVE=$ENABLE_TEST_SELECTIVE; fi
-    if [[ -n "${MYREPO_TEST_ENABLE_SELECTIVE:-}" && ${#CHANGED_REPOS[@]} -eq 0 && -d "$LOCAL_REPO_PATH/test_repo" ]]; then
-        CHANGED_REPOS["test_repo"]=1
-        log "D" "Test hook: Added test_repo to CHANGED_REPOS" 2
-    fi
-
     # Build target repo list
     local target_repos=()
-    if [[ ${#CHANGED_REPOS[@]} -gt 0 ]]; then
+    if [[ -n "$REPOS" ]]; then
+        # When --repos is specified, restrict updates strictly to those repos
+        IFS=',' read -ra target_repos <<< "$REPOS"
+        log "I" "🔄 Metadata update limited to --repos: $REPOS"
+    elif [[ ${#CHANGED_REPOS[@]} -gt 0 ]]; then
         for repo in "${!CHANGED_REPOS[@]}"; do target_repos+=("$repo"); done
         log "I" "🔄 Updating repository metadata for ${#target_repos[@]} changed repositories only"
     else
@@ -3397,40 +3441,13 @@ function update_all_repository_metadata() {
                 log "D" "$(align_repo_name "$repo_name"): Manual repo dir missing" 2
                 continue
             fi
-            local rpm_count
-            rpm_count=$(find "$repo_dir" -name "*.rpm" -type f 2>/dev/null | wc -l)
-            if [[ $rpm_count -eq 0 ]]; then
-                log "D" "$(align_repo_name "$repo_name"): No RPMs present (manual)" 2
-                continue
-            fi
-            local needs_update=false
-            if [[ ! -d "$repo_dir/repodata" ]]; then
-                needs_update=true
-                log "D" "$(align_repo_name "$repo_name"): No repodata dir" 2
+            # Always refresh manual repo metadata to avoid stale repodata when RPMs are replaced without newer mtimes
+            log "I" "🔄 $(align_repo_name "$repo_name"): Refreshing manual repository metadata"
+            cleanup_old_repodata "$repo_name" "$repo_dir" ""
+            if update_repository_metadata "$repo_name" "$repo_dir"; then
+                ((updated_repos++))
             else
-                local newest_rpm
-                newest_rpm=$(find "$repo_dir" -name "*.rpm" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-                if [[ -n "$newest_rpm" ]]; then
-                    local rpm_time metadata_time
-                    rpm_time=$(stat -c %Y "$newest_rpm" 2>/dev/null || echo 0)
-                    metadata_time=$(stat -c %Y "$repo_dir/repodata" 2>/dev/null || echo 0)
-                    if [[ $rpm_time -gt $metadata_time ]]; then
-                        needs_update=true
-                        log "D" "$(align_repo_name "$repo_name"): RPMs newer than repodata" 2
-                    fi
-                fi
-            fi
-            if [[ $needs_update == true ]]; then
-                log "I" "🔄 $(align_repo_name "$repo_name"): Manual repository needs metadata update"
-                cleanup_old_repodata "$repo_name" "$repo_dir" ""
-                if update_repository_metadata "$repo_name" "$repo_dir"; then
-                    ((updated_repos++))
-                else
-                    ((failed_repos++))
-                fi
-            else
-                ((skipped_manual_fresh++))
-                log "D" "$(align_repo_name "$repo_name"): Manual metadata up to date" 2
+                ((failed_repos++))
             fi
             continue
         fi
