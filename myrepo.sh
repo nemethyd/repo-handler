@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.4"
+VERSION="2.4.5"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -891,6 +891,25 @@ function build_repo_cache() {
         log "W" "No enabled repositories found"
         log "E" "Failed to build repository metadata cache"
         exit 1
+    fi
+    
+    # Filter repositories based on --repos and --exclude-repos restrictions
+    local filtered_repos=""
+    while IFS= read -r repo; do
+        if should_process_repo "$repo"; then
+            filtered_repos+="$repo"$'\n'
+        else
+            log "D" "Skipping repository (filtered out): $repo" $DEBUG_LVL_DETAIL
+        fi
+    done <<< "$enabled_repos"
+    
+    # Use filtered repositories instead of all enabled repos
+    enabled_repos="$filtered_repos"
+    
+    if [[ -z "$enabled_repos" ]]; then
+        log "W" "No repositories match the specified --repos restriction"
+        log "I" "Skipping repository metadata cache build"
+        return 0
     fi
     
     local repo_count=0
@@ -2295,6 +2314,27 @@ function gather_installed_packages() {
         log "W" "No installed packages list produced (exit code: ${dnf_exit_code:-unknown}); continuing with empty set"
         printf ''
         return 0
+    fi
+
+    # Filter packages by repository restrictions if --repos is specified
+    if [[ -n "$REPOS" ]]; then
+        log "I" "Filtering packages to repositories: $REPOS"
+        local filtered_result=""
+        while IFS='|' read -r name epoch version release arch repo; do
+            [[ -z "$name" ]] && continue
+            [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+            
+            # Check if this package's repository should be processed
+            if should_process_repo "$repo"; then
+                filtered_result+="${name}|${epoch}|${version}|${release}|${arch}|${repo}"$'\n'
+            fi
+        done <<< "$repoquery_result"
+        
+        repoquery_result="$filtered_result"
+        
+        if [[ -z "$repoquery_result" ]]; then
+            log "W" "No packages found in specified repositories ($REPOS)"
+        fi
     fi
 
     printf '%s\n' "$repoquery_result"
