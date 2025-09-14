@@ -12,11 +12,11 @@
 # and synchronizes it with a shared repository, handling updates and cleanup of
 # local repositories. Optimized for performance with intelligent caching.
 
-# Lightweight, production-focused version (complex adaptive tuning removed previously).
+# Lightweight, producti0on-focused version (complex adaptive tuning removed previously).
 
 # Script version
 
-VERSION="2.4.3"
+VERSION="2.4.4"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -1780,6 +1780,43 @@ function cleanup_uninstalled_packages() {
     fi
 }
 
+# Count packages that belong to selected repos (honors --repos/--exclude-repos)
+function count_packages_for_selected_repos() {
+    local pkgs="$1"
+    declare -A allowed=() excluded=()
+    # Build excluded set
+    if [[ -n "$EXCLUDE_REPOS" ]]; then
+        IFS=',' read -ra _ex <<< "$EXCLUDE_REPOS"
+        for r in "${_ex[@]}"; do excluded["$r"]=1; done
+    fi
+    # Build allowed set
+    if [[ -n "$REPOS" ]]; then
+        IFS=',' read -ra _req <<< "$REPOS"
+        for r in "${_req[@]}"; do [[ -z ${excluded[$r]+x} ]] && allowed["$r"]=1; done
+    else
+        # Default: all known repos except excluded
+        for r in "${!available_repo_packages[@]}"; do [[ -z ${excluded[$r]+x} ]] && allowed["$r"]=1; done
+        for r in "${MANUAL_REPOS[@]}"; do [[ -z ${excluded[$r]+x} ]] && allowed["$r"]=1; done
+    fi
+    # Ensure lookup index exists before resolving @System
+    build_repo_lookup_index
+
+    local count=0
+    while IFS='|' read -r name epoch ver rel arch repo; do
+        [[ -z "$name" ]] && continue
+        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
+        local eff="$repo"
+        if [[ "$eff" == "@System" || "$eff" == "System" || "$eff" == "@commandline" || "$eff" == "Invalid" ]]; then
+            eff=$(determine_repo_source "$name" "$epoch" "$ver" "$rel" "$arch") || eff=""
+        fi
+        [[ -z "$eff" ]] && continue
+        if [[ -n ${allowed["$eff"]+x} ]]; then
+            ((count++))
+        fi
+    done <<< "$pkgs"
+    printf '%s\n' "$count"
+}
+
 # Determine actual repository source for @System packages (like original script)
 function determine_repo_from_installed() {
     local package_name="$1"
@@ -3319,13 +3356,17 @@ function show_runtime_status() {
     if [[ -n "$NAME_FILTER" ]]; then
         log "I" "Package name filter: $NAME_FILTER"
     fi
-}
+}+
 
 # Sync local repositories to shared location (excluding disabled repos)
 function sync_to_shared_repos() {
     # Only sync if not in dry run mode and shared repo path exists
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "I" "🔍 DRY RUN: Would sync repositories to shared location if enabled"
+        # In dry-run, still reflect scope and destination for clarity
+        if [[ -n "$REPOS" ]]; then
+            log "I" "Sync limited to repositories: $REPOS"
+        fi
+        log "I" "🔍 DRY RUN: Would sync repositories to shared location: $SHARED_REPO_PATH"
         return 0
     fi
     
