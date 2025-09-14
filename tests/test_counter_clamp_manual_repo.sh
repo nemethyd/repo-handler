@@ -4,6 +4,7 @@ set -euo pipefail
 # Scenario: Provide NEW and UPDATE packages from a manual repo with no local RPMs present.
 # Expectation: new_count/update_count return to 0 after manual skip logic; stats arrays non-negative; processed count reflects inputs.
 
+# shellcheck disable=SC2155
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export MYREPO_SOURCE_ONLY=1  # prevent auto main
@@ -16,10 +17,12 @@ manual_repo="manualrepo"
 source "$REPO_ROOT/myrepo.sh"
 
 # Override repo root AFTER sourcing so our path sticks
+# shellcheck disable=SC2155
 export LOCAL_REPO_PATH="$(mktemp -d)"
 mkdir -p "${LOCAL_REPO_PATH}/${manual_repo}/getPackage"
 
 # Override manual repos (clear original)
+# shellcheck disable=SC2034
 MANUAL_REPOS=("$manual_repo")
 
 # Initialize stats arrays for manual repo to avoid unbound errors under set -u when decremented
