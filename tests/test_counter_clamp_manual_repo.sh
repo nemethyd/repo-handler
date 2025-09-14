@@ -16,11 +16,12 @@ manual_repo="manualrepo"
 source "$REPO_ROOT/myrepo.sh"
 
 # Override repo root AFTER sourcing so our path sticks
-export LOCAL_REPO_PATH="$(mktemp -d)"
+temp_dir="$(mktemp -d)"
+export LOCAL_REPO_PATH="$temp_dir"
 mkdir -p "${LOCAL_REPO_PATH}/${manual_repo}/getPackage"
 
-# Override manual repos (clear original)
-MANUAL_REPOS=("$manual_repo")
+# Override manual repos (clear original) - exported for script usage
+export MANUAL_REPOS=("$manual_repo")
 
 # Initialize stats arrays for manual repo to avoid unbound errors under set -u when decremented
 stats_new_count["$manual_repo"]=0

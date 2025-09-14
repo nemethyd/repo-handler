@@ -3356,7 +3356,7 @@ function show_runtime_status() {
     if [[ -n "$NAME_FILTER" ]]; then
         log "I" "Package name filter: $NAME_FILTER"
     fi
-}+
+}
 
 # Sync local repositories to shared location (excluding disabled repos)
 function sync_to_shared_repos() {
