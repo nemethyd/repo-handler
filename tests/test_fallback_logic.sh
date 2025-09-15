@@ -8,7 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-export LOCAL_REPO_PATH="$(mktemp -d)"
+temp_dir="$(mktemp -d)"
+export LOCAL_REPO_PATH="$temp_dir"
 export ELEVATE_COMMANDS=0
 export DEBUG_LEVEL=2
 export BATCH_SIZE=50
