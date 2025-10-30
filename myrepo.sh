@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (GitHub Copilot Chat) per documented prompts.
-# Last Updated: 2025-08-16
+# Last Updated: 2025-10-30
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.5"
+VERSION="2.4.6"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -391,6 +391,14 @@ function log() {
         message="$prefix $message"
     fi
     echo -e "${color}[$(date '+%H:%M:%S')] [$level] $message\e[0m" >&2
+}
+
+# Print helper that clears any in-place progress overlay before emitting output.
+function progress_safe_echo() {
+    if [[ $PROGRESS_OVERLAY -eq 1 && -t 1 ]]; then
+        printf "\r\e[K"
+    fi
+    echo -e "$@"
 }
 
 
@@ -918,6 +926,7 @@ function build_repo_cache() {
     
     # Cache only installed package metadata
     while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
         ((repo_count++))
         log "I" "⏳ Caching metadata for repository: $repo ($repo_count/$total_repos)"
         
@@ -1170,7 +1179,7 @@ function classify_and_queue_packages() {
 
         # Package limit check
         if [[ $MAX_PACKAGES -gt 0 && ${_processed_packages_ref} -ge $MAX_PACKAGES ]]; then
-            echo -e "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping (processed=${_processed_packages_ref})\e[0m"
+            progress_safe_echo "\e[33m🔢 Reached package limit ($MAX_PACKAGES), stopping (processed=${_processed_packages_ref})\e[0m"
             break
         fi
 
@@ -1299,10 +1308,10 @@ function classify_and_queue_packages() {
                 ;;
             UPDATE)
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping update package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then progress_safe_echo "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
                 fi
                 ((_update_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_update_count["$repo_name"]++))
-                echo -e "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
+                progress_safe_echo "\e[36m$(align_repo_name "$repo_name"): [U] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
                 if [[ $DRY_RUN -eq 0 ]]; then
                     local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
@@ -1310,9 +1319,19 @@ function classify_and_queue_packages() {
                         local target_file="${repo_path}/${package_name}-${package_version}-${package_release}.${package_arch}.rpm"
                         local temp_copy="${target_file}.new.$$"
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✅ Updated from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$temp_copy" 2>/dev/null && sudo mv -f "$temp_copy" "$target_file" 2>/dev/null; then
+                                log "I" "   ✅ Updated from local source" 1
+                            else
+                                progress_safe_echo "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"
+                                _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                            fi
                         else
-                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then log "I" "   ✅ Updated from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$temp_copy" 2>/dev/null && mv -f "$temp_copy" "$target_file" 2>/dev/null; then
+                                log "I" "   ✅ Updated from local source" 1
+                            else
+                                progress_safe_echo "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"
+                                _update_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                            fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
@@ -1325,18 +1344,28 @@ function classify_and_queue_packages() {
                 ;;
             NEW)
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then echo -e "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
+                    if [[ $MAX_CHANGED_PACKAGES -eq 0 ]]; then log "I" "   Skipping new package (MAX_CHANGED_PACKAGES=0): $package_name" 1; continue; elif [[ $MAX_CHANGED_PACKAGES -gt 0 && ${_changed_packages_found_ref} -ge $MAX_CHANGED_PACKAGES ]]; then progress_safe_echo "\e[33m🔢 Reached changed packages limit ($MAX_CHANGED_PACKAGES), stopping\e[0m"; break; fi
                 fi
                 ((_new_count_ref++)); ((_changed_packages_found_ref++)); [[ -n "$repo_name" && "$repo_name" != "getPackage" ]] && ((stats_new_count["$repo_name"]++))
-                echo -e "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
+                progress_safe_echo "\e[33m$(align_repo_name "$repo_name"): [N] $package_name-$package_version-$package_release.$package_arch\e[0m"; CHANGED_REPOS["$repo_name"]=1
                 if [[ $DRY_RUN -eq 0 ]]; then
                     local rpm_path; rpm_path=$(locate_local_rpm "$package_name" "$package_version" "$package_release" "$package_arch")
                     if [[ -n "$rpm_path" && -f "$rpm_path" ]]; then
                         log "I" "   📋 Using local RPM: $(basename "$rpm_path")" 1; log "D" "   Source: $rpm_path" $DEBUG_LVL_DETAIL
                         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                            if sudo cp "$rpm_path" "$repo_path/"; then log "I" "   ✅ Copied from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if sudo cp "$rpm_path" "$repo_path/"; then
+                                log "I" "   ✅ Copied from local source" 1
+                            else
+                                progress_safe_echo "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"
+                                _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                            fi
                         else
-                            if cp "$rpm_path" "$repo_path/"; then log "I" "   ✅ Copied from local source" 1; else echo -e "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"; _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch"); fi
+                            if cp "$rpm_path" "$repo_path/"; then
+                                log "I" "   ✅ Copied from local source" 1
+                            else
+                                progress_safe_echo "\e[31m   ❌ Failed to copy local RPM, will try download\e[0m"
+                                _new_packages_ref+=("$repo_name|$package_name|$epoch|$package_version|$package_release|$package_arch")
+                            fi
                         fi
                     else
                         if [[ " ${MANUAL_REPOS[*]} " == *" $repo_name "* ]]; then
@@ -1348,7 +1377,7 @@ function classify_and_queue_packages() {
                 fi
                 ;;
             *)
-                echo -e "\e[31m$(align_repo_name "$repo_name"): [?] Unknown status '$status' for $package_name\e[0m"
+                progress_safe_echo "\e[31m$(align_repo_name "$repo_name"): [?] Unknown status '$status' for $package_name\e[0m"
                 ;;
         esac
     done <<< "$filtered_packages"

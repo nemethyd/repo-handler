@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.4)
+# Repo Handler Script (v2.4.6)
 
 Author: Dániel Némethy (nemethy@moderato.hu)
 
@@ -932,4 +932,3 @@ Feel free to submit issues or pull requests to improve the functionality or perf
 The `repo-handler` script provides a comprehensive solution for managing local package repositories in isolated environments. Version 2.3.10 significantly improves package version comparison logic with RPM-native version comparison and enhanced status detection, ensuring accurate handling of complex multi-repository scenarios where manual repositories may contain newer versions than official ones. This builds on v2.3.8's `--no-metadata-update` option for enhanced development workflows and v2.3.7's performance optimizations.
 
 The combination of configuration file support, extensive command-line options, performance optimization, accurate version comparison, and flexible synchronization and metadata controls (including `--no-sync` and `--no-metadata-update`) makes it suitable for a wide range of use cases, from simple package mirroring to complex multi-repository environments with both automated and manual package management workflows.
-
