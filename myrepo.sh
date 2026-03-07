@@ -29,7 +29,8 @@ fi
 # Default Configuration (can be overridden by myrepo.cfg)
 LOCAL_REPO_PATH="${LOCAL_REPO_PATH:-/repo}"  # Allow external override for testing/isolated runs
 SHARED_REPO_PATH="/mnt/hgfs/ForVMware/ol9_repos"
-MANUAL_REPOS=("ol9_edge")  # Array for manually managed repositories (not downloadable via DNF)
+MANUAL_REPOS=("ol9_edge"
+    "ol9_oracle_instantclient")  # Array for manually managed repositories (not downloadable via DNF)
 LOCAL_RPM_SOURCES=()  # Array for local RPM source directories
 DEBUG_LEVEL=${DEBUG_LEVEL:-1}
 PLAIN_MODE=${PLAIN_MODE:-0}  # 1 = disable emojis & colors in log output (plain tokens)
@@ -248,6 +249,7 @@ declare -a REPOSITORIES=(
     "ol9_developer_EPEL"
     "ol9_developer"
     "ol9_edge"
+    "ol9_oracle_instantclient"
 )
 
 # Formatting constants (matching original script)
@@ -2945,6 +2947,7 @@ function write_default_config_file() {
 
 # REPOSITORIES
 # MANUAL_REPOS="ol9_edge"
+    "ol9_oracle_instantclient"
 # EXCLUDE_REPOS=""
 
 # LOCAL RPM SOURCES (comma-separated directories scanned before downloading)
