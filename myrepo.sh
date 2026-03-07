@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.6"
+VERSION="2.4.7"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -76,6 +76,7 @@ JSON_SUMMARY=${JSON_SUMMARY:-0}
 # - The script intelligently detects multiple privilege escalation scenarios
 ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=auto-detect (default), 0=never use sudo
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
+MIN_FREE_SPACE_MB=${MIN_FREE_SPACE_MB:-2048}  # Minimum free space required under LOCAL_REPO_PATH (MB)
 CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
 USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
 SHARED_CACHE_PATH=${SHARED_CACHE_PATH:-"/var/cache/myrepo"}  # Shared cache directory for root/user access
@@ -3713,6 +3714,41 @@ function update_repository_metadata() {
     fi
 }
 
+# Check available disk space under LOCAL_REPO_PATH and abort if below minimum threshold.
+# Configurable via MIN_FREE_SPACE_MB (default: 2048 MB = 2 GB).
+# shellcheck disable=SC2120
+function check_disk_space() {
+    local path="${1:-$LOCAL_REPO_PATH}"
+    local min_mb="${MIN_FREE_SPACE_MB:-2048}"
+
+    # Ensure the path exists before querying
+    if [[ ! -d "$path" ]]; then
+        log "W" "Disk space check skipped: path does not exist: $path"
+        return 0
+    fi
+
+    local avail_mb
+    avail_mb=$(df --output=avail -m "$path" 2>/dev/null | tail -1 | tr -d ' ')
+
+    if [[ -z "$avail_mb" || ! "$avail_mb" =~ ^[0-9]+$ ]]; then
+        log "W" "Could not determine available disk space for $path - skipping check"
+        return 0
+    fi
+
+    local avail_gb
+    avail_gb=$(awk "BEGIN {printf \"%.1f\", $avail_mb / 1024}")
+
+    if [[ $avail_mb -lt $min_mb ]]; then
+        log "E" "❌ Insufficient disk space on $path"
+        log "E" "   Available: ${avail_mb} MB (${avail_gb} GB)"
+        log "E" "   Required:  ${min_mb} MB ($(awk "BEGIN {printf \"%.1f\", $min_mb / 1024}") GB)"
+        log "E" "   Free up space or lower MIN_FREE_SPACE_MB (current: ${min_mb}) to override."
+        exit 1
+    fi
+
+    log "I" "✅ Disk space OK: ${avail_mb} MB (${avail_gb} GB) available on $path (min: ${min_mb} MB)"
+}
+
 # Validate requirements and handle special execution modes
 function validate_and_handle_modes() {
     # Validate basic requirements
@@ -3796,6 +3832,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     validate_repository_structure
     show_runtime_status
     validate_and_handle_modes
+    check_disk_space
     full_rebuild_repos
     cleanup_old_cache_directories
     build_repo_cache
