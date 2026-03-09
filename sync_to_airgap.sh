@@ -61,7 +61,7 @@ ensure_remote_dir() {
     result=$(ssh -l "${REMOTE_USER}" -o LogLevel=ERROR -o ServerAliveInterval=60 \
         "${REMOTE_HOST}" \
         "powershell.exe -NoProfile -Command \"if (!(Test-Path '$win_path')) { New-Item -ItemType Directory -Force -Path '$win_path' | Out-Null; Write-Host 'CREATED' } else { Write-Host 'EXISTS' }\"" \
-        2>/dev/null)
+        < /dev/null 2>/dev/null)
 
     if [[ "$result" == *"CREATED"* ]]; then
         log "  Remote dir created: ${win_path}"
@@ -87,7 +87,7 @@ fi
 # Parse the PowerShell hashtable from syncrepo.ps1
 # This uses grep to find lines with '=', sed to clean them up, and a while loop to read them.
 log "Reading repository mappings from $MAPPING_FILE..."
-grep -E '^\s*".+"\s*=\s*".+"' "$MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ /; s/"\s*$//' | while read -r source_fragment dest_fragment; do
+while read -r source_fragment dest_fragment; do
     
     source_dir="${SOURCE_BASE_PATH}/${source_fragment}/"
     
@@ -126,11 +126,12 @@ grep -E '^\s*".+"\s*=\s*".+"' "$MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ 
                     --info=progress2 --human-readable ${DRY_RUN} \
                     -e "ssh -l ${REMOTE_USER} -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
                     "${source_dir}" \
-                    "${REMOTE_HOST}:${remote_dest_path_rsync}"
+                    "${REMOTE_HOST}:${remote_dest_path_rsync}" \
+                    < /dev/null
 
     log "Sync for ${source_fragment} completed."
     echo # Add a blank line for readability
 
-done
+done < <(grep -E '^\s*".+"\s*=\s*".+"' "$MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ /; s/"\s*$//')
 
 log "All repositories synchronized successfully."
