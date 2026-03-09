@@ -4,7 +4,7 @@
 #
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by automation (GitHub Copilot, GPT-5-Codex)
-# Last Updated: 2025-10-25
+# Last Updated: 2026-03-09
 #
 # Synchronizes repositories to an air-gapped Windows server using rsync.
 # This script reads the repository mappings from the PowerShell script
@@ -14,7 +14,7 @@
 set -e
 set -o pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # --- Configuration ---
 REMOTE_HOST="mgmt3"
@@ -51,6 +51,24 @@ windows_to_cygdrive() {
     echo "/${drive_letter}/${path_without_drive}"
 }
 
+
+# Ensure the destination directory exists on the remote host.
+# Uses PowerShell New-Item via SSH; silent if already exists.
+ensure_remote_dir() {
+    local win_path="$1"   # e.g. D:/repo/OracleLinux/OL9/pgdg16/x86_64
+
+    local result
+    result=$(ssh -l "${REMOTE_USER}" -o LogLevel=ERROR -o ServerAliveInterval=60 \
+        "${REMOTE_HOST}" \
+        "powershell.exe -NoProfile -Command \"if (!(Test-Path '$win_path')) { New-Item -ItemType Directory -Force -Path '$win_path' | Out-Null; Write-Host 'CREATED' } else { Write-Host 'EXISTS' }\"" \
+        2>/dev/null)
+
+    if [[ "$result" == *"CREATED"* ]]; then
+        log "  Remote dir created: ${win_path}"
+    elif [[ "$result" != *"EXISTS"* ]]; then
+        log "WARNING: Could not verify/create remote dir: ${win_path} (response: ${result})"
+    fi
+}
 # --- Main Script ---
 
 log "sync_to_airgap.sh v$VERSION"
@@ -91,6 +109,9 @@ grep -E '^\s*".+"\s*=\s*".+"' "$MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ 
     log "Source: $source_dir"
     log "Destination (Windows): ${REMOTE_HOST}:${remote_dest_path_win}"
     log "Destination (rsync): ${REMOTE_HOST}:${remote_dest_path_rsync}"
+
+    # Ensure destination directory exists on remote before rsync
+    ensure_remote_dir "${remote_dest_path_win}"
 
     # The rsync command
     # --archive: recursive, preserves permissions, times, etc.
