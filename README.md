@@ -119,6 +119,14 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | Limits | MAX_PACKAGES --max-packages | int | 0 | cfg/CLI | Cap total processed (0=∞) |
 | Limits | MAX_CHANGED_PACKAGES --max-changed-packages | int | -1 | cfg/CLI | Cap downloads (new+update) |
 | Behavior | CLEANUP_UNINSTALLED --cleanup-uninstalled | bool | 1 | cfg/CLI | Remove RPMs no longer installed |
+| Behavior | SYNC_MODE --sync-mode | enum | local | cfg/CLI/env | Sync strategy: local copy or built-in remote rsync |
+| Behavior | REMOTE_SYNC_HOST --remote-sync-host | string | (empty) | cfg/CLI/env | Remote host in remote sync mode |
+| Behavior | REMOTE_SYNC_USER --remote-sync-user | string | (empty) | cfg/CLI/env | Remote SSH user in remote sync mode |
+| Behavior | REMOTE_SYNC_SOURCE_BASE --remote-sync-source-base | path | SHARED_REPO_PATH | cfg/CLI/env | Source base directory for remote sync |
+| Behavior | REMOTE_SYNC_TARGET_BASE --remote-sync-target-base | path | (empty) | cfg/CLI/env | Remote destination base path |
+| Behavior | REMOTE_SYNC_MAPPING_FILE --remote-sync-mapping-file | path | (none) | cfg/CLI/env | Optional repo mapping file |
+| Behavior | REMOTE_SYNC_TARGET_STYLE --remote-sync-target-style | enum | gitbash | cfg/CLI/env | Remote rsync path style (gitbash/cygwin/unix) |
+| Behavior | REMOTE_SYNC_REMOTE_OS --remote-sync-remote-os | enum | windows | cfg/CLI/env | Remote host type (windows/unix) |
 | Behavior | NO_SYNC --no-sync | bool | 0 | env/CLI | Skip rsync stage |
 | Behavior | SYNC_ONLY -s|--sync-only | bool | 0 | CLI | Only sync, skip processing |
 | Behavior | NO_METADATA_UPDATE --no-metadata-update | bool | 0 | env/CLI | Skip createrepo_c |
@@ -169,6 +177,14 @@ Test hooks are for development only—do not enable them in production automatio
 --refresh-metadata               Force rebuild of cache timestamp + dnf metadata clean
 --set-permissions                (basic permission normalization)
 --shared-repo-path PATH          Target sync destination
+--sync-mode MODE                 Sync mode: local|remote
+--remote-sync-host HOST          Remote host for remote sync mode
+--remote-sync-user USER          Remote SSH user for remote sync mode
+--remote-sync-source-base PATH   Source base for remote sync (default: SHARED_REPO_PATH)
+--remote-sync-target-base PATH   Remote target base path
+--remote-sync-mapping-file FILE  Optional mapping file (PowerShell format)
+--remote-sync-target-style STYLE Remote path style: gitbash|cygwin|unix
+--remote-sync-remote-os OS       Remote OS type: windows|unix
 -s | --sync-only                 Skip processing; just sync
 --no-sync                        Skip sync stage
 --no-metadata-update             Skip createrepo_c
@@ -186,6 +202,14 @@ Test hooks are for development only—do not enable them in production automatio
 |----------|---------|
 | LOCAL_REPO_PATH | Root of local repositories |
 | SHARED_REPO_PATH | Sync destination (rsync target) |
+| SYNC_MODE | Sync strategy (`local` or `remote`) |
+| REMOTE_SYNC_HOST | Remote host for built-in remote sync |
+| REMOTE_SYNC_USER | Remote SSH user for built-in remote sync |
+| REMOTE_SYNC_SOURCE_BASE | Source base directory for remote sync |
+| REMOTE_SYNC_TARGET_BASE | Remote destination base path |
+| REMOTE_SYNC_MAPPING_FILE | Optional mapping file for repo-to-path sync |
+| REMOTE_SYNC_TARGET_STYLE | Remote rsync path style (`gitbash`, `cygwin`, `unix`) |
+| REMOTE_SYNC_REMOTE_OS | Remote OS mode (`windows` or `unix`) |
 | MANUAL_REPOS | Array of manual repositories (no DNF fetch) |
 | LOCAL_RPM_SOURCES | Directories scanned for existing RPMs first |
 | CACHE_MAX_AGE | Seconds before repo metadata cache refresh |

@@ -1,4 +1,9 @@
-# sync_to_airgap.sh
+# Remote Sync (Built Into myrepo.sh)
+
+## Status
+
+sync_to_airgap.sh has been retired.
+Remote synchronization is now implemented directly in myrepo.sh via SYNC_MODE="remote".
 
 This script mirrors selected Oracle Linux repositories from the shared staging area to the air-gapped Windows host over SSH/rsync. It replaces the older robocopy-based process that relied on manual edits to `syncrepo.ps1`.
 
@@ -28,8 +33,8 @@ This script mirrors selected Oracle Linux repositories from the shared staging a
 ## Usage
 
 ```bash
-./sync_to_airgap.sh              # live sync
-./sync_to_airgap.sh --dry-run    # show what would change
+./myrepo.sh --sync-only --sync-mode remote
+./myrepo.sh --sync-only --sync-mode remote --dry-run
 ```
 
 ### Dry run mode
@@ -63,5 +68,5 @@ When `--dry-run` is supplied the script passes the same flag to rsync. You recei
 
 ## Related files
 
-- `sync_to_airgap.sh` – the main script
+- `myrepo.sh` – main script with built-in local/remote sync
 - `shared-repo/syncrepo.ps1` – source/destination mappings used by both PowerShell and rsync workflows

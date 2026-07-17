@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.7"
+VERSION="2.4.11"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -55,6 +55,15 @@ MAX_PACKAGES=${MAX_PACKAGES:-0}
 MAX_CHANGED_PACKAGES=${MAX_CHANGED_PACKAGES:--1}
 SYNC_ONLY=${SYNC_ONLY:-0}
 NO_SYNC=${NO_SYNC:-0}
+SYNC_MODE=${SYNC_MODE:-local}  # local=sync to SHARED_REPO_PATH, remote=push via built-in rsync flow
+REMOTE_SYNC_HOST=${REMOTE_SYNC_HOST:-}
+REMOTE_SYNC_USER=${REMOTE_SYNC_USER:-}
+REMOTE_SYNC_SOURCE_BASE=${REMOTE_SYNC_SOURCE_BASE:-}
+REMOTE_SYNC_TARGET_BASE=${REMOTE_SYNC_TARGET_BASE:-}
+REMOTE_SYNC_MAPPING_FILE=${REMOTE_SYNC_MAPPING_FILE:-}
+REMOTE_SYNC_TARGET_STYLE=${REMOTE_SYNC_TARGET_STYLE:-gitbash}  # gitbash|cygwin|unix
+REMOTE_SYNC_REMOTE_OS=${REMOTE_SYNC_REMOTE_OS:-windows}  # windows|unix
+REMOTE_SYNC_SSH_OPTS=${REMOTE_SYNC_SSH_OPTS:-"-o ServerAliveInterval=60 -o ServerAliveCountMax=10"}
 NO_METADATA_UPDATE=${NO_METADATA_UPDATE:-0}  # Skip repository metadata updates (createrepo_c)
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
@@ -2670,6 +2679,11 @@ function load_config() {
         log "I" "No myrepo.cfg found beside script or in current directory"
     fi
 
+    # Resolve remote sync defaults after config is loaded.
+    if [[ -z "$REMOTE_SYNC_SOURCE_BASE" ]]; then
+        REMOTE_SYNC_SOURCE_BASE="$SHARED_REPO_PATH"
+    fi
+
     if [[ ${#LOCAL_RPM_SOURCES[@]} -eq 0 ]]; then
         LOCAL_RPM_SOURCES=(
             "$HOME/rpmbuild/RPMS"
@@ -2821,6 +2835,38 @@ function parse_args() {
                 SHARED_REPO_PATH="$2"
                 shift 2
                 ;;
+            --sync-mode)
+                SYNC_MODE="$2"
+                shift 2
+                ;;
+            --remote-sync-host)
+                REMOTE_SYNC_HOST="$2"
+                shift 2
+                ;;
+            --remote-sync-user)
+                REMOTE_SYNC_USER="$2"
+                shift 2
+                ;;
+            --remote-sync-source-base)
+                REMOTE_SYNC_SOURCE_BASE="$2"
+                shift 2
+                ;;
+            --remote-sync-target-base)
+                REMOTE_SYNC_TARGET_BASE="$2"
+                shift 2
+                ;;
+            --remote-sync-mapping-file)
+                REMOTE_SYNC_MAPPING_FILE="$2"
+                shift 2
+                ;;
+            --remote-sync-target-style)
+                REMOTE_SYNC_TARGET_STYLE="$2"
+                shift 2
+                ;;
+            --remote-sync-remote-os)
+                REMOTE_SYNC_REMOTE_OS="$2"
+                shift 2
+                ;;
             -s|--sync-only)
                 SYNC_ONLY=1
                 shift
@@ -2884,6 +2930,14 @@ function parse_args() {
                 echo "  --refresh-metadata     Force refresh of DNF metadata cache"
                 echo "  --set-permissions      Auto-fix file permissions"
                 echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
+                echo "  --sync-mode MODE       Sync mode: local|remote (default: $SYNC_MODE)"
+                echo "  --remote-sync-host HOST Remote host for remote sync mode"
+                echo "  --remote-sync-user USER Remote SSH user for remote sync mode"
+                echo "  --remote-sync-source-base PATH Source base for remote sync (default: SHARED_REPO_PATH)"
+                echo "  --remote-sync-target-base PATH Remote target base path"
+                echo "  --remote-sync-mapping-file FILE Optional mapping file (PowerShell format)"
+                echo "  --remote-sync-target-style STYLE Remote path style: gitbash|cygwin|unix"
+                echo "  --remote-sync-remote-os OS Remote OS type: windows|unix"
                 echo "  -s, --sync-only        Only sync repositories to shared location"
                 echo "  --no-sync              Skip synchronization to shared location"
                 echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
@@ -3343,7 +3397,7 @@ function show_runtime_status() {
 
         # Build list of repos to refresh
         local refresh_list=()
-        local excluded_set=()
+        local -A excluded_set=()
         # Build exclusion set from EXCLUDE_REPOS (CSV)
         if [[ -n "$EXCLUDE_REPOS" ]]; then
             local _ex
@@ -3415,6 +3469,15 @@ function show_runtime_status() {
     fi
     if [[ $NO_SYNC -eq 1 ]]; then
         log "I" "Repository synchronization to shared location disabled"
+    else
+        log "I" "Repository sync mode: $SYNC_MODE"
+        if [[ "$SYNC_MODE" == "remote" ]]; then
+            log "I" "Remote sync target: ${REMOTE_SYNC_USER:-<unset>}@${REMOTE_SYNC_HOST:-<unset>}"
+            log "I" "Remote sync source base: ${REMOTE_SYNC_SOURCE_BASE:-<unset>}"
+            log "I" "Remote sync target base: ${REMOTE_SYNC_TARGET_BASE:-<unset>}"
+            log "I" "Remote sync mapping file: ${REMOTE_SYNC_MAPPING_FILE:-<none>}"
+            log "I" "Remote sync target style/os: ${REMOTE_SYNC_TARGET_STYLE}/${REMOTE_SYNC_REMOTE_OS}"
+        fi
     fi
     if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
         log "I" "Repository metadata updates disabled"
@@ -3432,21 +3495,245 @@ function show_runtime_status() {
     fi
 }
 
-# Sync local repositories to shared location (excluding disabled repos)
+# Convert Windows path to rsync target style.
+function remote_sync_convert_path() {
+    local win_path="$1"
+    local style="$2"
+    local normalized="${win_path//\\//}"
+
+    if [[ "$style" == "unix" ]]; then
+        echo "$normalized"
+        return 0
+    fi
+
+    local drive_letter
+    drive_letter=$(printf "%s" "${normalized:0:1}" | tr '[:upper:]' '[:lower:]')
+    local path_without_drive="${normalized:2}"
+    path_without_drive="${path_without_drive#/}"
+
+    if [[ "$style" == "cygwin" ]]; then
+        echo "/cygdrive/${drive_letter}/${path_without_drive}"
+    else
+        echo "/${drive_letter}/${path_without_drive}"
+    fi
+}
+
+function remote_sync_ensure_remote_dir() {
+    local target_win_path="$1"
+    local target_unix_path="$2"
+    local ssh_target="${REMOTE_SYNC_USER}@${REMOTE_SYNC_HOST}"
+    local -a ssh_opts=()
+    read -r -a ssh_opts <<< "$REMOTE_SYNC_SSH_OPTS"
+
+    if [[ "$REMOTE_SYNC_REMOTE_OS" == "unix" ]]; then
+        # shellcheck disable=SC2029
+        ssh "${ssh_opts[@]}" "$ssh_target" "mkdir -p '$target_unix_path'" < /dev/null >/dev/null 2>&1 || return 1
+        return 0
+    fi
+
+    # Windows host: create destination via PowerShell on remote side.
+    local ps_cmd
+    ps_cmd="powershell.exe -NoProfile -Command \"if (!(Test-Path '$target_win_path')) { New-Item -ItemType Directory -Force -Path '$target_win_path' | Out-Null; Write-Host 'CREATED' } else { Write-Host 'EXISTS' }\""
+    local result
+    # shellcheck disable=SC2029
+    result=$(ssh "${ssh_opts[@]}" "$ssh_target" \
+        "$ps_cmd" \
+        < /dev/null 2>/dev/null)
+    [[ "$result" == *"CREATED"* || "$result" == *"EXISTS"* ]]
+}
+
+# Built-in remote repository synchronization using rsync + optional mapping file.
+function sync_to_remote_target() {
+    if [[ -z "$REMOTE_SYNC_HOST" || -z "$REMOTE_SYNC_USER" ]]; then
+        log "E" "Remote sync mode requires REMOTE_SYNC_HOST and REMOTE_SYNC_USER"
+        return 1
+    fi
+    if [[ -z "$REMOTE_SYNC_SOURCE_BASE" || ! -d "$REMOTE_SYNC_SOURCE_BASE" ]]; then
+        log "E" "Remote sync source base does not exist: $REMOTE_SYNC_SOURCE_BASE"
+        return 1
+    fi
+    if [[ -z "$REMOTE_SYNC_TARGET_BASE" ]]; then
+        log "E" "Remote sync mode requires REMOTE_SYNC_TARGET_BASE"
+        return 1
+    fi
+    if [[ "$REMOTE_SYNC_TARGET_STYLE" != "gitbash" && "$REMOTE_SYNC_TARGET_STYLE" != "cygwin" && "$REMOTE_SYNC_TARGET_STYLE" != "unix" ]]; then
+        log "E" "Invalid REMOTE_SYNC_TARGET_STYLE: $REMOTE_SYNC_TARGET_STYLE (allowed: gitbash, cygwin, unix)"
+        return 1
+    fi
+    if [[ "$REMOTE_SYNC_REMOTE_OS" != "windows" && "$REMOTE_SYNC_REMOTE_OS" != "unix" ]]; then
+        log "E" "Invalid REMOTE_SYNC_REMOTE_OS: $REMOTE_SYNC_REMOTE_OS (allowed: windows, unix)"
+        return 1
+    fi
+
+    local -a selected_repos=()
+    if [[ -n "$REPOS" ]]; then
+        IFS=',' read -ra selected_repos <<< "$REPOS"
+    fi
+
+    local synced_count=0
+    local warned_count=0
+
+    if [[ -n "$REMOTE_SYNC_MAPPING_FILE" ]]; then
+        if [[ ! -f "$REMOTE_SYNC_MAPPING_FILE" ]]; then
+            log "E" "Remote sync mapping file not found: $REMOTE_SYNC_MAPPING_FILE"
+            return 1
+        fi
+
+        log "I" "Remote sync using mapping file: $REMOTE_SYNC_MAPPING_FILE"
+        local source_fragment="" dest_fragment=""
+        while read -r source_fragment dest_fragment; do
+            [[ -z "$source_fragment" || -z "$dest_fragment" ]] && continue
+
+            if [[ ${#selected_repos[@]} -gt 0 ]]; then
+                local match=0 _r
+                for _r in "${selected_repos[@]}"; do [[ "$source_fragment" == "$_r" ]] && match=1 && break; done
+                [[ $match -eq 0 ]] && continue
+            fi
+
+            local source_dir="${REMOTE_SYNC_SOURCE_BASE}/${source_fragment}/"
+            if [[ ! -d "$source_dir" ]]; then
+                log "W" "Remote sync source missing, skipping: $source_dir"
+                continue
+            fi
+
+            local dest_win_path="${REMOTE_SYNC_TARGET_BASE}/${dest_fragment//\\//}"
+            local dest_rsync_path
+            dest_rsync_path=$(remote_sync_convert_path "$dest_win_path" "$REMOTE_SYNC_TARGET_STYLE")
+
+            if ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
+                log "W" "Could not ensure remote destination exists: $dest_win_path"
+                ((warned_count++))
+                continue
+            fi
+
+            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats --blocking-io)
+            [[ $DEBUG_LEVEL -ge 2 ]] && rsync_cmd+=(--verbose --info=progress2)
+            [[ $DRY_RUN -eq 1 ]] && rsync_cmd+=(--dry-run)
+            rsync_cmd+=(-e "ssh ${REMOTE_SYNC_SSH_OPTS}")
+            rsync_cmd+=("$source_dir" "${REMOTE_SYNC_USER}@${REMOTE_SYNC_HOST}:${dest_rsync_path}")
+
+            local rsync_exit=0 rsync_output=""
+            if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
+            else
+                rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
+            fi
+            if [[ $rsync_exit -eq 24 ]]; then
+                log "W" "Remote sync warning for $source_fragment: source files changed during transfer (exit 24)"
+                ((warned_count++))
+            elif [[ $rsync_exit -eq 23 ]]; then
+                log "W" "Remote sync warning for $source_fragment: partial transfer (exit 23)"
+                ((warned_count++))
+            elif [[ $rsync_exit -ne 0 ]]; then
+                [[ -n "$rsync_output" ]] && printf '%s\n' "$rsync_output" >&2
+                log "E" "Remote sync failed for $source_fragment (exit $rsync_exit)"
+                return "$rsync_exit"
+            fi
+            if [[ $DEBUG_LEVEL -lt 2 ]]; then
+                local files_xfr total_size sync_msg
+                files_xfr=$(printf '%s' "$rsync_output" | awk '/Number of regular files transferred:/{gsub(/,/,"",$NF); print $NF}')
+                total_size=$(printf '%s' "$rsync_output" | awk '/Total transferred file size:/{print $5}')
+                [[ -z "$files_xfr" ]] && files_xfr="0"
+                if [[ "$files_xfr" == "0" ]]; then
+                    sync_msg="up to date"
+                else
+                    sync_msg="${files_xfr} file(s), ${total_size:-0}"
+                fi
+                log "I" "Remote synced: $source_fragment \u2192 ${REMOTE_SYNC_HOST} (${sync_msg})"
+            fi
+            ((synced_count++))
+        done < <(grep -E '^\s*".+"\s*=\s*".+"' "$REMOTE_SYNC_MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ /; s/"\s*$//')
+    else
+        log "I" "Remote sync without mapping file (repo-name to repo-name mirroring)"
+        local repo_dir="" repo_name=""
+        for repo_dir in "$REMOTE_SYNC_SOURCE_BASE"/*; do
+            [[ -d "$repo_dir" ]] || continue
+            repo_name=$(basename "$repo_dir")
+
+            if [[ ${#selected_repos[@]} -gt 0 ]]; then
+                local match=0 _r
+                for _r in "${selected_repos[@]}"; do [[ "$repo_name" == "$_r" ]] && match=1 && break; done
+                [[ $match -eq 0 ]] && continue
+            fi
+
+            local source_dir="${repo_dir}/"
+            local dest_win_path="${REMOTE_SYNC_TARGET_BASE}/${repo_name}"
+            local dest_rsync_path
+            dest_rsync_path=$(remote_sync_convert_path "$dest_win_path" "$REMOTE_SYNC_TARGET_STYLE")
+
+            if ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
+                log "W" "Could not ensure remote destination exists: $dest_win_path"
+                ((warned_count++))
+                continue
+            fi
+
+            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats --blocking-io)
+            [[ $DEBUG_LEVEL -ge 2 ]] && rsync_cmd+=(--verbose --info=progress2)
+            [[ $DRY_RUN -eq 1 ]] && rsync_cmd+=(--dry-run)
+            rsync_cmd+=(-e "ssh ${REMOTE_SYNC_SSH_OPTS}")
+            rsync_cmd+=("$source_dir" "${REMOTE_SYNC_USER}@${REMOTE_SYNC_HOST}:${dest_rsync_path}")
+
+            local rsync_exit=0 rsync_output=""
+            if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
+            else
+                rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
+            fi
+            if [[ $rsync_exit -eq 24 ]]; then
+                log "W" "Remote sync warning for $repo_name: source files changed during transfer (exit 24)"
+                ((warned_count++))
+            elif [[ $rsync_exit -eq 23 ]]; then
+                log "W" "Remote sync warning for $repo_name: partial transfer (exit 23)"
+                ((warned_count++))
+            elif [[ $rsync_exit -ne 0 ]]; then
+                [[ -n "$rsync_output" ]] && printf '%s\n' "$rsync_output" >&2
+                log "E" "Remote sync failed for $repo_name (exit $rsync_exit)"
+                return "$rsync_exit"
+            fi
+            if [[ $DEBUG_LEVEL -lt 2 ]]; then
+                local files_xfr total_size sync_msg
+                files_xfr=$(printf '%s' "$rsync_output" | awk '/Number of regular files transferred:/{gsub(/,/,"",$NF); print $NF}')
+                total_size=$(printf '%s' "$rsync_output" | awk '/Total transferred file size:/{print $5}')
+                [[ -z "$files_xfr" ]] && files_xfr="0"
+                if [[ "$files_xfr" == "0" ]]; then
+                    sync_msg="up to date"
+                else
+                    sync_msg="${files_xfr} file(s), ${total_size:-0}"
+                fi
+                log "I" "Remote synced: $repo_name \u2192 ${REMOTE_SYNC_HOST} (${sync_msg})"
+            fi
+            ((synced_count++))
+        done
+    fi
+
+    log "I" "Remote repository sync completed: $synced_count target(s), $warned_count warning(s)"
+    return 0
+}
+
+# Sync repositories according to SYNC_MODE.
 function sync_to_shared_repos() {
-    # Only sync if not in dry run mode and shared repo path exists
+    # Skip sync if --no-sync option is specified
+    if [[ $NO_SYNC -eq 1 ]]; then
+        log "I" "⏭️  Synchronization to shared location skipped (--no-sync specified)"
+        return 0
+    fi
+
+    if [[ "$SYNC_MODE" == "remote" ]]; then
+        sync_to_remote_target
+        return $?
+    fi
+
+    if [[ "$SYNC_MODE" != "local" ]]; then
+        log "E" "Invalid SYNC_MODE: '$SYNC_MODE' (expected: local or remote)"
+        return 1
+    fi
+
+    # Local mode dry-run preview
     if [[ $DRY_RUN -eq 1 ]]; then
-        # In dry-run, still reflect scope and destination for clarity
         if [[ -n "$REPOS" ]]; then
             log "I" "Sync limited to repositories: $REPOS"
         fi
         log "I" "🔍 DRY RUN: Would sync repositories to shared location: $SHARED_REPO_PATH"
-        return 0
-    fi
-    
-    # Skip sync if --no-sync option is specified
-    if [[ $NO_SYNC -eq 1 ]]; then
-        log "I" "⏭️  Synchronization to shared location skipped (--no-sync specified)"
         return 0
     fi
     
@@ -3761,10 +4048,23 @@ function validate_and_handle_modes() {
         log "I" "DRY RUN mode enabled - no changes will be made"
     fi
 
+    case "$SYNC_MODE" in
+        local|remote) ;;
+        *)
+            log "E" "Invalid sync mode: $SYNC_MODE (allowed: local, remote)"
+            exit 1
+            ;;
+    esac
+
     # Handle sync-only mode (exits early if enabled)
     if [[ $SYNC_ONLY -eq 1 ]]; then
-        log "I" "SYNC ONLY mode - skipping package processing, only syncing to shared repos"
-        sync_to_shared_repos
+        log "I" "SYNC ONLY mode - skipping package processing, sync mode: $SYNC_MODE"
+        local sync_exit_code=0
+        sync_to_shared_repos || sync_exit_code=$?
+        if [[ $sync_exit_code -ne 0 ]]; then
+            log "E" "Sync failed with exit code $sync_exit_code"
+            exit "$sync_exit_code"
+        fi
         log "I" "Sync completed successfully"
         exit 0
     fi
