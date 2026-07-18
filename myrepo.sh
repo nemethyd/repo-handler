@@ -3,8 +3,8 @@
 # shellcheck disable=SC2155  # Allow 'local var=$(...)' style across the script
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
-# Assisted iteratively by AI automation (GitHub Copilot Chat) per documented prompts.
-# Last Updated: 2025-10-30
+# Assisted iteratively by AI automation (Cline with Qwen 3.7-max) per documented prompts.
+# Last Updated: 2025-07-18
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.11"
+VERSION="2.4.12"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
