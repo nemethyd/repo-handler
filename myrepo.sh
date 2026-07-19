@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.12"
+VERSION="2.4.13"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -64,6 +64,9 @@ REMOTE_SYNC_MAPPING_FILE=${REMOTE_SYNC_MAPPING_FILE:-}
 REMOTE_SYNC_TARGET_STYLE=${REMOTE_SYNC_TARGET_STYLE:-gitbash}  # gitbash|cygwin|unix
 REMOTE_SYNC_REMOTE_OS=${REMOTE_SYNC_REMOTE_OS:-windows}  # windows|unix
 REMOTE_SYNC_SSH_OPTS=${REMOTE_SYNC_SSH_OPTS:-"-o ServerAliveInterval=60 -o ServerAliveCountMax=10"}
+REMOTE_SYNC_TIMEOUT=${REMOTE_SYNC_TIMEOUT:-300}  # rsync timeout in seconds (0 = no timeout)
+REMOTE_SYNC_PROTOCOL=${REMOTE_SYNC_PROTOCOL:-}   # rsync protocol version (empty = auto-negotiate)
+REMOTE_SYNC_MAX_RETRIES=${REMOTE_SYNC_MAX_RETRIES:-2}  # retry count for transient rsync failures
 NO_METADATA_UPDATE=${NO_METADATA_UPDATE:-0}  # Skip repository metadata updates (createrepo_c)
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
@@ -2867,6 +2870,18 @@ function parse_args() {
                 REMOTE_SYNC_REMOTE_OS="$2"
                 shift 2
                 ;;
+            --remote-sync-timeout)
+                REMOTE_SYNC_TIMEOUT="$2"
+                shift 2
+                ;;
+            --remote-sync-protocol)
+                REMOTE_SYNC_PROTOCOL="$2"
+                shift 2
+                ;;
+            --remote-sync-max-retries)
+                REMOTE_SYNC_MAX_RETRIES="$2"
+                shift 2
+                ;;
             -s|--sync-only)
                 SYNC_ONLY=1
                 shift
@@ -2938,6 +2953,9 @@ function parse_args() {
                 echo "  --remote-sync-mapping-file FILE Optional mapping file (PowerShell format)"
                 echo "  --remote-sync-target-style STYLE Remote path style: gitbash|cygwin|unix"
                 echo "  --remote-sync-remote-os OS Remote OS type: windows|unix"
+                echo "  --remote-sync-timeout SEC  Rsync timeout in seconds (default: 300, 0=no timeout)"
+                echo "  --remote-sync-protocol VER Rsync protocol version (default: auto-negotiate)"
+                echo "  --remote-sync-max-retries N  Retry count for transient rsync failures (default: 2)"
                 echo "  -s, --sync-only        Only sync repositories to shared location"
                 echo "  --no-sync              Skip synchronization to shared location"
                 echo "  --no-metadata-update   Skip repository metadata updates (createrepo_c)"
@@ -3606,18 +3624,43 @@ function sync_to_remote_target() {
                 continue
             fi
 
-            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats --blocking-io)
+            # Build rsync command - removed --blocking-io (causes issues with Windows/Git Bash targets)
+            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats)
+            # Add timeout if configured (0 = no timeout)
+            [[ ${REMOTE_SYNC_TIMEOUT:-0} -gt 0 ]] && rsync_cmd+=(--timeout="$REMOTE_SYNC_TIMEOUT")
+            # Add protocol version if explicitly configured
+            [[ -n "${REMOTE_SYNC_PROTOCOL:-}" ]] && rsync_cmd+=(--protocol="$REMOTE_SYNC_PROTOCOL")
             [[ $DEBUG_LEVEL -ge 2 ]] && rsync_cmd+=(--verbose --info=progress2)
             [[ $DRY_RUN -eq 1 ]] && rsync_cmd+=(--dry-run)
             rsync_cmd+=(-e "ssh ${REMOTE_SYNC_SSH_OPTS}")
             rsync_cmd+=("$source_dir" "${REMOTE_SYNC_USER}@${REMOTE_SYNC_HOST}:${dest_rsync_path}")
 
-            local rsync_exit=0 rsync_output=""
-            if [[ $DEBUG_LEVEL -ge 2 ]]; then
-                "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
-            else
-                rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
-            fi
+            # Retry logic for transient rsync failures (exit codes 12, 23, 24, 25)
+            local rsync_exit=0 rsync_output="" retry_attempt=0
+            local max_retries=${REMOTE_SYNC_MAX_RETRIES:-2}
+            # Transient failure exit codes: 12=protocol error, 23=partial, 24=vanished source, 25=delete limit
+            local -a transient_codes=(12 23 24 25)
+            while (( retry_attempt <= max_retries )); do
+                rsync_exit=0
+                rsync_output=""
+                if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                    "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
+                else
+                    rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
+                fi
+                # Check if exit code is transient
+                local is_transient=0
+                for code in "${transient_codes[@]}"; do
+                    [[ $rsync_exit -eq $code ]] && is_transient=1 && break
+                done
+                if [[ $is_transient -eq 1 && $retry_attempt -lt $max_retries ]]; then
+                    ((retry_attempt++))
+                    log "W" "Remote sync transient failure for $source_fragment (exit $rsync_exit), retry $retry_attempt/$max_retries..."
+                    sleep $(( retry_attempt * 2 ))  # Exponential backoff: 2s, 4s, 6s...
+                    continue
+                fi
+                break
+            done
             if [[ $rsync_exit -eq 24 ]]; then
                 log "W" "Remote sync warning for $source_fragment: source files changed during transfer (exit 24)"
                 ((warned_count++))
@@ -3667,18 +3710,43 @@ function sync_to_remote_target() {
                 continue
             fi
 
-            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats --blocking-io)
+            # Build rsync command - removed --blocking-io (causes issues with Windows/Git Bash targets)
+            local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats)
+            # Add timeout if configured (0 = no timeout)
+            [[ ${REMOTE_SYNC_TIMEOUT:-0} -gt 0 ]] && rsync_cmd+=(--timeout="$REMOTE_SYNC_TIMEOUT")
+            # Add protocol version if explicitly configured
+            [[ -n "${REMOTE_SYNC_PROTOCOL:-}" ]] && rsync_cmd+=(--protocol="$REMOTE_SYNC_PROTOCOL")
             [[ $DEBUG_LEVEL -ge 2 ]] && rsync_cmd+=(--verbose --info=progress2)
             [[ $DRY_RUN -eq 1 ]] && rsync_cmd+=(--dry-run)
             rsync_cmd+=(-e "ssh ${REMOTE_SYNC_SSH_OPTS}")
             rsync_cmd+=("$source_dir" "${REMOTE_SYNC_USER}@${REMOTE_SYNC_HOST}:${dest_rsync_path}")
 
-            local rsync_exit=0 rsync_output=""
-            if [[ $DEBUG_LEVEL -ge 2 ]]; then
-                "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
-            else
-                rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
-            fi
+            # Retry logic for transient rsync failures (exit codes 12, 23, 24, 25)
+            local rsync_exit=0 rsync_output="" retry_attempt=0
+            local max_retries=${REMOTE_SYNC_MAX_RETRIES:-2}
+            # Transient failure exit codes: 12=protocol error, 23=partial, 24=vanished source, 25=delete limit
+            local -a transient_codes=(12 23 24 25)
+            while (( retry_attempt <= max_retries )); do
+                rsync_exit=0
+                rsync_output=""
+                if [[ $DEBUG_LEVEL -ge 2 ]]; then
+                    "${rsync_cmd[@]}" < /dev/null || rsync_exit=$?
+                else
+                    rsync_output=$("${rsync_cmd[@]}" < /dev/null 2>&1) || rsync_exit=$?
+                fi
+                # Check if exit code is transient
+                local is_transient=0
+                for code in "${transient_codes[@]}"; do
+                    [[ $rsync_exit -eq $code ]] && is_transient=1 && break
+                done
+                if [[ $is_transient -eq 1 && $retry_attempt -lt $max_retries ]]; then
+                    ((retry_attempt++))
+                    log "W" "Remote sync transient failure for $repo_name (exit $rsync_exit), retry $retry_attempt/$max_retries..."
+                    sleep $(( retry_attempt * 2 ))  # Exponential backoff: 2s, 4s, 6s...
+                    continue
+                fi
+                break
+            done
             if [[ $rsync_exit -eq 24 ]]; then
                 log "W" "Remote sync warning for $repo_name: source files changed during transfer (exit 24)"
                 ((warned_count++))

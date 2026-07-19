@@ -1,6 +1,6 @@
 # Repo Handler Script (v2.4.6)
 
-Author: Dániel Némethy (nemethy@moderato.hu)
+Author: Dániel Némethy (<nemethy@moderato.hu>)
 
 ## Purpose
 
@@ -13,6 +13,7 @@ The high‑level flow (golden system -> curated local repos -> optional sync) is
 ![MyRepo Workflow](images/MyRepo.png)
 
 Legend:
+
 - Golden / source system: authoritative list of currently installed RPMs.
 - Repo handler (`myrepo.sh`): classifies packages (NEW / UPDATE / EXISTS), downloads only what is missing or newer, prunes removed ones, regenerates metadata.
 - Local lean repositories: minimal per‑repository trees containing just required RPMs + `repodata/`.
@@ -25,17 +26,20 @@ Result: You retain only the subset of upstream content actually in use, drastica
 This project is intentionally delivered as **one self‑contained Bash script** (plus an optional config file):
 
 Why one file:
+
 1. Zero install friction – copy `myrepo.sh` to a host and run.
 2. Easier auditing – security / change reviews can diff a single artifact.
 3. Air‑gapped friendliness – no module resolution or path dependencies.
 4. Rapid field patching – emergency edits can be applied in place, then replaced later with a clean upstream copy.
 
 What this means:
+
 - No sourcing of external helper libraries is required (and we keep it that way).
 - `myrepo.cfg` is **optional**; absence falls back to safe internal defaults.
 - Any future feature must justify extraction; preference is structured sections inside the same file with clear comment banners.
 
 Non‑goals (by design):
+
 - Splitting into many shell modules.
 - Introducing a build / packaging step.
 - Requiring installation of the project into system paths to function.
@@ -60,7 +64,7 @@ Implemented convenience: `--write-default-config` writes a commented template `m
 
 ## Repository Layout
 
-```
+```text
 LOCAL_REPO_PATH/
    <repo_name>/
       repodata/              (generated here)
@@ -108,7 +112,7 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 ### Tunables Reference (All Adjustable Variables & Flags)
 
 | Category | Name / Flag | Type | Default | How to Set | Effect |
-|----------|-------------|------|---------|-----------|--------|
+| -------- | ----------- | ---- | ------- | ---------- | ------ |
 | Paths | LOCAL_REPO_PATH | path | /repo | cfg/env | Root of local repo tree |
 | Paths | SHARED_REPO_PATH | path | /mnt/hgfs/ForVMware/ol9_repos | cfg/env | rsync target |
 | Paths | SHARED_CACHE_PATH | path | /var/cache/myrepo | cfg/env | Shared metadata cache |
@@ -127,8 +131,11 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | Behavior | REMOTE_SYNC_MAPPING_FILE --remote-sync-mapping-file | path | (none) | cfg/CLI/env | Optional repo mapping file |
 | Behavior | REMOTE_SYNC_TARGET_STYLE --remote-sync-target-style | enum | gitbash | cfg/CLI/env | Remote rsync path style (gitbash/cygwin/unix) |
 | Behavior | REMOTE_SYNC_REMOTE_OS --remote-sync-remote-os | enum | windows | cfg/CLI/env | Remote host type (windows/unix) |
+| Behavior | REMOTE_SYNC_TIMEOUT --remote-sync-timeout | int | 300 | cfg/CLI/env | Rsync timeout in seconds (0=none) |
+| Behavior | REMOTE_SYNC_PROTOCOL --remote-sync-protocol | int | (auto) | cfg/CLI/env | Rsync protocol version (empty=auto) |
+| Behavior | REMOTE_SYNC_MAX_RETRIES --remote-sync-max-retries | int | 2 | cfg/CLI/env | Retry count for transient rsync failures |
 | Behavior | NO_SYNC --no-sync | bool | 0 | env/CLI | Skip rsync stage |
-| Behavior | SYNC_ONLY -s|--sync-only | bool | 0 | CLI | Only sync, skip processing |
+| Behavior | SYNC_ONLY -s\|--sync-only | bool | 0 | CLI | Only sync, skip processing |
 | Behavior | NO_METADATA_UPDATE --no-metadata-update | bool | 0 | env/CLI | Skip createrepo_c |
 | Behavior | FULL_REBUILD --full-rebuild | bool | 0 | cfg/CLI | Purge repos then rebuild |
 | Behavior | FORCE_REDOWNLOAD | bool | 0 | cfg/env | Remove existing before download |
@@ -157,7 +164,7 @@ Test hooks are for development only—do not enable them in production automatio
 
 ## Command Line Options (Implemented)
 
-```
+```text
 --cache-max-age SEC              Max age for cached repo metadata
 --shared-cache-path PATH         Cache directory (default: /var/cache/myrepo)
 --cleanup-uninstalled | --no-cleanup-uninstalled
@@ -185,6 +192,9 @@ Test hooks are for development only—do not enable them in production automatio
 --remote-sync-mapping-file FILE  Optional mapping file (PowerShell format)
 --remote-sync-target-style STYLE Remote path style: gitbash|cygwin|unix
 --remote-sync-remote-os OS       Remote OS type: windows|unix
+--remote-sync-timeout SEC        Rsync timeout in seconds (default: 300, 0=none)
+--remote-sync-protocol VER       Rsync protocol version (default: auto-negotiate)
+--remote-sync-max-retries N      Retry count for transient rsync failures (default: 2)
 -s | --sync-only                 Skip processing; just sync
 --no-sync                        Skip sync stage
 --no-metadata-update             Skip createrepo_c
@@ -199,7 +209,7 @@ Test hooks are for development only—do not enable them in production automatio
 ## Environment / Important Variables
 
 | Variable | Meaning |
-|----------|---------|
+| ---------- | ------- |
 | LOCAL_REPO_PATH | Root of local repositories |
 | SHARED_REPO_PATH | Sync destination (rsync target) |
 | SYNC_MODE | Sync strategy (`local` or `remote`) |
@@ -210,6 +220,9 @@ Test hooks are for development only—do not enable them in production automatio
 | REMOTE_SYNC_MAPPING_FILE | Optional mapping file for repo-to-path sync |
 | REMOTE_SYNC_TARGET_STYLE | Remote rsync path style (`gitbash`, `cygwin`, `unix`) |
 | REMOTE_SYNC_REMOTE_OS | Remote OS mode (`windows` or `unix`) |
+| REMOTE_SYNC_TIMEOUT | Rsync timeout in seconds (default: 300, 0=none) |
+| REMOTE_SYNC_PROTOCOL | Rsync protocol version (empty=auto-negotiate) |
+| REMOTE_SYNC_MAX_RETRIES | Retry count for transient rsync failures (exit 12,23,24,25) |
 | MANUAL_REPOS | Array of manual repositories (no DNF fetch) |
 | LOCAL_RPM_SOURCES | Directories scanned for existing RPMs first |
 | CACHE_MAX_AGE | Seconds before repo metadata cache refresh |
@@ -222,16 +235,18 @@ Test hooks are for development only—do not enable them in production automatio
 
 Unified logging helper:
 
-```
+```text
 log LEVEL "message" [threshold]
 ```
 
 Where:
+
 - LEVEL: E (error), W (warn), I (info), D (debug)
 - threshold (optional numeric): Minimum DEBUG_LEVEL required to emit this message (applies to D and I levels; E/W always shown unless DEBUG_LEVEL=0 and externally suppressed)
 
 Examples:
-```
+
+```bash
 log "D" "Using cache directory: $cache_dir" 2   # Shown when DEBUG_LEVEL >=2
 log "I" "   Skipping manual repo: $pkg" 1        # Info gated at level 1+
 log "E" "Failed to build cache"                # Always shown
@@ -250,16 +265,18 @@ Token mapping:
 | ❌ error      | ERR         |
 | ⚠️ warning    | WARN        |
 | ✅ success    | OK          |
-| ⏳ / 📘 info   | INFO        |
+| ⏳ / 📘 info  | INFO        |
 | (debug)       | DBG         |
 
 Example:
-```
+
+```bash
 ./myrepo.sh --plain --dry-run --name-filter '^bash$'
 ```
 
 Environment variable alternative:
-```
+
+```bash
 export PLAIN_MODE=1
 ./myrepo.sh
 ```
@@ -273,7 +290,7 @@ These environment variables are intended strictly for testing and development. D
 Current (namespaced) forms:
 
 | Variable | Purpose | When Honored |
-|----------|---------|--------------|
+| ---------- | --------- | -------------- |
 | MYREPO_TEST_ENABLE_SELECTIVE=1 | Force-mark one repo as changed to exercise selective metadata update path during tests. | During package status evaluation; ignored if `CHANGED_REPOS` already populated. |
 | MYREPO_TEST_BREAK_VERSION=1 | Interactive step prompts inside `version_is_newer` for the first N comparisons (see count var). | Each version comparison until counter hits 0. |
 | MYREPO_TEST_BREAK_VERSION_COUNT=5 | Remaining interactive steps for `version_is_newer`. Decremented automatically. | Set before run to adjust step budget. |
@@ -293,6 +310,7 @@ DRY_RUN=1 DEBUG_LEVEL=2 ./myrepo.sh --dry-run --name-filter '^bash$'
 Enter (newline) to step, `c` to continue (disable further breaks), `q` to abort. These are *development only* diagnostics and should not be enabled in production automation.
 
 Notes:
+
 - The selective metadata optimization updates metadata only for repositories whose RPM contents changed (added / updated / removed). If `CHANGED_REPOS` ends empty we conservatively scan all.
 - All test hook variables are *debugging aids*; avoid in production runs.
 
@@ -309,27 +327,32 @@ All can be overridden via `myrepo.cfg` or CLI; CLI wins.
 ## Examples
 
 Download only changed packages for selected repos:
-```
+
+```bash
 ./myrepo.sh --repos ol9_baseos_latest,ol9_appstream --max-changed-packages 100
 ```
 
 Dry run with filtering:
-```
+
+```bash
 ./myrepo.sh --dry-run --name-filter '^(kernel|openssl)'
 ```
 
 Full rebuild (purge + repopulate) without syncing yet:
-```
+
+```bash
 ./myrepo.sh --full-rebuild --no-sync
 ```
 
 Manual repositories only (metadata refresh):
-```
+
+```bash
 ./myrepo.sh --repos ol9_edge --refresh-metadata
 ```
 
 Sync only (no processing):
-```
+
+```bash
 ./myrepo.sh --sync-only
 ```
 
@@ -366,6 +389,7 @@ MIT License. See `LICENSE` file.
 ## Quality & Maintenance (Condensed History)
 
 Implemented improvements (chronological highlights):
+
 1. Batch formatting restored; core decomposed into focused functions.
 2. Centralized logging with emoji + plain mode fallback (`--plain`).
 3. Adaptive download fallback / regrow logic; counter clamps for safety.
@@ -380,34 +404,39 @@ Implemented improvements (chronological highlights):
 12. Tunables reference table & default config writer (`--write-default-config`).
 
 Final decisions:
+
 - Modular split explicitly declined to preserve single-file auditability & zero-install UX.
 - Legacy comment cleanup performed; residual cosmetic notes intentionally retained for historical context.
 
 Conventions: lifecycle function grouping; standardized emoji set (📘 ⚠️ ❌ ⏳ ✅) with ASCII tokens in plain mode; all future debugging hooks prefixed `MYREPO_TEST_`. Improvement journey concluded.
 
-- **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting). 
+- **Error Handling Flexibility**: Provides configurable behavior to either halt immediately on critical download errors or continue running despite them (CONTINUE_ON_ERROR setting).
 - **Repository Exclusions**: Allows excluding repositories that should not be included in the local/shared mirror.
 
 ## Architecture Overview
 
 The script manages a repository structure within **LOCAL_REPO_PATH** (typically `/repo`) that contains:
 
-### 1. **Internet-sourced repositories** 
+### 1. **Internet-sourced repositories**
+
 These are automatically managed repositories that mirror official internet repositories, but contain only packages that are installed on the local "golden copy" system. This dramatically reduces repository size compared to full upstream mirrors.
 
 ### 2. **Manual repositories** (MANUAL_REPOS)
+
 These are additional repositories (e.g., `ol9_edge`) that:
+
 - Are replicated and synchronized regardless of local installation status
 - Allow for manual package deployment and custom repository management  
 - Enable air-gapped environments to maintain custom package collections
 - Can be manually populated with RPMs outside the script's automatic processing
 
 **Key concepts:**
+
 - **LOCAL_REPO_PATH**: Base directory (`/repo`) containing the complete repository tree structure
 - **MANUAL_REPOS**: Specific repository names within LOCAL_REPO_PATH that receive special manual management treatment
 - **getPackage**: Subdirectory within each repository where RPM packages are stored
 
-## Requirements
+## Installation Requirements
 
 Before running `myrepo.sh`, ensure the following requirements are met:
 
@@ -422,6 +451,7 @@ Before running `myrepo.sh`, ensure the following requirements are met:
 The script now **automatically detects** whether it's running as root or as a regular user and adapts accordingly:
 
 **When running as regular user** (`./myrepo.sh`):
+
 - **Automatic Sudo Usage**: The script automatically prefixes necessary commands with `sudo`
 - **User runs script normally**: `./myrepo.sh` (without sudo)
 - The script detects EUID≠0 and internally uses `sudo` when needed for operations like:
@@ -430,6 +460,7 @@ The script now **automatically detects** whether it's running as root or as a re
   - Writing to system directories and fixing permissions
 
 **When running as root** (`sudo ./myrepo.sh`):
+
 - **Direct Command Usage**: Script runs commands directly without `sudo`
 - **User runs script as root**: `sudo ./myrepo.sh`
 - The script detects EUID=0 and assumes it already has elevated privileges
@@ -471,7 +502,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 
 ### Configuration Options
 
-```bash
+```ini
 # myrepo.cfg - Configuration file for myrepo.sh v2.4.0
 # The default values are given below, commented out.
 # To configure, uncomment the desired lines and change the values.
@@ -568,7 +599,7 @@ Messages are displayed with symbols that indicate their semantic meaning:
 - `[I]` Info: General informational messages
 - `[D]` Debug: Detailed debugging information
 
-#### Configuration
+#### Verbosity Configuration
 
 To set the verbosity level, modify the `DEBUG_LEVEL` option in `myrepo.cfg`:
 
@@ -592,14 +623,14 @@ This feature is useful for temporary or special-purpose repositories, such as **
 
 The `--name-filter` option allows you to process only specific packages based on their name patterns, making the script more efficient for targeted operations. This feature applies regex pattern matching to package names during the installed package fetching phase.
 
-#### Use Cases:
+#### Use Cases
 
 - **Testing**: Process only specific packages to test repository functionality
 - **Selective Mirroring**: Mirror only packages matching certain naming patterns (e.g., all `nodejs*` packages)
 - **Debugging**: Isolate specific packages for troubleshooting
 - **Performance**: Reduce processing time when only certain packages are needed
 
-#### Examples:
+#### Filtering Examples
 
 ```bash
 # Process only Firefox packages
@@ -615,7 +646,7 @@ The `--name-filter` option allows you to process only specific packages based on
 ./myrepo.sh --repos ol9_appstream --name-filter "firefox|chrome"
 ```
 
-#### Configuration File Support:
+#### Configuration File Support
 
 You can also set the name filter in `myrepo.cfg`:
 
@@ -624,7 +655,7 @@ You can also set the name filter in `myrepo.cfg`:
 NAME_FILTER="firefox"
 ```
 
-#### Important Notes:
+#### Important Notes
 
 - **Regex Support**: The pattern supports extended regular expressions (ERE)
 - **Efficient Processing**: Filtering is applied at the DNF query level, not after fetching all packages
@@ -647,7 +678,7 @@ The script requires proper write access to all configured directory paths. Direc
 #### Required Directories
 
 1. **LOCAL_REPO_PATH** (Critical)
-   - Main local repository directory 
+   - Main local repository directory
    - Must exist and be writable
    - All subdirectories must be writable
    - Validation includes practical write tests
@@ -687,6 +718,7 @@ The script performs comprehensive permission validation during startup:
 #### Setting Up Permissions
 
 **For Default Mode (ELEVATE_COMMANDS=1) - Recommended:**
+
 ```bash
 # Simply ensure your user has sudo privileges
 # The script will automatically use sudo for necessary operations
@@ -694,6 +726,7 @@ The script performs comprehensive permission validation during startup:
 ```
 
 **For Direct Mode (ELEVATE_COMMANDS=0) - Advanced:**
+
 ```bash
 # Run the entire script as root
 sudo ./myrepo.sh --no-elevate
@@ -716,38 +749,37 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 ./myrepo.sh [options]
 ```
 
+##  CLI Options
 
-## CLI Options
+| Option                      | Values   | Default                         | Description                                                         |
+| --------------------------- | -------- | ------------------------------- | ------------------------------------------------------------------- |
+| `--cache-max-age`           | *INT*    | `14400`                         | Cache validity in seconds (14400 = 4 hours).                        |
+| `--shared-cache-path`       | *PATH*   | `/var/cache/myrepo`             | Shared cache directory path.                                        |
+| `--cleanup-uninstalled`     | *(flag)* | *on*                            | Enable cleanup of uninstalled packages.                             |
+| `--no-cleanup-uninstalled`  | *(flag)* | *off*                           | Disable cleanup of uninstalled packages.                            |
+| `--parallel-compression`    | *(flag)* | *on*                            | Enable parallel compression for createrepo.                         |
+| `--no-parallel-compression` | *(flag)* | *off*                           | Disable parallel compression for createrepo.                        |
+| `--debug`                   | *0‒3*    | `1`                             | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose).     |
+| `--dry-run`                 | *(flag)* | *off*                           | Perform a dry run without making changes.                           |
+| `--exclude-repos`           | *CSV*    | *empty*                         | Comma-separated list of repos to exclude.                           |
+| `--full-rebuild`            | *(flag)* | *off*                           | Perform a full rebuild of the repository.                           |
+| `--local-repo-path`         | *PATH*   | `/repo`                         | Set local repository path.                                          |
+| `--manual-repos`            | *CSV*    | `ol9_edge`                      | Comma‑separated list of manual repositories.                        |
+| `--max-packages`            | *INT*    | `0`                             | Limit total number of packages processed (0 = no limit).            |
+| `--max-new-packages`        | *INT*    | `-1`                            | Limit number of new packages to download (-1 = no limit, 0 = none). |
+| `--name-filter`             | *REGEX*  | *empty*                         | Filter packages by name using regex pattern.                        |
+| `--parallel`                | *INT*    | `6`                             | Maximum concurrent download or processing jobs.                     |
+| `--repos`                   | *CSV*    | *all enabled*                   | Comma-separated list of repositories to process.                    |
+| `--shared-repo-path`        | *PATH*   | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                                         |
+| `--sync-only`               | *(flag)* | *off*                           | Skip download/cleanup; only run sync to shared repos.               |
+| `--no-sync`                 | *(flag)* | *off*                           | Skip synchronization to shared location entirely.                   |
+| `--no-metadata-update`      | *(flag)* | *off*                           | Skip repository metadata updates (createrepo_c).                    |
+| `--refresh-metadata`        | *(flag)* | *off*                           | Force refresh of DNF metadata cache and rebuild repo cache.         |
+| `--dnf-serial`              | *(flag)* | *off*                           | Use serial DNF mode to prevent database lock contention.            |
+| `-v, --verbose`             | *(flag)* | *off*                           | Set debug level to 2 (normal verbosity).                            |
+| `-h, --help`                | *(flag)* | *off*                           | Show help message and exit.                                         |
 
-| Option               | Values                     | Default               | Description                                                   |
-|----------------------|----------------------------|------------------------|---------------------------------------------------------------|
-| `--cache-max-age`    | *INT*                      | `14400`               | Cache validity in seconds (14400 = 4 hours).                 |
-| `--shared-cache-path`| *PATH*                     | `/var/cache/myrepo`   | Shared cache directory path.                                  |
-| `--cleanup-uninstalled` | *(flag)*                | *on*                  | Enable cleanup of uninstalled packages.                      |
-| `--no-cleanup-uninstalled` | *(flag)*             | *off*                 | Disable cleanup of uninstalled packages.                     |
-| `--parallel-compression` | *(flag)*               | *on*                  | Enable parallel compression for createrepo.                  |
-| `--no-parallel-compression` | *(flag)*            | *off*                 | Disable parallel compression for createrepo.                 |
-| `--debug`            | *0‒3*                      | `1`                   | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose). |
-| `--dry-run`          | *(flag)*                   | *off*                 | Perform a dry run without making changes.                     |
-| `--exclude-repos`    | *CSV*                      | *empty*               | Comma-separated list of repos to exclude.                     |
-| `--full-rebuild`     | *(flag)*                   | *off*                 | Perform a full rebuild of the repository.                     |
-| `--local-repo-path`  | *PATH*                     | `/repo`               | Set local repository path.                                    |
-| `--manual-repos`     | *CSV*                      | `ol9_edge`            | Comma‑separated list of manual repositories.                  |
-| `--max-packages`     | *INT*                      | `0`                   | Limit total number of packages processed (0 = no limit).      |
-| `--max-new-packages` | *INT*                      | `-1`                  | Limit number of new packages to download (-1 = no limit, 0 = none). |
-| `--name-filter`      | *REGEX*                    | *empty*               | Filter packages by name using regex pattern.                  |
-| `--parallel`         | *INT*                      | `6`                   | Maximum concurrent download or processing jobs.               |
-| `--repos`            | *CSV*                      | *all enabled*         | Comma-separated list of repositories to process.              |
-| `--shared-repo-path` | *PATH*                     | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                         |
-| `--sync-only`        | *(flag)*                   | *off*                 | Skip download/cleanup; only run sync to shared repos.         |
-| `--no-sync`          | *(flag)*                   | *off*                 | Skip synchronization to shared location entirely.             |
-| `--no-metadata-update` | *(flag)*                 | *off*                 | Skip repository metadata updates (createrepo_c).              |
-| `--refresh-metadata` | *(flag)*                   | *off*                 | Force refresh of DNF metadata cache and rebuild repo cache.   |
-| `--dnf-serial`       | *(flag)*                   | *off*                 | Use serial DNF mode to prevent database lock contention.      |
-| `-v, --verbose`      | *(flag)*                   | *off*                 | Set debug level to 2 (normal verbosity).                     |
-| `-h, --help`         | *(flag)*                   | *off*                 | Show help message and exit.                                   |
-
-#### Examples:
+### CLI Usage Examples
 
 ```bash
 # Basic usage with debugging
@@ -820,7 +852,7 @@ The script implements a sophisticated workflow that efficiently manages local pa
 
 4. **Cleaning Up**: Removes uninstalled packages and outdated versions from local repositories to maintain a clean, current state.
 
-5. **Dual-Tier Metadata Updates**: 
+5. **Dual-Tier Metadata Updates**:
    - **Regular Repositories**: Updates metadata only when packages are processed during the current run
    - **Manual Repositories**: Checks for manual changes (using configurable FAST/ACCURATE methods) and updates metadata accordingly, even if no packages were processed automatically
 
@@ -833,6 +865,7 @@ The script implements a sophisticated workflow that efficiently manages local pa
 The `--self-test` flag performs a fast, side‑effect free diagnostic of the runtime environment and prints a single JSON object, then exits (0 on success, 2 on failure). This is ideal for CI health checks or pre‑flight validation before scheduling large runs.
 
 Checks performed:
+
 - Bash version (requires 4+)
 - Presence of required commands (`dnf`, `rpm`, `createrepo_c` or fallback `createrepo`, `rsync`, core text utils)
 - Basic `dnf repolist` query (verifies DNF operational)
@@ -870,17 +903,20 @@ if ./myrepo.sh --self-test > selftest.json; then
 else
    echo "Environment NOT OK"; cat selftest.json; exit 1;
 fi
+```
 
 ## JSON Run Summary (`--json-summary`)
 
 The `--json-summary` flag emits a machine‑readable aggregate of the run at normal completion. This allows automation or CI to parse results without scraping colored table output.
 
 Behavior:
+
 - On success or failure (post-processing path), a single JSON object is produced.
 - Default target: `LOG_DIR/myrepo-summary.json` (if `LOG_DIR` is writable). If file creation fails, JSON is written to stdout.
 - Includes per‑repository counts, list of repos whose contents changed, failed downloads, and unknown packages (those whose source repo could not be determined).
 
 Schema (keys always present; arrays may be empty):
+
 ```json
 {
    "version": "2.4.0",
@@ -900,6 +936,7 @@ Schema (keys always present; arrays may be empty):
 ```
 
 Notes:
+
 - `repos` entries appear only for repositories encountered during classification (counts default to 0 where unset).
 - `changed_repos` is derived from the internal change tracking used for selective metadata updates.
 - `failed` lists only packages whose downloads definitively failed after all retries.
@@ -907,12 +944,14 @@ Notes:
 - Duration covers the whole script wall time from process start until emission.
 
 Example dry run usage capturing stdout fallback:
+
 ```bash
 ./myrepo.sh --dry-run --max-packages 0 --json-summary > summary.json
 jq '.changed_repos' summary.json
 ```
 
 Automation idea (fail build if any downloads failed):
+
 ```bash
 ./myrepo.sh --json-summary || true
 summary_file="${LOG_DIR%/}/myrepo-summary.json"
@@ -922,9 +961,9 @@ if (( fails > 0 )); then echo "Run had $fails failed downloads"; exit 1; fi
 ```
 
 Combine with `--self-test` in CI:
+
 ```bash
 ./myrepo.sh --self-test > env.json && ./myrepo.sh --json-summary
-```
 ```
 
 ## Tips
@@ -943,7 +982,7 @@ Combine with `--self-test` in CI:
 - **Metadata Refresh**: Use `--refresh-metadata` when DNF cache issues are suspected or after repository configuration changes.
 - **Cache Management**: The shared cache at `/var/cache/myrepo` provides optimal performance for both root and user executions.
 
-## License
+## License Details
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
