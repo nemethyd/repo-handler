@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.6)
+# Repo Handler Script (v2.4.14)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -51,16 +51,17 @@ Implemented convenience: `--write-default-config` writes a commented template `m
 1. Loads defaults and (if present) `myrepo.cfg` located beside the script.
 2. Auto‑detects privilege mode (root / sudo / user) and uses `dnf` directly or via `sudo`.
 3. Builds / reuses a shared metadata cache of repository package lists (only for installed packages) under `SHARED_CACHE_PATH`.
-4. Queries all installed packages with repository info using `dnf repoquery`.
-5. Filters, normalizes and deduplicates the package list (skips invalid repos, collapses duplicates, optional name regex filter).
-6. Determines the source repository for each package (resolving `@System` packages using cached metadata, fallback heuristics and manual repo scan).
-7. Classifies each package as NEW / UPDATE / EXISTS per repository by comparing the presence and version of RPM files already stored locally.
-8. Copies RPMs from configured local source directories first (avoids redownloading already available artifacts).
-9. Batches remaining NEW and UPDATE downloads per repository using `dnf download`, with fallback to smaller batches and individual retries; tracks failed downloads.
-10. (Optional) Removes RPMs for packages no longer installed (`cleanup_uninstalled_packages`).
-11. Generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
-12. (Optional) Syncs the local repository tree to a shared path, skipping disabled repos.
-13. Produces: colored per‑package log lines, a per‑repository summary table, failed download report, unknown package report.
+4. Removes RPMs for packages no longer installed (`cleanup_uninstalled_packages`), running before the disk-space check so a low-space condition can self-heal instead of aborting the run.
+5. Checks available disk space under `LOCAL_REPO_PATH` (`MIN_FREE_SPACE_MB`) and aborts if still below the minimum after cleanup.
+6. Queries all installed packages with repository info using `dnf repoquery`.
+7. Filters, normalizes and deduplicates the package list (skips invalid repos, collapses duplicates, optional name regex filter).
+8. Determines the source repository for each package (resolving `@System` packages using cached metadata, fallback heuristics and manual repo scan).
+9. Classifies each package as NEW / UPDATE / EXISTS per repository by comparing the presence and version of RPM files already stored locally.
+10. Copies RPMs from configured local source directories first (avoids redownloading already available artifacts).
+11. Batches remaining NEW and UPDATE downloads per repository using `dnf download`, with fallback to smaller batches and individual retries; tracks failed downloads.
+12. Generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
+13. (Optional) Syncs the local repository tree to a shared path, skipping disabled repos.
+14. Produces: colored per‑package log lines, a per‑repository summary table, failed download report, unknown package report.
 
 ## Repository Layout
 

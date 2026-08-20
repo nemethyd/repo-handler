@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max) per documented prompts.
-# Last Updated: 2025-07-18
+# Last Updated: 2026-08-20
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.13"
+VERSION="2.4.14"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -1695,10 +1695,10 @@ function cleanup_uninstalled_packages() {
                 
                 # PERFORMANCE OPTIMIZATION: Use rpm query with multiple files at once
                 local batch_metadata
-                if batch_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}|%{RELATIVEPATH}\n" "${batch_files[@]}" 2>/dev/null); then
+                if batch_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n" "${batch_files[@]}" 2>/dev/null) && [[ -n "$batch_metadata" ]]; then
                     
                     # Process the batch results
-                    while IFS='|' read -r pkg_name epoch version release arch _relative_path; do
+                    while IFS='|' read -r pkg_name epoch version release arch; do
                         # Skip empty lines
                         [[ -z "$pkg_name" ]] && continue
                         
@@ -2232,11 +2232,8 @@ function finalize_and_report() {
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     [[ $DRY_RUN -eq 1 ]] && echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
     generate_summary_table
-    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
-        cleanup_uninstalled_packages
-    else
-        log "I" "Cleanup of uninstalled packages disabled"
-    fi
+    # Cleanup of uninstalled packages now runs earlier (before check_disk_space) in main;
+    # not repeated here to avoid a second full repository scan in the same run.
     if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
         log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
     else
@@ -4200,6 +4197,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     validate_repository_structure
     show_runtime_status
     validate_and_handle_modes
+    # Run cleanup before the disk-space gate so a low-space condition can be
+    # self-healed by removing uninstalled/old packages instead of aborting outright.
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        cleanup_uninstalled_packages
+    else
+        log "I" "Cleanup of uninstalled packages disabled"
+    fi
     check_disk_space
     full_rebuild_repos
     cleanup_old_cache_directories
