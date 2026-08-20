@@ -3,7 +3,7 @@
 # shellcheck disable=SC2155  # Allow 'local var=$(...)' style across the script
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
-# Assisted iteratively by AI automation (Cline with Qwen 3.7-max) per documented prompts.
+# Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
 # Last Updated: 2026-08-20
 
 # MIT licensing
@@ -12,11 +12,11 @@
 # and synchronizes it with a shared repository, handling updates and cleanup of
 # local repositories. Optimized for performance with intelligent caching.
 
-# Lightweight, producti0on-focused version (complex adaptive tuning removed previously).
+# Lightweight, production-focused version.
 
 # Script version
 
-VERSION="2.4.14"
+VERSION="2.4.15"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -3621,6 +3621,10 @@ function sync_to_remote_target() {
                 continue
             fi
 
+            # Give feedback before the (potentially long) transfer starts; otherwise low debug
+            # levels stay silent until the whole rsync finishes, which looks like a hang.
+            log "I" "Remote syncing: $source_fragment → ${REMOTE_SYNC_HOST} (in progress...)"
+
             # Build rsync command - removed --blocking-io (causes issues with Windows/Git Bash targets)
             local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats)
             # Add timeout if configured (0 = no timeout)
@@ -3706,6 +3710,10 @@ function sync_to_remote_target() {
                 ((warned_count++))
                 continue
             fi
+
+            # Give feedback before the (potentially long) transfer starts; otherwise low debug
+            # levels stay silent until the whole rsync finishes, which looks like a hang.
+            log "I" "Remote syncing: $repo_name → ${REMOTE_SYNC_HOST} (in progress...)"
 
             # Build rsync command - removed --blocking-io (causes issues with Windows/Git Bash targets)
             local -a rsync_cmd=(rsync --archive --compress --delete --partial --human-readable --stats)
