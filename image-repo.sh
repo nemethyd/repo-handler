@@ -32,6 +32,8 @@ REMOTE_SYNC_SSH_OPTS="${REMOTE_SYNC_SSH_OPTS:-}"
 TARGET_REGISTRY="${TARGET_REGISTRY:-}"                   # e.g. mgmt2.kafir.police.hu:5000
 TARGET_NAMESPACE="${TARGET_NAMESPACE:-registry.k8s.io}" # preserves kubeadm-style naming
 DEST_TLS_VERIFY="${DEST_TLS_VERIFY:-true}"              # true | false
+PUBLISH_RETRY_TIMES="${PUBLISH_RETRY_TIMES:-3}"
+PUBLISH_RETRY_DELAY="${PUBLISH_RETRY_DELAY:-10s}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_FILE="${SCRIPT_DIR}/image-repo.cfg"
@@ -89,8 +91,11 @@ Options:
     --target-registry REG           Internal registry host[:port].
     --target-namespace NS           Namespace prefix in target registry.
     --dest-tls-verify BOOL          true|false for destination registry TLS check.
+    --publish-retry-times N         Retry count for image publication (default: 3).
+    --publish-retry-delay DUR       Delay between publication retries (default: 10s).
   --force-refresh                 Re-copy even if image exists locally.
   --dry-run                       Print actions but do not execute.
+    -V, --version                  Show image-repo.sh version.
   -h, --help                      Show this help.
 
 Images file format:
@@ -150,16 +155,24 @@ while [[ $# -gt 0 ]]; do
             TARGET_NAMESPACE="$2"; shift 2;;
         --dest-tls-verify)
             DEST_TLS_VERIFY="$2"; shift 2;;
+        --publish-retry-times)
+            PUBLISH_RETRY_TIMES="$2"; shift 2;;
+        --publish-retry-delay)
+            PUBLISH_RETRY_DELAY="$2"; shift 2;;
         --force-refresh)
             FORCE_REFRESH=1; shift;;
         --dry-run)
             DRY_RUN=1; shift;;
+        -V|--version)
+            printf 'image-repo.sh version %s\n' "${VERSION}"; exit 0;;
         -h|--help)
             usage; exit 0;;
         *)
             fail "Unknown option: $1";;
     esac
 done
+
+log_info "Starting image-repo.sh version ${VERSION}"
 
 # Resolve relative defaults against the script directory so aliases work from any cwd.
 if [[ "${IMAGES_FILE}" != /* ]]; then
@@ -341,10 +354,12 @@ function do_publish() {
 
         if [[ "${DRY_RUN}" == "0" ]]; then
             if [[ "${COPY_ALL_ARCHES}" == "1" ]]; then
-                skopeo copy --all --dest-tls-verify="${DEST_TLS_VERIFY}" "dir:${src_dir}" "docker://${dest_image}"
+                skopeo copy --all --retry-times="${PUBLISH_RETRY_TIMES}" --retry-delay="${PUBLISH_RETRY_DELAY}" --dest-tls-verify="${DEST_TLS_VERIFY}" "dir:${src_dir}" "docker://${dest_image}"
             else
-                skopeo copy --override-os "${IMAGE_OS}" --override-arch "${IMAGE_ARCH}" --dest-tls-verify="${DEST_TLS_VERIFY}" "dir:${src_dir}" "docker://${dest_image}"
+                skopeo copy --override-os "${IMAGE_OS}" --override-arch "${IMAGE_ARCH}" --retry-times="${PUBLISH_RETRY_TIMES}" --retry-delay="${PUBLISH_RETRY_DELAY}" --dest-tls-verify="${DEST_TLS_VERIFY}" "dir:${src_dir}" "docker://${dest_image}"
             fi
+            skopeo inspect --tls-verify="${DEST_TLS_VERIFY}" "docker://${dest_image}" >/dev/null \
+                || fail "Published image manifest verification failed: ${dest_image}"
         fi
     done < "${IMAGES_FILE}"
 

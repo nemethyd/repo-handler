@@ -15,6 +15,7 @@ Use `--all-arches` only when you explicitly need multi-architecture manifests.
 - `image-repo.sh`: mirror + optional rsync sync
 - `image-repo.cfg`: defaults (paths, remote host, sync settings)
 - `images/kubernetes-v1.36.4.txt`: minimal kubeadm image set for v1.36.4
+- `images/calico-v3.32.1.txt`: pinned Calico v3.32.1 image set
 
 
 ## Step 1: Dry-run mirror plan
@@ -81,6 +82,18 @@ cd ~/repo-handler
 ```
 
 `image-repo.sh` is the only supported command for mirror/sync/publish operations.
+Publication uses three retries by default and verifies the destination manifest
+with `skopeo inspect` before reporting success. Override the defaults with:
+
+```bash
+./image-repo.sh --publish-only \
+  --publish-retry-times 5 \
+  --publish-retry-delay 15s
+```
+
+An interrupted transfer may leave blobs in the registry without a usable tag.
+Always verify the final tag with `skopeo inspect`; a successful manifest check is
+the completion criterion.
 
 This produces image names like:
 
