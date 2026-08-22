@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.15"
+VERSION="2.4.16"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -1903,6 +1903,13 @@ function determine_repo_from_installed() {
     # Method 2: Try rpm query for vendor/packager info
     local rpm_info
     rpm_info=$(rpm -qi "$package_name" 2>/dev/null | grep -E "^(Vendor|Packager|URL)" | head -1)
+
+    # Helm is published in Oracle Linux's developer EPEL repository, but an
+    # installed package is commonly reported by DNF as coming from @System.
+    if [[ "$package_name" == "helm" ]]; then
+        echo "ol9_developer_EPEL"
+        return 0
+    fi
     
     if [[ "$rpm_info" == *"Oracle"* ]]; then
         # Try to guess Oracle repo based on package characteristics
@@ -1964,6 +1971,14 @@ function determine_repo_source() {
             return 0
         fi
     done
+
+    # Use package-specific repository knowledge when metadata lookup misses.
+    local fallback_repo
+    fallback_repo=$(determine_repo_from_installed "$package_name" "$package_version" "$package_release" "$package_arch") || fallback_repo=""
+    if [[ -n "$fallback_repo" ]]; then
+        echo "$fallback_repo"
+        return 0
+    fi
     
     # No match
     echo "Invalid"
@@ -2357,17 +2372,25 @@ function gather_installed_packages() {
         return 0
     fi
 
-    # Filter packages by repository restrictions if --repos is specified
-    if [[ -n "$REPOS" ]]; then
-        log "I" "Filtering packages to repositories: $REPOS"
+    # Filter packages by repository restrictions. Resolve @System first because
+    # it is a DNF origin marker, not the repository that owns the package.
+    if [[ -n "$REPOS" || -n "$EXCLUDE_REPOS" ]]; then
+        [[ -n "$REPOS" ]] && log "I" "Filtering packages to repositories: $REPOS"
+        [[ -n "$EXCLUDE_REPOS" ]] && log "I" "Excluding packages from repositories: $EXCLUDE_REPOS"
         local filtered_result=""
         while IFS='|' read -r name epoch version release arch repo; do
             [[ -z "$name" ]] && continue
             [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
-            
-            # Check if this package's repository should be processed
-            if should_process_repo "$repo"; then
-                filtered_result+="${name}|${epoch}|${version}|${release}|${arch}|${repo}"$'\n'
+
+            local effective_repo="$repo"
+            if [[ "$effective_repo" == "@System" || "$effective_repo" == "System" || "$effective_repo" == "@commandline" || "$effective_repo" == "Invalid" ]]; then
+                effective_repo=$(determine_repo_source "$name" "$epoch" "$version" "$release" "$arch") || effective_repo=""
+            fi
+
+            # Apply restrictions to the resolved repository and preserve it for
+            # classification so the package is not filtered a second time.
+            if [[ -n "$effective_repo" ]] && should_process_repo "$effective_repo"; then
+                filtered_result+="${name}|${epoch}|${version}|${release}|${arch}|${effective_repo}"$'\n'
             fi
         done <<< "$repoquery_result"
         
