@@ -5,11 +5,12 @@ set -euo pipefail
 # Build a minimal local image repository from an explicit image list
 # and optionally sync it to an internal host (myrepo-style workflow).
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 LOCAL_IMAGE_PATH="${LOCAL_IMAGE_PATH:-/repo/images/kubernetes/v1.36}"
 IMAGES_FILE="${IMAGES_FILE:-./images/kubernetes-v1.36.4.txt}"
 ARCHIVE_DIGESTS_FILE="${ARCHIVE_DIGESTS_FILE:-${LOCAL_IMAGE_PATH}/images.lock}"
+ARCHIVE_DIGESTS_FILE_DERIVED=1
 
 SYNC_ONLY="${SYNC_ONLY:-0}"
 NO_SYNC="${NO_SYNC:-0}"
@@ -73,6 +74,7 @@ Usage:
 Options:
   --images-file FILE              Path to text file with one image reference per line.
   --local-image-path PATH         Local output root for mirrored images.
+    --archive-digests-file FILE     Lock file path (defaults to LOCAL_IMAGE_PATH/images.lock).
   --sync-only                     Skip mirror/update, perform sync only.
     --publish                       Execute publish step after mirror/sync.
     --publish-only                  Run only the publish step.
@@ -111,6 +113,9 @@ EOF
 if [[ -f "${CFG_FILE}" ]]; then
     # shellcheck source=/dev/null
     source "${CFG_FILE}"
+    if [[ "${ARCHIVE_DIGESTS_FILE}" != "${LOCAL_IMAGE_PATH}/images.lock" ]]; then
+        ARCHIVE_DIGESTS_FILE_DERIVED=0
+    fi
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -119,6 +124,8 @@ while [[ $# -gt 0 ]]; do
             IMAGES_FILE="$2"; shift 2;;
         --local-image-path)
             LOCAL_IMAGE_PATH="$2"; shift 2;;
+        --archive-digests-file)
+            ARCHIVE_DIGESTS_FILE="$2"; ARCHIVE_DIGESTS_FILE_DERIVED=0; shift 2;;
         --sync-only)
             SYNC_ONLY=1; shift;;
         --publish)
@@ -171,6 +178,13 @@ while [[ $# -gt 0 ]]; do
             fail "Unknown option: $1";;
     esac
 done
+
+# A config file may derive the lock path from its own workflow directory. If the
+# CLI selects another image root, keep the lock file with that workflow unless
+# an explicit lock path was supplied.
+if [[ ${ARCHIVE_DIGESTS_FILE_DERIVED} -eq 1 ]]; then
+    ARCHIVE_DIGESTS_FILE="${LOCAL_IMAGE_PATH}/images.lock"
+fi
 
 log_info "Starting image-repo.sh version ${VERSION}"
 
