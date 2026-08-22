@@ -6,3 +6,4 @@ myrepo_debug.log
 myrepo.log
 tests/test_force_redownload_state/
 browser/
+.clinerules
