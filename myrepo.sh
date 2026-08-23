@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.16"
+VERSION="2.4.17"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -76,6 +76,7 @@ FULL_REBUILD=${FULL_REBUILD:-0}
 LOG_DIR=${LOG_DIR:-"/var/log/myrepo"}
 SET_PERMISSIONS=${SET_PERMISSIONS:-0}
 REFRESH_METADATA=${REFRESH_METADATA:-0}
+MODULE_STREAMS=${MODULE_STREAMS:-}
 DNF_SERIAL=${DNF_SERIAL:-0}
 # Self-test mode (diagnostic JSON output)
 SELF_TEST=${SELF_TEST:-0}
@@ -3975,6 +3976,251 @@ function update_all_repository_metadata() {
     fi
 }
 
+# Preserve any existing modular metadata files while repodata is regenerated.
+# This is intentionally conservative: we do not synthesize module metadata from
+# RPMs, but we keep the upstream metadata that already exists so a filtered subset
+# repo does not silently lose its module stream view during repodata refresh.
+function find_repository_module_metadata_files() {
+    local repo_base_path="$1"
+    find "$repo_base_path" -type f \( -name "modules.yaml" -o -name "modules.yml" \) 2>/dev/null
+}
+
+function preserve_module_metadata() {
+    local repo_base_path="$1"
+    local backup_dir=""
+    local module_path=""
+    local -a module_files=()
+
+    while IFS= read -r module_path; do
+        [[ -n "$module_path" ]] || continue
+        module_files+=("$module_path")
+    done < <(find_repository_module_metadata_files "$repo_base_path")
+
+    if [[ ${#module_files[@]} -eq 0 ]]; then
+        printf '%s\n' ""
+        return 0
+    fi
+
+    backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/myrepo-modules.XXXXXX")"
+    for module_path in "${module_files[@]}"; do
+        local rel_path="${module_path#$repo_base_path/}"
+        mkdir -p "$(dirname "$backup_dir/$rel_path")"
+        cp -a "$module_path" "$backup_dir/$rel_path"
+    done
+
+    printf '%s\n' "$backup_dir"
+    return 0
+}
+
+function restore_preserved_module_metadata() {
+    local repo_base_path="$1"
+    local backup_dir="$2"
+
+    [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 0
+
+    while IFS= read -r source_file; do
+        [[ -n "$source_file" ]] || continue
+        local rel_path="${source_file#$backup_dir/}"
+        local target_path="$repo_base_path/$rel_path"
+        mkdir -p "$(dirname "$target_path")"
+
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo cp -a "$source_file" "$target_path"
+        else
+            cp -a "$source_file" "$target_path"
+        fi
+    done < <(find "$backup_dir" -type f \( -name "modules.yaml" -o -name "modules.yml" \) 2>/dev/null)
+
+    rm -rf "$backup_dir"
+}
+
+# Keep only the requested module streams from a preserved module metadata file.
+# This is intentionally opt-in: on a filtered subset repo, callers can set
+# MODULE_STREAMS="1.24,1.26" to retain only those streams. Unset or empty means
+# leave module metadata untouched.
+function collect_module_package_names_from_rpms() {
+    local packages_path="$1"
+    local rpm_file=""
+    local name_text=""
+
+    if [[ ! -d "$packages_path" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r rpm_file; do
+        [[ -n "$rpm_file" ]] || continue
+
+        local rpm_name
+        rpm_name="$(basename "$rpm_file")"
+        rpm_name="${rpm_name%.rpm}"
+
+        # Strip version-release and architecture suffixes from the filename while
+        # preserving hyphenated package names (for example nginx-1.26.2-1.el9.x86_64
+        # becomes nginx). This keeps the inference aligned with the module name.
+        name_text="${rpm_name%%-[0-9]*}"
+        if [[ -z "$name_text" || "$name_text" == "$rpm_name" ]]; then
+            name_text="$rpm_name"
+        fi
+
+        [[ -n "$name_text" ]] && printf '%s\n' "$name_text"
+    done < <(find "$packages_path" -type f -name "*.rpm" 2>/dev/null | sort)
+}
+
+function infer_module_streams_for_repo() {
+    local repo_base_path="$1"
+    local packages_path="$2"
+    local selected_file=""
+    local module_file=""
+    local module_name=""
+    local module_stream=""
+    local current_stream=""
+    local inferred=""
+    declare -A selected_names=()
+    declare -A stream_names=()
+
+    selected_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-names.XXXXXX")"
+    collect_module_package_names_from_rpms "$packages_path" > "$selected_file"
+
+    while IFS= read -r pkg_name; do
+        [[ -n "$pkg_name" ]] || continue
+        selected_names["$pkg_name"]=1
+    done < "$selected_file"
+    rm -f "$selected_file"
+
+    if [[ ${#selected_names[@]} -eq 0 ]]; then
+        printf '%s\n' ""
+        return 0
+    fi
+
+    while IFS= read -r module_file; do
+        [[ -n "$module_file" ]] || continue
+        module_name=""
+        module_stream=""
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*---[[:space:]]*$ ]]; then
+                if [[ -n "$module_name" && -n "$module_stream" && -n "${selected_names[$module_name]:-}" ]]; then
+                    stream_names["$module_stream"]=1
+                fi
+                module_name=""
+                module_stream=""
+                continue
+            fi
+            if [[ "$line" =~ ^[[:space:]]*name:[[:space:]]*(.+)$ ]]; then
+                module_name="${BASH_REMATCH[1]}"
+                module_name="${module_name//\"/}"
+                module_name="${module_name//\'/}"
+                module_name="${module_name%%[[:space:]]*}"
+            fi
+            if [[ "$line" =~ ^[[:space:]]*stream:[[:space:]]*(.+)$ ]]; then
+                module_stream="${BASH_REMATCH[1]}"
+                module_stream="${module_stream//\"/}"
+                module_stream="${module_stream//\'/}"
+                module_stream="${module_stream%%[[:space:]]*}"
+            fi
+        done < "$module_file"
+
+        if [[ -n "$module_name" && -n "$module_stream" && -n "${selected_names[$module_name]:-}" ]]; then
+            stream_names["$module_stream"]=1
+        fi
+    done < <(find_repository_module_metadata_files "$repo_base_path")
+
+    if [[ ${#stream_names[@]} -gt 1 ]]; then
+        local highest_stream
+        highest_stream=$(printf '%s\n' "${!stream_names[@]}" | sort -V | tail -n 1)
+        printf '%s\n' "$highest_stream"
+        return 0
+    fi
+
+    for current_stream in "${!stream_names[@]}"; do
+        if [[ -n "$inferred" ]]; then
+            inferred+=","
+        fi
+        inferred+="$current_stream"
+    done
+
+    printf '%s\n' "$inferred"
+    return 0
+}
+
+function filter_module_metadata_for_streams() {
+    local repo_base_path="$1"
+    local allowed_streams="${2:-${MODULE_STREAMS:-}}"
+
+    [[ -n "$allowed_streams" ]] || return 0
+
+    local -a module_files=()
+    while IFS= read -r module_file; do
+        [[ -n "$module_file" ]] || continue
+        module_files+=("$module_file")
+    done < <(find_repository_module_metadata_files "$repo_base_path")
+
+    if [[ ${#module_files[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    local stream_csv="$allowed_streams"
+    local awk_allowed
+    awk_allowed=$(printf '%s\n' "$stream_csv" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF { printf "%s%s", sep, $0; sep="|" } END { if (NR==0) printf "" }')
+
+    for module_file in "${module_files[@]}"; do
+        local tmp_file
+        tmp_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-filter.XXXXXX")"
+
+        awk -v allowed="$awk_allowed" '
+            BEGIN {
+                split(allowed, arr, "|");
+                for (i in arr) {
+                    if (arr[i] != "") keep[arr[i]] = 1;
+                }
+                doc_keep = 0;
+                in_doc = 0;
+                doc_count = 0;
+            }
+            function flush_doc() {
+                if (doc_keep) {
+                    for (i = 1; i <= doc_count; i++) print doc[i];
+                }
+                delete doc;
+                doc_count = 0;
+                doc_keep = 0;
+                in_doc = 0;
+            }
+            /^---[[:space:]]*$/ {
+                if (in_doc) flush_doc();
+                next;
+            }
+            {
+                if (!in_doc) {
+                    in_doc = 1;
+                    doc_count = 0;
+                    doc_keep = 0;
+                }
+                doc[++doc_count] = $0;
+                if ($0 ~ /^[[:space:]]*stream:[[:space:]]*/) {
+                    stream_value = $0;
+                    sub(/^[[:space:]]*stream:[[:space:]]*/, "", stream_value);
+                    gsub(/[[:space:]]+$/, "", stream_value);
+                    gsub(/"/, "", stream_value);
+                    if (keep[stream_value]) doc_keep = 1;
+                }
+            }
+            END {
+                if (in_doc) flush_doc();
+            }
+        ' "$module_file" > "$tmp_file"
+
+        if [[ -s "$tmp_file" ]]; then
+            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                sudo cp -a "$tmp_file" "$module_file"
+            else
+                cp -a "$tmp_file" "$module_file"
+            fi
+        else
+            rm -f "$tmp_file"
+        fi
+    done
+}
+
 # Update repository metadata using createrepo_c
 function update_repository_metadata() {
     local repo_name="$1"
@@ -3991,6 +4237,7 @@ function update_repository_metadata() {
     
     local repo_base_path
     local packages_path
+    local module_backup_dir=""
     
     if [[ $is_manual_repo == true ]]; then
         # For manual repositories, repo_path is already the base path
@@ -4027,6 +4274,27 @@ function update_repository_metadata() {
     if [[ $DRY_RUN -eq 1 ]]; then
         log "I" "🔍 $(align_repo_name "$repo_name"): Would update repository metadata (createrepo_c --update on $repo_base_path)"
         return 0
+    fi
+    
+    # Preserve any module metadata files before repodata regeneration so modular
+    # repo views do not disappear when repodata is rebuilt from a filtered subset.
+    module_backup_dir=$(preserve_module_metadata "$repo_base_path")
+    if [[ -n "$module_backup_dir" ]]; then
+        log "D" "$(align_repo_name "$repo_name"): Preserved modular metadata under $module_backup_dir" 2
+    fi
+
+    # Optional stream-aware filtering for modular repos. If MODULE_STREAMS is not
+    # set, infer the relevant stream(s) from the RPM names currently selected for
+    # this repository and filter the module metadata to those streams only.
+    local inferred_module_streams=""
+    if [[ -n "${MODULE_STREAMS:-}" ]]; then
+        inferred_module_streams="$MODULE_STREAMS"
+    else
+        inferred_module_streams="$(infer_module_streams_for_repo "$repo_base_path" "$packages_path")"
+    fi
+    if [[ -n "$inferred_module_streams" ]]; then
+        filter_module_metadata_for_streams "$repo_base_path" "$inferred_module_streams"
+        log "I" "$(align_repo_name "$repo_name"): Filtered module metadata to streams: $inferred_module_streams" 2
     fi
     
     if [[ $is_manual_repo == true ]]; then
@@ -4068,6 +4336,7 @@ function update_repository_metadata() {
         createrepo_cmd="createrepo --update"
     else
         log "E" "Neither createrepo_c nor createrepo found - cannot update repository metadata"
+        restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
         return 1
     fi
     
@@ -4085,6 +4354,7 @@ function update_repository_metadata() {
     
     # Execute createrepo command
     if eval "$createrepo_cmd" >/dev/null 2>&1; then
+        restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
         if [[ $is_manual_repo == true ]]; then
             log "I" "✅ $(align_repo_name "$repo_name"): Manual repository metadata updated successfully" 2
         else
@@ -4092,6 +4362,7 @@ function update_repository_metadata() {
         fi
         return 0
     else
+        restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
         log "E" "❌ $(align_repo_name "$repo_name"): Failed to update repository metadata"
         return 1
     fi
