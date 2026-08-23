@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.14)
+# Repo Handler Script (v2.4.17)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -87,6 +87,7 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
 - Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
 - Metadata generation via `createrepo_c` with optional parallel workers.
+- Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set.
 - Auto privilege detection (`ELEVATE_COMMANDS`=auto) – uses sudo only when needed.
 - Filtering: include (`--repos`), exclude (`--exclude-repos`), name regex (`--name-filter`).
 - Limits: `--max-packages` (overall processed), `--max-changed-packages` (new + update downloads; 0=none, -1=unlimited).
@@ -94,6 +95,17 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Manual repository metadata refresh detection (timestamp + presence logic).
 - Summary table and reports (failed downloads, unknown packages).
 - Plain / no-emoji output mode (`--plain` / `--no-emoji`) for parser-friendly logs.
+
+## Modular repository metadata handling
+
+Some Oracle Linux / RHEL-style repositories expose DNF module streams through `modules.yaml` or `modules.yml` files in the repository metadata. When a curated subset repo is rebuilt, `myrepo.sh` now preserves and restores those module metadata files before and after repodata regeneration so the filtered repository keeps module information instead of silently dropping it.
+
+If the repo contains only a subset of streams, the script can also narrow the metadata to the relevant stream(s):
+
+- `MODULE_STREAMS="1.26"` explicitly retains only the selected stream.
+- If `MODULE_STREAMS` is unset, the script tries to infer the right stream automatically from the RPMs present in the repo.
+
+This is important for subset repos that mirror only selected package versions, because DNF otherwise may show an incomplete or misleading module stream list after metadata regeneration.
 
 ## Configuration (`myrepo.cfg`)
 
