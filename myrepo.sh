@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.17"
+VERSION="2.4.18"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -3982,7 +3982,7 @@ function update_all_repository_metadata() {
 # repo does not silently lose its module stream view during repodata refresh.
 function find_repository_module_metadata_files() {
     local repo_base_path="$1"
-    find "$repo_base_path" -type f \( -name "modules.yaml" -o -name "modules.yml" -o -name "modules.yaml.gz" -o -name "modules.yml.gz" \) 2>/dev/null
+    find "$repo_base_path" -type f \( -name "*modules.yaml" -o -name "*modules.yml" -o -name "*modules.yaml.gz" -o -name "*modules.yml.gz" -o -name "*modules.yaml.zst" -o -name "*modules.yml.zst" \) 2>/dev/null
 }
 
 function read_module_metadata_file() {
@@ -3990,6 +3990,7 @@ function read_module_metadata_file() {
 
     case "$module_file" in
         *.gz) gzip -cd -- "$module_file" 2>/dev/null ;;
+        *.zst) zstd -cd -- "$module_file" 2>/dev/null ;;
         *) cat -- "$module_file" ;;
     esac
 }
@@ -4012,7 +4013,7 @@ function preserve_module_metadata() {
 
     backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/myrepo-modules.XXXXXX")"
     for module_path in "${module_files[@]}"; do
-        local rel_path="${module_path#$repo_base_path/}"
+        local rel_path="${module_path#"$repo_base_path"/}"
         mkdir -p "$(dirname "$backup_dir/$rel_path")"
         cp -a "$module_path" "$backup_dir/$rel_path"
     done
@@ -4029,7 +4030,7 @@ function restore_preserved_module_metadata() {
 
     while IFS= read -r source_file; do
         [[ -n "$source_file" ]] || continue
-        local rel_path="${source_file#$backup_dir/}"
+        local rel_path="${source_file#"$backup_dir"/}"
         local target_path="$repo_base_path/$rel_path"
         mkdir -p "$(dirname "$target_path")"
 
@@ -4038,7 +4039,7 @@ function restore_preserved_module_metadata() {
         else
             cp -a "$source_file" "$target_path"
         fi
-    done < <(find "$backup_dir" -type f \( -name "modules.yaml" -o -name "modules.yml" \) 2>/dev/null)
+    done < <(find "$backup_dir" -type f \( -name "*modules.yaml" -o -name "*modules.yml" -o -name "*modules.yaml.gz" -o -name "*modules.yml.gz" -o -name "*modules.yaml.zst" -o -name "*modules.yml.zst" \) 2>/dev/null)
 
     rm -rf "$backup_dir"
 }
@@ -4071,6 +4072,9 @@ function collect_module_package_names_from_rpms() {
             name_text="$rpm_name"
         fi
 
+        if [[ -n "${NAME_FILTER:-}" && ! "$name_text" =~ $NAME_FILTER ]]; then
+            continue
+        fi
         [[ -n "$name_text" ]] && printf '%s\n' "$name_text"
     done < <(find "$packages_path" -type f -name "*.rpm" 2>/dev/null | sort)
 }
@@ -4114,13 +4118,13 @@ function infer_module_streams_for_repo() {
                 module_stream=""
                 continue
             fi
-            if [[ "$line" =~ ^[[:space:]]*name:[[:space:]]*(.+)$ ]]; then
+            if [[ "$line" =~ ^[[:space:]]{2}name:[[:space:]]*(.+)$ ]]; then
                 module_name="${BASH_REMATCH[1]}"
                 module_name="${module_name//\"/}"
                 module_name="${module_name//\'/}"
                 module_name="${module_name%%[[:space:]]*}"
             fi
-            if [[ "$line" =~ ^[[:space:]]*stream:[[:space:]]*(.+)$ ]]; then
+            if [[ "$line" =~ ^[[:space:]]{2}stream:[[:space:]]*(.+)$ ]]; then
                 module_stream="${BASH_REMATCH[1]}"
                 module_stream="${module_stream//\"/}"
                 module_stream="${module_stream//\'/}"
@@ -4184,10 +4188,13 @@ function filter_module_metadata_for_streams() {
                 doc_keep = 0;
                 in_doc = 0;
                 doc_count = 0;
+                emitted_docs = 0;
             }
             function flush_doc() {
                 if (doc_keep) {
+                    if (emitted_docs > 0) print "---";
                     for (i = 1; i <= doc_count; i++) print doc[i];
+                    emitted_docs++;
                 }
                 delete doc;
                 doc_count = 0;
@@ -4219,15 +4226,25 @@ function filter_module_metadata_for_streams() {
         ' <(read_module_metadata_file "$module_file") > "$tmp_file"
 
         if [[ -s "$tmp_file" ]]; then
-            if [[ "$module_file" == *.gz ]]; then
+            if [[ "$module_file" == *.gz || "$module_file" == *.zst ]]; then
+                local compression_command
                 if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                     local compressed_tmp
                     compressed_tmp="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-compressed.XXXXXX.gz")"
-                    gzip -c "$tmp_file" > "$compressed_tmp"
+                    if [[ "$module_file" == *.zst ]]; then
+                        compression_command="zstd -q -c"
+                    else
+                        compression_command="gzip -c"
+                    fi
+                    $compression_command "$tmp_file" > "$compressed_tmp"
                     sudo cp -a "$compressed_tmp" "$module_file"
                     rm -f "$compressed_tmp"
                 else
-                    gzip -c "$tmp_file" > "$module_file"
+                    if [[ "$module_file" == *.zst ]]; then
+                        zstd -q -f -c "$tmp_file" > "$module_file"
+                    else
+                        gzip -c "$tmp_file" > "$module_file"
+                    fi
                 fi
             elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                 sudo cp -a "$tmp_file" "$module_file"
@@ -4244,9 +4261,12 @@ function filter_module_metadata_for_streams() {
 # standalone modulemd files, so preserving them on disk is not enough for DNF.
 function inject_module_metadata_into_repodata() {
     local repo_base_path="$1"
+    local metadata_root="${2:-$repo_base_path}"
     local repodata_path="$repo_base_path/repodata"
     local module_file=""
     local injected=0
+    local -a module_files=()
+    local has_external_module_file=0
 
     [[ -d "$repodata_path" ]] || return 0
     command -v modifyrepo_c >/dev/null 2>&1 || {
@@ -4256,19 +4276,44 @@ function inject_module_metadata_into_repodata() {
 
     while IFS= read -r module_file; do
         [[ -n "$module_file" ]] || continue
+        module_files+=("$module_file")
+    done < <(find_repository_module_metadata_files "$metadata_root")
+
+    for module_file in "${module_files[@]}"; do
+        if [[ "$module_file" != "$repodata_path"/* ]]; then
+            has_external_module_file=1
+            break
+        fi
+    done
+
+    for module_file in "${module_files[@]}"; do
+        [[ -n "$module_file" ]] || continue
+        if [[ $has_external_module_file -eq 1 && "$module_file" == "$repodata_path"/* ]]; then
+            continue
+        fi
+        local metadata_input
+        metadata_input="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-input.XXXXXX")"
+        if ! read_module_metadata_file "$module_file" > "$metadata_input"; then
+            rm -f "$metadata_input"
+            log "E" "Failed to read module metadata from $module_file"
+            return 1
+        fi
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-            if ! sudo modifyrepo_c --mdtype=modules --compress "$module_file" "$repodata_path" >/dev/null 2>&1; then
+            if ! sudo modifyrepo_c --mdtype=modules --compress "$metadata_input" "$repodata_path" >/dev/null 2>&1; then
+                rm -f "$metadata_input"
                 log "E" "Failed to inject module metadata from $module_file into $repodata_path"
                 return 1
             fi
         else
-            if ! modifyrepo_c --mdtype=modules --compress "$module_file" "$repodata_path" >/dev/null 2>&1; then
+            if ! modifyrepo_c --mdtype=modules --compress "$metadata_input" "$repodata_path" >/dev/null 2>&1; then
+                rm -f "$metadata_input"
                 log "E" "Failed to inject module metadata from $module_file into $repodata_path"
                 return 1
             fi
         fi
+        rm -f "$metadata_input"
         injected=1
-    done < <(find_repository_module_metadata_files "$repo_base_path")
+    done
 
     [[ $injected -eq 1 ]] || return 0
     return 0
@@ -4347,8 +4392,20 @@ function update_repository_metadata() {
     fi
     if [[ -n "$inferred_module_streams" ]]; then
         filter_module_metadata_for_streams "$repo_base_path" "$inferred_module_streams"
+        if [[ -n "$module_backup_dir" ]]; then
+            filter_module_metadata_for_streams "$module_backup_dir" "$inferred_module_streams"
+        fi
         log "I" "$(align_repo_name "$repo_name"): Filtered module metadata to streams: $inferred_module_streams" 2
     fi
+
+    # createrepo_c tries to parse module files found in the repository tree, but
+    # it cannot reliably process every upstream module metadata compression and
+    # schema variant. Keep the filtered source in the backup and inject it after
+    # the regular RPM metadata has been generated.
+    while IFS= read -r module_file; do
+        [[ -n "$module_file" ]] || continue
+        rm -f "$module_file"
+    done < <(find_repository_module_metadata_files "$repo_base_path")
     
     if [[ $is_manual_repo == true ]]; then
     log "I" "🔄 $(align_repo_name "$repo_name"): Updating manual repository metadata..." 2
@@ -4407,7 +4464,7 @@ function update_repository_metadata() {
     
     # Execute createrepo command
     if eval "$createrepo_cmd" >/dev/null 2>&1; then
-        if ! inject_module_metadata_into_repodata "$repo_base_path"; then
+        if ! inject_module_metadata_into_repodata "$repo_base_path" "$module_backup_dir"; then
             restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
             log "E" "❌ $(align_repo_name "$repo_name"): Failed to add module metadata to repodata"
             return 1

@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.17)
+# Repo Handler Script (v2.4.18)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
