@@ -3982,7 +3982,16 @@ function update_all_repository_metadata() {
 # repo does not silently lose its module stream view during repodata refresh.
 function find_repository_module_metadata_files() {
     local repo_base_path="$1"
-    find "$repo_base_path" -type f \( -name "modules.yaml" -o -name "modules.yml" \) 2>/dev/null
+    find "$repo_base_path" -type f \( -name "modules.yaml" -o -name "modules.yml" -o -name "modules.yaml.gz" -o -name "modules.yml.gz" \) 2>/dev/null
+}
+
+function read_module_metadata_file() {
+    local module_file="$1"
+
+    case "$module_file" in
+        *.gz) gzip -cd -- "$module_file" 2>/dev/null ;;
+        *) cat -- "$module_file" ;;
+    esac
 }
 
 function preserve_module_metadata() {
@@ -4117,7 +4126,7 @@ function infer_module_streams_for_repo() {
                 module_stream="${module_stream//\'/}"
                 module_stream="${module_stream%%[[:space:]]*}"
             fi
-        done < "$module_file"
+        done < <(read_module_metadata_file "$module_file")
 
         if [[ -n "$module_name" && -n "$module_stream" && -n "${selected_names[$module_name]:-}" ]]; then
             stream_names["$module_stream"]=1
@@ -4207,10 +4216,20 @@ function filter_module_metadata_for_streams() {
             END {
                 if (in_doc) flush_doc();
             }
-        ' "$module_file" > "$tmp_file"
+        ' <(read_module_metadata_file "$module_file") > "$tmp_file"
 
         if [[ -s "$tmp_file" ]]; then
-            if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            if [[ "$module_file" == *.gz ]]; then
+                if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+                    local compressed_tmp
+                    compressed_tmp="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-compressed.XXXXXX.gz")"
+                    gzip -c "$tmp_file" > "$compressed_tmp"
+                    sudo cp -a "$compressed_tmp" "$module_file"
+                    rm -f "$compressed_tmp"
+                else
+                    gzip -c "$tmp_file" > "$module_file"
+                fi
+            elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                 sudo cp -a "$tmp_file" "$module_file"
             else
                 cp -a "$tmp_file" "$module_file"
@@ -4219,6 +4238,40 @@ function filter_module_metadata_for_streams() {
             rm -f "$tmp_file"
         fi
     done
+}
+
+# Add filtered module metadata to repomd.xml. createrepo_c does not consume
+# standalone modulemd files, so preserving them on disk is not enough for DNF.
+function inject_module_metadata_into_repodata() {
+    local repo_base_path="$1"
+    local repodata_path="$repo_base_path/repodata"
+    local module_file=""
+    local injected=0
+
+    [[ -d "$repodata_path" ]] || return 0
+    command -v modifyrepo_c >/dev/null 2>&1 || {
+        log "W" "Module metadata found but modifyrepo_c is unavailable; modules record was not added"
+        return 1
+    }
+
+    while IFS= read -r module_file; do
+        [[ -n "$module_file" ]] || continue
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            if ! sudo modifyrepo_c --mdtype=modules --compress "$module_file" "$repodata_path" >/dev/null 2>&1; then
+                log "E" "Failed to inject module metadata from $module_file into $repodata_path"
+                return 1
+            fi
+        else
+            if ! modifyrepo_c --mdtype=modules --compress "$module_file" "$repodata_path" >/dev/null 2>&1; then
+                log "E" "Failed to inject module metadata from $module_file into $repodata_path"
+                return 1
+            fi
+        fi
+        injected=1
+    done < <(find_repository_module_metadata_files "$repo_base_path")
+
+    [[ $injected -eq 1 ]] || return 0
+    return 0
 }
 
 # Update repository metadata using createrepo_c
@@ -4354,6 +4407,11 @@ function update_repository_metadata() {
     
     # Execute createrepo command
     if eval "$createrepo_cmd" >/dev/null 2>&1; then
+        if ! inject_module_metadata_into_repodata "$repo_base_path"; then
+            restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
+            log "E" "❌ $(align_repo_name "$repo_name"): Failed to add module metadata to repodata"
+            return 1
+        fi
         restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
         if [[ $is_manual_repo == true ]]; then
             log "I" "✅ $(align_repo_name "$repo_name"): Manual repository metadata updated successfully" 2

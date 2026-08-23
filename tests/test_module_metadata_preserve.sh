@@ -9,18 +9,36 @@ mkdir -p "$REPO_BASE"
 
 cat > "$REPO_BASE/modules.yaml" <<'YAML'
 document: modulemd
+version: 1
 data:
   name: nginx
   stream: 1.22
+  version: 1
+  context: test
+  arch: x86_64
+  summary: nginx test module
+  description: nginx test module metadata
+  license:
+    module: [MIT]
   profiles:
-    default: [default]
+    default:
+      rpms: [nginx]
 ---
 document: modulemd
+version: 1
 data:
   name: nginx
   stream: 1.26
+  version: 1
+  context: test
+  arch: x86_64
+  summary: nginx test module
+  description: nginx test module metadata
+  license:
+    module: [MIT]
   profiles:
-    default: [default]
+    default:
+      rpms: [nginx]
 YAML
 
 export MYREPO_SOURCE_ONLY=1
@@ -57,6 +75,29 @@ if grep -q "stream: 1.22" "$REPO_BASE/modules.yaml"; then
 fi
 if ! grep -q "stream: 1.26" "$REPO_BASE/modules.yaml"; then
   echo "FAIL: module stream filter did not keep the selected stream" >&2
+  exit 1
+fi
+
+gzip -c "$REPO_BASE/modules.yaml" > "$REPO_BASE/modules.yaml.gz"
+compressed_streams="$(infer_module_streams_for_repo "$REPO_BASE" "$REPO_BASE/getPackage")"
+if [[ "$compressed_streams" != "1.26" ]]; then
+  echo "FAIL: compressed module metadata inferred '$compressed_streams' instead of '1.26'" >&2
+  exit 1
+fi
+rm -f "$REPO_BASE/modules.yaml"
+filter_module_metadata_for_streams "$REPO_BASE" "$compressed_streams"
+if ! gzip -cd "$REPO_BASE/modules.yaml.gz" | grep -q "stream: 1.26"; then
+  echo "FAIL: compressed module stream filter did not keep the selected stream" >&2
+  exit 1
+fi
+gzip -cd "$REPO_BASE/modules.yaml.gz" > "$REPO_BASE/modules.yaml"
+rm -f "$REPO_BASE/modules.yaml.gz"
+
+rm -f "$REPO_BASE/getPackage/nginx-1.26.2-1.el9.x86_64.rpm"
+createrepo_c "$REPO_BASE" >/dev/null
+inject_module_metadata_into_repodata "$REPO_BASE"
+if ! grep -q 'type="modules"' "$REPO_BASE/repodata/repomd.xml"; then
+  echo "FAIL: module metadata was not registered in repomd.xml" >&2
   exit 1
 fi
 
