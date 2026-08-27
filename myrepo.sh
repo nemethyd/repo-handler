@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
-# Last Updated: 2026-08-20
+# Last Updated: 2026-08-27
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.18"
+VERSION="2.4.19"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -4015,7 +4015,19 @@ function preserve_module_metadata() {
     for module_path in "${module_files[@]}"; do
         local rel_path="${module_path#"$repo_base_path"/}"
         mkdir -p "$(dirname "$backup_dir/$rel_path")"
-        cp -a "$module_path" "$backup_dir/$rel_path"
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo cp -a "$module_path" "$backup_dir/$rel_path" || {
+                log "E" "Could not preserve module metadata: $module_path"
+                rm -rf "$backup_dir"
+                return 1
+            }
+        else
+            cp -a "$module_path" "$backup_dir/$rel_path" || {
+                log "E" "Could not preserve module metadata: $module_path"
+                rm -rf "$backup_dir"
+                return 1
+            }
+        fi
     done
 
     printf '%s\n' "$backup_dir"
@@ -4376,7 +4388,7 @@ function update_repository_metadata() {
     
     # Preserve any module metadata files before repodata regeneration so modular
     # repo views do not disappear when repodata is rebuilt from a filtered subset.
-    module_backup_dir=$(preserve_module_metadata "$repo_base_path")
+    module_backup_dir=$(preserve_module_metadata "$repo_base_path") || return 1
     if [[ -n "$module_backup_dir" ]]; then
         log "D" "$(align_repo_name "$repo_name"): Preserved modular metadata under $module_backup_dir" 2
     fi
@@ -4404,7 +4416,19 @@ function update_repository_metadata() {
     # the regular RPM metadata has been generated.
     while IFS= read -r module_file; do
         [[ -n "$module_file" ]] || continue
-        rm -f "$module_file"
+        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+            sudo rm -f "$module_file" || {
+                log "E" "Could not remove module metadata before repodata update: $module_file"
+                restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
+                return 1
+            }
+        else
+            rm -f "$module_file" || {
+                log "E" "Could not remove module metadata before repodata update: $module_file"
+                restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
+                return 1
+            }
+        fi
     done < <(find_repository_module_metadata_files "$repo_base_path")
     
     if [[ $is_manual_repo == true ]]; then

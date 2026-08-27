@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.18)
+# Repo Handler Script (v2.4.19)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -87,7 +87,7 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
 - Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
 - Metadata generation via `createrepo_c` with optional parallel workers.
-- Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set.
+- Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set. Preservation and removal use the configured elevation path, so root-owned module files do not cause silent metadata-update failures when the script runs as a normal user.
 - Auto privilege detection (`ELEVATE_COMMANDS`=auto) – uses sudo only when needed.
 - Filtering: include (`--repos`), exclude (`--exclude-repos`), name regex (`--name-filter`).
 - Limits: `--max-packages` (overall processed), `--max-changed-packages` (new + update downloads; 0=none, -1=unlimited).
