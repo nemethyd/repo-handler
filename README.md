@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.19)
+# Repo Handler Script (v2.4.22)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -387,6 +387,26 @@ Sync only (no processing):
 - Will not place `repodata/` inside `getPackage`; ensures metadata resides at repository root.
 - Protects against accidental creation of a naked `$LOCAL_REPO_PATH/getPackage` directory (warns if detected).
 - Uses only enabled repositories for downloads; disabled repos are temporarily enabled per batch when needed.
+- Recognises RPMs stored under non-NEVRA filenames (see below), so they are not re-downloaded on every run.
+
+### Non-NEVRA Filenames (v2.4.22)
+
+Most repositories publish RPMs as `name-version-release.arch.rpm`, and status detection matches on that
+filename. Some third-party repositories instead serve their upstream artifact name — for example the GitHub
+CLI repo publishes `gh_2.98.0_linux_amd64.rpm` rather than `gh-2.98.0-1.x86_64.rpm`. Filename matching never
+succeeds for those, so the package was classified `NEW` on every run and re-downloaded indefinitely.
+
+Two code paths now fall back to the RPM header instead of the filename:
+
+- `get_package_status()` consults `index_noncanonical_rpms()`, which reads `%{NAME}`, `%{VERSION}`,
+  `%{RELEASE}` and `%{ARCH}` from files whose name does not end in a known `.<arch>.rpm` suffix. The index is
+  built once per repository per run, so the `rpm -qp` cost stays proportional to the handful of odd-named
+  files rather than the whole repository.
+- `cleanup_uninstalled_packages()` maps batch metadata back to file paths positionally (with a per-file
+  fallback if the batch query returns fewer lines than inputs), so superseded copies of such packages are
+  removed correctly.
+
+No configuration is required; detection is automatic.
 
 ## Limitations (Known, Accepted)
 
@@ -415,6 +435,7 @@ Implemented improvements (chronological highlights):
 10. JSON run summary (`--json-summary`).
 11. Plain / no-emoji mode.
 12. Tunables reference table & default config writer (`--write-default-config`).
+13. Content-based status detection for RPMs published under non-NEVRA filenames (v2.4.22).
 
 Final decisions:
 

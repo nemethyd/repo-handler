@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
-# Last Updated: 2026-08-27
+# Last Updated: 2026-08-31
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.19"
+VERSION="2.4.22"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -296,6 +296,12 @@ declare -A CHANGED_REPOS  # Repos with added/updated/removed RPMs this run
 # Cache for repository package metadata (like original script)
 declare -A available_repo_packages
 declare -A repo_package_lookup  # key: package signature name|epoch|version|release|arch -> repo
+
+# Index of RPMs stored under non-NEVRA filenames (e.g. gh_2.98.0_linux_amd64.rpm).
+# Third-party repos may publish upstream artifact names, so filename matching alone
+# would classify these as NEW on every run and re-download them endlessly.
+declare -A NONCANONICAL_RPM_VERSION  # key: repo_path|name|arch -> version-release
+declare -A NONCANONICAL_RPM_SCANNED  # key: repo_path -> 1 once indexed
 
 # Helper to reference rarely-touched associative arrays so static analyzers (SC2034) see legitimate use.
 function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"; }
@@ -1697,7 +1703,34 @@ function cleanup_uninstalled_packages() {
                 # PERFORMANCE OPTIMIZATION: Use rpm query with multiple files at once
                 local batch_metadata
                 if batch_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n" "${batch_files[@]}" 2>/dev/null) && [[ -n "$batch_metadata" ]]; then
-                    
+
+                    # Map metadata back to file paths without relying on filenames, since
+                    # third-party repos may ship upstream artifact names (gh_2.98.0_linux_amd64.rpm).
+                    local -A batch_nevra_to_path=()
+                    local meta_name meta_epoch meta_version meta_release meta_arch
+                    local meta_line_count
+                    meta_line_count=$(grep -c . <<< "$batch_metadata")
+                    if (( meta_line_count == ${#batch_files[@]} )); then
+                        # rpm emits one line per input file, so positions line up
+                        local meta_index=0
+                        while IFS='|' read -r meta_name meta_epoch meta_version meta_release meta_arch; do
+                            [[ -z "$meta_name" ]] && continue
+                            [[ "$meta_epoch" == "(none)" || -z "$meta_epoch" ]] && meta_epoch="0"
+                            batch_nevra_to_path["${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"]="${batch_files[meta_index]}"
+                            ((meta_index++))
+                        done <<< "$batch_metadata"
+                    else
+                        # Partial query failure: resolve individually so paths stay accurate
+                        local single_meta
+                        for rpm_file in "${batch_files[@]}"; do
+                            single_meta=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null) || continue
+                            IFS='|' read -r meta_name meta_epoch meta_version meta_release meta_arch <<< "$single_meta"
+                            [[ -z "$meta_name" ]] && continue
+                            [[ "$meta_epoch" == "(none)" || -z "$meta_epoch" ]] && meta_epoch="0"
+                            batch_nevra_to_path["${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"]="$rpm_file"
+                        done
+                    fi
+
                     # Process the batch results
                     while IFS='|' read -r pkg_name epoch version release arch; do
                         # Skip empty lines
@@ -1713,15 +1746,7 @@ function cleanup_uninstalled_packages() {
                         # PERFORMANCE IMPROVEMENT: Use hash lookup instead of grep
                         if ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
                             # Package not found in installed list - mark for removal
-                            local rpm_full_path
-                            
-                            # Find the actual file path from our batch
-                            for rpm_file in "${batch_files[@]}"; do
-                                if [[ "$(basename "$rpm_file")" == *"${pkg_name}-${version}-${release}.${arch}.rpm"* ]]; then
-                                    rpm_full_path="$rpm_file"
-                                    break
-                                fi
-                            done
+                            local rpm_full_path="${batch_nevra_to_path["$rpm_metadata"]:-}"
                             
                             if [[ -n "$rpm_full_path" && -f "$rpm_full_path" ]]; then
                                 if [[ $DRY_RUN -eq 1 ]]; then
@@ -2501,6 +2526,33 @@ function generate_summary_table() {
 }
 ## (moved get_dnf_cmd earlier to allow early initialization when script is sourced for tests)
 
+# Index RPMs whose filename does not follow the NEVRA convention, keyed by their
+# actual metadata. Only files not ending in a known .<arch>.rpm suffix are opened,
+# so the rpm -qp cost stays proportional to the handful of odd-named artifacts.
+function index_noncanonical_rpms() {
+    local repo_path="$1"
+
+    [[ -n ${NONCANONICAL_RPM_SCANNED["$repo_path"]+x} ]] && return 0
+    NONCANONICAL_RPM_SCANNED["$repo_path"]=1
+    [[ -d "$repo_path" ]] || return 0
+
+    local rpm_file basename_file meta n v r a indexed=0
+    while IFS= read -r rpm_file; do
+        basename_file=$(basename "$rpm_file")
+        [[ "$basename_file" =~ \.(x86_64|noarch|i686|i386|aarch64|ppc64le|s390x|src)\.rpm$ ]] && continue
+        meta=$(rpm -qp --nosignature --nodigest --queryformat '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}' "$rpm_file" 2>/dev/null) || continue
+        [[ -n "$meta" ]] || continue
+        IFS='|' read -r n v r a <<< "$meta"
+        [[ -n "$n" && -n "$v" && -n "$a" ]] || continue
+        NONCANONICAL_RPM_VERSION["${repo_path}|${n}|${a}"]="${v}-${r}"
+        ((indexed++))
+        log "D" "Indexed non-NEVRA RPM: $basename_file -> ${n}-${v}-${r}.${a}" 3
+    done < <(find "$repo_path" -maxdepth 1 -type f -name "*.rpm" 2>/dev/null)
+
+    (( indexed > 0 )) && log "D" "Indexed $indexed non-NEVRA RPM file(s) in $repo_path" $DEBUG_LVL_DETAIL
+    return 0
+}
+
 # Simple but accurate package status determination - this is the critical function!
 function get_package_status() {
     local package_name="$1"
@@ -2621,6 +2673,27 @@ function get_package_status() {
         return 0
     fi
     
+    # Fall back to RPM metadata for repos that publish non-NEVRA filenames
+    index_noncanonical_rpms "$repo_path"
+    local noncanonical_key="${repo_path}|${package_name}|${package_arch}"
+    if [[ -n ${NONCANONICAL_RPM_VERSION["$noncanonical_key"]+x} ]]; then
+        local stored_vr="${NONCANONICAL_RPM_VERSION["$noncanonical_key"]}"
+        local requested_vr="${package_version}-${package_release}"
+        if [[ "$stored_vr" == "$requested_vr" ]]; then
+            log "D" "Non-NEVRA file matches $package_name-$requested_vr -> EXISTS" 3
+            echo "EXISTS"
+            return 0
+        fi
+        if version_is_newer "$stored_vr" "$requested_vr"; then
+            log "D" "Non-NEVRA file has newer version ($stored_vr > $requested_vr) -> EXISTS" 3
+            echo "EXISTS"
+            return 0
+        fi
+        log "D" "Non-NEVRA file is older ($stored_vr < $requested_vr) -> UPDATE" 3
+        echo "UPDATE"
+        return 0
+    fi
+
     # Debug: Show what files ARE in the repository
     if [[ $DEBUG_LEVEL -ge 3 ]]; then
         local total_rpms
@@ -4269,6 +4342,140 @@ function filter_module_metadata_for_streams() {
     done
 }
 
+# Download RPMs referenced in module metadata artifacts that are missing from
+# the local packages directory. This ensures the upstream module NEVRAs remain
+# valid for DNF module resolution on air-gapped systems.
+#
+# For each modulemd document, the artifacts.rpms list specifies exact NEVRAs.
+# If those RPMs are not present locally, we download them from the matching
+# upstream DNF repo (derived from the repo directory name).
+function download_module_artifact_rpms() {
+    local repo_name="$1"
+    local repo_base_path="$2"
+    local packages_path="$3"
+
+    [[ -d "$repo_base_path" ]] || return 0
+    [[ -d "$packages_path" ]] || return 0
+
+    # Find module metadata files
+    local -a module_files=()
+    while IFS= read -r module_file; do
+        [[ -n "$module_file" ]] || continue
+        module_files+=("$module_file")
+    done < <(find_repository_module_metadata_files "$repo_base_path")
+
+    if [[ ${#module_files[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Extract all artifact NEVRAs from module metadata
+    local artifacts_file
+    artifacts_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-artifacts.XXXXXX")"
+    for module_file in "${module_files[@]}"; do
+        read_module_metadata_file "$module_file" 2>/dev/null \
+            | awk '/^[[:space:]]*artifacts:/ { in_art=1; next }
+                     in_art && /^[[:space:]]*rpms:/ { next }
+                     in_art && /^[[:space:]]+-/ {
+                         val = $0
+                         gsub(/^[[:space:]]+-[[:space:]]*/, "", val)
+                         gsub(/[[:space:]]+$/, "", val)
+                         if (val != "") print val
+                     }
+                     in_art && /^[[:space:]]*[a-zA-Z]/ { in_art=0 }'
+    done | sort -u > "$artifacts_file"
+
+    if [[ ! -s "$artifacts_file" ]]; then
+        rm -f "$artifacts_file"
+        return 0
+    fi
+
+    # Build lookup of present NEVRAs from RPMs already in packages_path
+    local present_file
+    present_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-present-nevras.XXXXXX")"
+    local rpm_file
+    while IFS= read -r rpm_file; do
+        [[ -n "$rpm_file" ]] || continue
+        rpm -qp --qf '%{NAME}-%{EPOCH}:%{VERSION}-%{RELEASE}.%{ARCH}\n' "$rpm_file" 2>/dev/null || true
+    done < <(find "$packages_path" -type f -name "*.rpm" 2>/dev/null) | sort -u > "$present_file"
+
+    # Compute missing NEVRAs (in artifacts but not present locally)
+    local missing_file
+    missing_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-missing-artifacts.XXXXXX")"
+    comm -23 "$artifacts_file" "$present_file" > "$missing_file"
+
+    rm -f "$artifacts_file" "$present_file"
+
+    if [[ ! -s "$missing_file" ]]; then
+        rm -f "$missing_file"
+        log "D" "$(align_repo_name "$repo_name"): All module artifact RPMs already present" 2
+        return 0
+    fi
+
+    local missing_count
+    missing_count=$(wc -l < "$missing_file")
+    log "I" "$(align_repo_name "$repo_name"): Downloading $missing_count missing module artifact RPM(s) from upstream" 1
+
+    # Determine the DNF repo to download from (same name as the repo directory)
+    local dnf_repo="$repo_name"
+
+    # Download in batches
+    local -a batch=()
+    local downloaded=0
+    local failed=0
+    while IFS= read -r nevra; do
+        [[ -n "$nevra" ]] || continue
+        batch+=("$nevra")
+
+        if [[ ${#batch[@]} -ge $BATCH_SIZE ]]; then
+            if "${DNF_CMD[@]}" download --destdir "$packages_path" \
+                --disablerepo='*' --enablerepo="$dnf_repo" \
+                "${batch[@]}" >/dev/null 2>&1; then
+                downloaded=$((downloaded + ${#batch[@]}))
+            else
+                # Fall back to individual downloads for partial failures
+                local nevra_item
+                for nevra_item in "${batch[@]}"; do
+                    if "${DNF_CMD[@]}" download --destdir "$packages_path" \
+                        --disablerepo='*' --enablerepo="$dnf_repo" \
+                        "$nevra_item" >/dev/null 2>&1; then
+                        ((downloaded++))
+                    else
+                        log "W" "$(align_repo_name "$repo_name"): Failed to download module artifact: $nevra_item" 1
+                        ((failed++))
+                    fi
+                done
+            fi
+            batch=()
+        fi
+    done < "$missing_file"
+
+    # Download remaining batch
+    if [[ ${#batch[@]} -gt 0 ]]; then
+        if "${DNF_CMD[@]}" download --destdir "$packages_path" \
+            --disablerepo='*' --enablerepo="$dnf_repo" \
+            "${batch[@]}" >/dev/null 2>&1; then
+            downloaded=$((downloaded + ${#batch[@]}))
+        else
+            local nevra_item
+            for nevra_item in "${batch[@]}"; do
+                if "${DNF_CMD[@]}" download --destdir "$packages_path" \
+                    --disablerepo='*' --enablerepo="$dnf_repo" \
+                    "$nevra_item" >/dev/null 2>&1; then
+                    ((downloaded++))
+                else
+                    log "W" "$(align_repo_name "$repo_name"): Failed to download module artifact: $nevra_item" 1
+                    ((failed++))
+                fi
+            done
+        fi
+    fi
+
+    rm -f "$missing_file"
+
+    log "D" "$(align_repo_name "$repo_name"): Module artifact download complete: $downloaded downloaded, $failed failed" 2
+    return 0
+}
+
 # Add filtered module metadata to repomd.xml. createrepo_c does not consume
 # standalone modulemd files, so preserving them on disk is not enough for DNF.
 function inject_module_metadata_into_repodata() {
@@ -4391,6 +4598,14 @@ function update_repository_metadata() {
     module_backup_dir=$(preserve_module_metadata "$repo_base_path") || return 1
     if [[ -n "$module_backup_dir" ]]; then
         log "D" "$(align_repo_name "$repo_name"): Preserved modular metadata under $module_backup_dir" 2
+    fi
+
+    # Download any module artifact RPMs that are referenced in the upstream
+    # module metadata but missing from the local packages directory. This keeps
+    # the upstream NEVRAs valid so DNF module resolution works on air-gapped
+    # systems even when newer standalone builds of the same packages exist.
+    if [[ -n "$module_backup_dir" && "$is_manual_repo" != true ]]; then
+        download_module_artifact_rpms "$repo_name" "$repo_base_path" "$packages_path"
     fi
 
     # Optional stream-aware filtering for modular repos. If MODULE_STREAMS is not
