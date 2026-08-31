@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.23"
+VERSION="2.4.24"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -229,6 +229,7 @@ DNF_QUERY_TIMEOUT=${DNF_QUERY_TIMEOUT:-60}    # Timeout for basic DNF queries
 DNF_CACHE_TIMEOUT=${DNF_CACHE_TIMEOUT:-120}   # Timeout for DNF cache building operations
 DNF_DOWNLOAD_TIMEOUT=${DNF_DOWNLOAD_TIMEOUT:-1800}  # Timeout for DNF download operations (30 minutes)
 SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
+DNF_CACHE_DIR=${DNF_CACHE_DIR:-/var/cache/dnf} # Where dnf keeps its own repo metadata cache (source of fresh module metadata)
 
 # Performance and monitoring configuration
 PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-50}  # Report progress every N packages
@@ -303,8 +304,14 @@ declare -A repo_package_lookup  # key: package signature name|epoch|version|rele
 declare -A NONCANONICAL_RPM_VERSION  # key: repo_path|name|arch -> version-release
 declare -A NONCANONICAL_RPM_SCANNED  # key: repo_path -> 1 once indexed
 
+# Module metadata (modules.yaml) harvested from DNF's own repo cache while
+# build_repo_cache() talks to upstream. Populated once per repo per run so
+# update_repository_metadata() can refresh modular repodata from the same
+# upstream sync instead of re-touching /var/cache/dnf on its own later.
+declare -A REPO_MODULE_METADATA_SOURCE  # key: repo_name -> path to cached modules.yaml*
+
 # Helper to reference rarely-touched associative arrays so static analyzers (SC2034) see legitimate use.
-function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}"; }
+function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}${#REPO_MODULE_METADATA_SOURCE[@]}"; }
 
 ### Function Definitions ###
 #
@@ -872,9 +879,6 @@ function build_repo_cache() {
     # Rebuild cache
     log "I" "Rebuilding repository metadata cache..."
     
-    # Clear old cache
-    rm -f "$cache_dir"/*.cache 2>/dev/null || true
-    
     # Installed packages list
     local installed_packages
     log "D" "Using DNF command: ${DNF_CMD[*]}" $DEBUG_LVL_DETAIL
@@ -925,13 +929,30 @@ function build_repo_cache() {
     
     # Filter repositories based on --repos and --exclude-repos restrictions
     local filtered_repos=""
+    local out_of_scope_repos=""
     while IFS= read -r repo; do
         if should_process_repo "$repo"; then
             filtered_repos+="$repo"$'\n'
         else
+            out_of_scope_repos+="$repo"$'\n'
             log "D" "Skipping repository (filtered out): $repo" $DEBUG_LVL_DETAIL
         fi
     done <<< "$enabled_repos"
+
+    # Repos excluded from this run by --repos/--exclude-repos are not rebuilt
+    # below, but their existing on-disk cache (left untouched, see below) is
+    # still loaded into memory so later per-package repo lookups stay served
+    # from cache instead of falling back to slow individual DNF queries.
+    if [[ -n "$out_of_scope_repos" ]]; then
+        while IFS= read -r repo; do
+            [[ -n "$repo" ]] || continue
+            local out_of_scope_cache_file="$cache_dir/${repo}.cache"
+            if [[ -f "$out_of_scope_cache_file" ]]; then
+                available_repo_packages["$repo"]=$(cat "$out_of_scope_cache_file")
+                log "D" "Loaded out-of-scope cached $repo (kept from previous run)" $DEBUG_LVL_DETAIL
+            fi
+        done <<< "$out_of_scope_repos"
+    fi
     
     # Use filtered repositories instead of all enabled repos
     enabled_repos="$filtered_repos"
@@ -941,6 +962,15 @@ function build_repo_cache() {
         log "I" "Skipping repository metadata cache build"
         return 0
     fi
+    
+    # Only clear cache files for repos actually being rebuilt below. Wiping
+    # every *.cache file here would force slow per-package DNF fallback
+    # lookups later for repos outside the --repos/--exclude-repos scope,
+    # since their cache would go missing without ever being rebuilt this run.
+    while IFS= read -r repo_to_clear; do
+        [[ -n "$repo_to_clear" ]] || continue
+        rm -f "$cache_dir/${repo_to_clear}.cache" 2>/dev/null || true
+    done <<< "$enabled_repos"
     
     local repo_count=0
     local total_repos
@@ -966,7 +996,18 @@ function build_repo_cache() {
     if dnf_result=$(timeout "$DNF_CACHE_TIMEOUT" "${DNF_CMD[@]}" repoquery -y --disablerepo="*" --enablerepo="$repo" \
             --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" \
             "${package_list[@]}" 2>&1); then
-            
+
+            # This repoquery just made DNF (re)sync $repo's full repodata from
+            # upstream into its own cache, including modules.yaml if the repo
+            # is modular. Record it now so update_repository_metadata() can
+            # refresh modular repodata from the same upstream sync later,
+            # instead of re-deriving it from /var/cache/dnf as an afterthought.
+            local module_source_file
+            module_source_file="$(find_dnf_cache_module_metadata_file "$repo")"
+            if [[ -n "$module_source_file" ]]; then
+                REPO_MODULE_METADATA_SOURCE["$repo"]="$module_source_file"
+            fi
+
             # Write cache file (permission resilient)
             local cache_written=false
             
@@ -4131,6 +4172,49 @@ function restore_preserved_module_metadata() {
     rm -rf "$backup_dir"
 }
 
+# The preserve/restore pair above only ever carries forward whatever module
+# metadata was already sitting in repodata from a previous run. It never learns
+# about module builds that appear later upstream, so a package NEVRA can end up
+# downloaded (via dnf download) with no matching modulemd document forever.
+# DNF's own repo cache is refreshed straight from the configured upstream
+# baseurl as a side effect of build_repo_cache()'s repoquery pass, so locating
+# it there (main upstream-sync phase) instead of re-touching /var/cache/dnf
+# later keeps this discovery in the same place the rest of the run already
+# talks to upstream. Returns the newest module metadata file found, if any.
+function find_dnf_cache_module_metadata_file() {
+    local repo_name="$1"
+
+    local cache_repodata_dir
+    cache_repodata_dir=$(find "$DNF_CACHE_DIR" -maxdepth 1 -type d -name "${repo_name}-*" 2>/dev/null | sort | tail -1)
+    [[ -n "$cache_repodata_dir" && -d "$cache_repodata_dir/repodata" ]] || return 0
+
+    find_repository_module_metadata_files "$cache_repodata_dir/repodata" | sort | tail -1
+}
+
+# Consumes the module metadata source recorded for $repo_name in
+# REPO_MODULE_METADATA_SOURCE (populated by build_repo_cache) and replaces
+# whatever is in backup_dir with it, so the filter/inject pipeline picks up
+# the freshest upstream modulemd instead of the last preserved copy.
+function refresh_module_metadata_from_dnf_cache() {
+    local repo_name="$1"
+    local backup_dir="$2"
+
+    [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 0
+
+    local module_file="${REPO_MODULE_METADATA_SOURCE[$repo_name]:-}"
+    [[ -n "$module_file" && -f "$module_file" ]] || return 0
+
+    find "$backup_dir" -type f \( -name "*modules.yaml" -o -name "*modules.yml" -o -name "*modules.yaml.gz" -o -name "*modules.yml.gz" -o -name "*modules.yaml.zst" -o -name "*modules.yml.zst" \) -delete 2>/dev/null
+
+    if cp -a "$module_file" "$backup_dir/$(basename "$module_file")" 2>/dev/null; then
+        chmod 0644 "$backup_dir/$(basename "$module_file")"
+        log "D" "$(align_repo_name "$repo_name"): Refreshed module metadata from DNF cache: $(basename "$module_file")" 2
+    else
+        log "W" "$(align_repo_name "$repo_name"): Could not copy cached upstream module metadata: $module_file"
+    fi
+}
+
+
 # Keep only the requested module streams from a preserved module metadata file.
 # This is intentionally opt-in: on a filtered subset repo, callers can set
 # MODULE_STREAMS="1.24,1.26" to retain only those streams. Unset or empty means
@@ -4606,6 +4690,13 @@ function update_repository_metadata() {
     module_backup_dir=$(preserve_module_metadata "$repo_base_path") || return 1
     if [[ -n "$module_backup_dir" ]]; then
         log "D" "$(align_repo_name "$repo_name"): Preserved modular metadata under $module_backup_dir" 2
+    fi
+
+    # Replace the preserved copy with what build_repo_cache() harvested from
+    # DNF's own cache this run, if any, so new upstream module builds are
+    # picked up instead of carrying forward a stale preserved copy forever.
+    if [[ -n "$module_backup_dir" && "$is_manual_repo" != true ]]; then
+        refresh_module_metadata_from_dnf_cache "$repo_name" "$module_backup_dir"
     fi
 
     # Download any module artifact RPMs that are referenced in the upstream

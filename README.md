@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.23)
+# Repo Handler Script (v2.4.24)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -87,7 +87,7 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
 - Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
 - Metadata generation via `createrepo_c` with optional parallel workers.
-- Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set. Preservation and removal use the configured elevation path, so root-owned module files do not cause silent metadata-update failures when the script runs as a normal user.
+- Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set. Preservation and removal use the configured elevation path, so root-owned module files do not cause silent metadata-update failures when the script runs as a normal user. `build_repo_cache()` also harvests the freshly-synced upstream `modules.yaml` from DNF's own repo cache while it queries each repo, so `update_repository_metadata()` can refresh modular repodata with the same upstream sync instead of only ever carrying forward a stale preserved copy (v2.4.24).
 - Auto privilege detection (`ELEVATE_COMMANDS`=auto) – uses sudo only when needed.
 - Filtering: include (`--repos`), exclude (`--exclude-repos`), name regex (`--name-filter`).
 - Limits: `--max-packages` (overall processed), `--max-changed-packages` (new + update downloads; 0=none, -1=unlimited).
@@ -416,6 +416,27 @@ mode `600`. `filter_module_metadata_for_streams()`, `restore_preserved_module_me
 so it stays world-readable like the rest of the repodata (previously a `600` file could be silently skipped
 by non-root remote sync, leaving air-gapped mirrors without modular stream data for packages such as nginx).
 
+### Module Metadata Upstream Refresh (v2.4.24)
+
+The preserve/restore pair above only ever carried forward whatever modulemd documents were already sitting in
+`repodata/` from a previous run — it never learned about module builds that appeared later upstream. A package
+NEVRA could then be downloaded (via `dnf download`) with no matching modulemd document, and DNF would refuse to
+install it (`No available modular metadata for modular package ...`). `build_repo_cache()` now records, per
+repo, the location of the `modules.yaml` DNF just synced into its own cache (`find_dnf_cache_module_metadata_file()`),
+as a side effect of the repoquery it already runs against upstream. `update_repository_metadata()` consumes that
+recorded path (`refresh_module_metadata_from_dnf_cache()`) to replace the preserved copy before filtering/injection,
+so modular metadata stays aligned with whatever was actually downloaded. The discovery lives in the same place the
+rest of the run already talks to upstream, rather than as a separate lookup bolted onto the metadata-update step.
+
+### Out-of-Scope Repo Cache Preservation (v2.4.24)
+
+Running with `--repos` used to unconditionally wipe every repository's per-package cache file when rebuilding
+(`rm -f "$cache_dir"/*.cache`), even though only the filtered subset was rebuilt that run. Packages installed from
+repos outside the `--repos`/`--exclude-repos` scope then had no cached repo association for the rest of that run,
+forcing slow individual `dnf` fallback queries per package. The cache-clear step is now scoped to only the repos
+being rebuilt, and repos outside that scope have their existing on-disk cache loaded into memory instead of being
+discarded, avoiding the fallback entirely.
+
 ## Limitations (Known, Accepted)
 
 - No signature verification of RPMs (assumes trusted environment).
@@ -445,6 +466,7 @@ Implemented improvements (chronological highlights):
 12. Tunables reference table & default config writer (`--write-default-config`).
 13. Content-based status detection for RPMs published under non-NEVRA filenames (v2.4.22).
 14. Module metadata files written to repodata now forced to `0644` to survive non-root remote sync (v2.4.23).
+15. Module metadata refreshed from DNF's own upstream cache instead of only ever preserving a stale copy; out-of-scope repo caches no longer wiped by `--repos` runs (v2.4.24).
 
 Final decisions:
 
