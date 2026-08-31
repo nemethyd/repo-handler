@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.26)
+# Repo Handler Script (v2.4.27)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -480,6 +480,8 @@ Implemented improvements (chronological highlights):
 17. `cleanup_uninstalled_packages()` and `download_module_artifact_rpms()` now share the same module-artifact NEVRA set, so cleanup no longer deletes RPMs kept only for module metadata consistency (previously they were removed and re-downloaded every single run) (v2.4.26).
 18. `--repos`-scoped metadata updates are now gated on actual package changes (`CHANGED_REPOS`) or an explicit `--refresh-metadata`, instead of unconditionally rebuilding repodata for every named repo on every run (v2.4.26).
 19. The run is now split into 4 explicit, banner-announced phases (Preparation, Package Synchronization, Repository Metadata Update, Shared/Remote Sync), each with its own summary; skipped phases still announce themselves with the skip reason (v2.4.26).
+20. Fixed a `createrepo_c --update` failure ("Cannot open file ...-modules.yaml.zst") that could mark an otherwise-healthy repo as `Failed`: createrepo_c reads the *previous* repomd.xml and auto-copies forward any custom metadata record (like `modules`), so pre-emptively deleting the live module file before running createrepo_c made that copy-forward fail. The file is no longer deleted beforehand; the correct filtered content is still unconditionally re-injected afterward (v2.4.27).
+21. `update_repository_metadata()` now captures and logs `createrepo_c`'s actual stderr on failure instead of discarding it, so future failures are diagnosable without re-running by hand (v2.4.27).
 
 Final decisions:
 

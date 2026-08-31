@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.26"
+VERSION="2.4.27"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -4946,26 +4946,14 @@ function update_repository_metadata() {
         log "I" "$(align_repo_name "$repo_name"): Filtered module metadata to streams: $inferred_module_streams" 2
     fi
 
-    # createrepo_c tries to parse module files found in the repository tree, but
-    # it cannot reliably process every upstream module metadata compression and
-    # schema variant. Keep the filtered source in the backup and inject it after
-    # the regular RPM metadata has been generated.
-    while IFS= read -r module_file; do
-        [[ -n "$module_file" ]] || continue
-        if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-            sudo rm -f "$module_file" || {
-                log "E" "Could not remove module metadata before repodata update: $module_file"
-                restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
-                return 1
-            }
-        else
-            rm -f "$module_file" || {
-                log "E" "Could not remove module metadata before repodata update: $module_file"
-                restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
-                return 1
-            }
-        fi
-    done < <(find_repository_module_metadata_files "$repo_base_path")
+    # createrepo_c --update reads the *previous* repomd.xml and auto-copies
+    # forward any non-standard metadata record it references (e.g. "modules"),
+    # even before we get a chance to re-inject the correct/filtered content.
+    # Deleting the live module file here used to make that copy-forward fail
+    # ("Cannot open file ...-modules.yaml.zst") since createrepo_c still tried
+    # to copy a file we had just removed. Leaving it in place lets createrepo_c
+    # carry the old copy forward harmlessly; inject_module_metadata_into_repodata()
+    # unconditionally overwrites it afterward with the correct filtered content.
     
     if [[ $is_manual_repo == true ]]; then
     log "I" "🔄 $(align_repo_name "$repo_name"): Updating manual repository metadata..." 2
@@ -5023,7 +5011,8 @@ function update_repository_metadata() {
     log "D" "Running: $createrepo_cmd" 2
     
     # Execute createrepo command
-    if eval "$createrepo_cmd" >/dev/null 2>&1; then
+    local createrepo_output
+    if createrepo_output=$(eval "$createrepo_cmd" 2>&1); then
         if ! inject_module_metadata_into_repodata "$repo_base_path" "$module_backup_dir"; then
             restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
             log "E" "❌ $(align_repo_name "$repo_name"): Failed to add module metadata to repodata"
@@ -5039,6 +5028,7 @@ function update_repository_metadata() {
     else
         restore_preserved_module_metadata "$repo_base_path" "$module_backup_dir"
         log "E" "❌ $(align_repo_name "$repo_name"): Failed to update repository metadata"
+        [[ -n "$createrepo_output" ]] && log "E" "   createrepo output: $createrepo_output"
         return 1
     fi
 }
