@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.24"
+VERSION="2.4.26"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -276,6 +276,8 @@ TABLE_NEW_WIDTH=6                 # New packages column width
 TABLE_UPDATE_WIDTH=6              # Update packages column width  
 TABLE_EXISTS_WIDTH=6              # Existing packages column width
 TABLE_STATUS_WIDTH=8              # Status column width
+TABLE_METADATA_WIDTH=9            # Metadata update result column width (metadata summary table)
+TABLE_ARTIFACTS_WIDTH=9           # Module artifacts fetched column width (metadata summary table)
 
 # Statistics tracking arrays
 declare -A stats_new_count
@@ -310,8 +312,19 @@ declare -A NONCANONICAL_RPM_SCANNED  # key: repo_path -> 1 once indexed
 # upstream sync instead of re-touching /var/cache/dnf on its own later.
 declare -A REPO_MODULE_METADATA_SOURCE  # key: repo_name -> path to cached modules.yaml*
 
+# Count of module artifact RPMs fetched via download_module_artifact_rpms().
+# These keep upstream modulemd artifact NEVRAs resolvable and are reported
+# separately from the package sync summary, since they are not part of the
+# installed-package NEW/UPDATE/EXISTS accounting.
+MODULE_ARTIFACT_DOWNLOAD_TOTAL=0
+
+# Per-repo metadata-update phase results, populated by update_all_repository_metadata()
+# and rendered as its own summary table (mirrors the package-sync summary table).
+declare -A METADATA_REPO_STATUS      # key: repo_name -> "Updated" | "Failed"
+declare -A METADATA_REPO_ARTIFACTS   # key: repo_name -> module artifact RPMs fetched for that repo
+
 # Helper to reference rarely-touched associative arrays so static analyzers (SC2034) see legitimate use.
-function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}${#REPO_MODULE_METADATA_SOURCE[@]}"; }
+function _touch_internal_state_refs() { : "${#stats_new_count[@]}${#stats_update_count[@]}${#stats_exists_count[@]}${#failed_downloads[@]}${#failed_download_reasons[@]}${#unknown_packages[@]}${#unknown_package_reasons[@]}${#CHANGED_REPOS[@]}${#available_repo_packages[@]}${#REPO_MODULE_METADATA_SOURCE[@]}${#METADATA_REPO_STATUS[@]}${#METADATA_REPO_ARTIFACTS[@]}"; }
 
 ### Function Definitions ###
 #
@@ -1697,6 +1710,25 @@ function cleanup_uninstalled_packages() {
             local repo_start_time
             repo_start_time=$(date +%s)
             
+            # RPMs referenced as module artifacts in current module metadata must
+            # survive cleanup even though they are not installed themselves
+            # (upstream keeps old modulemd artifact NEVRAs valid for module
+            # resolution). Without this, cleanup deletes what
+            # download_module_artifact_rpms() just fetched, forcing a redundant
+            # re-download every single run.
+            local repo_base_path
+            repo_base_path=$(get_repo_base_path "$repo_name")
+            local -A protected_module_nevras=()
+            local protected_count=0
+            while IFS= read -r protected_nevra; do
+                [[ -n "$protected_nevra" ]] || continue
+                protected_module_nevras["$protected_nevra"]=1
+                ((protected_count++))
+            done < <(get_module_artifact_nevras "$repo_base_path")
+            if [[ $protected_count -gt 0 ]]; then
+                log "D" "$(align_repo_name "$repo_name"): Protecting $protected_count module artifact NEVRA(s) from cleanup" 2
+            fi
+            
             # PERFORMANCE OPTIMIZATION: Count RPMs first for early exit
             local total_rpms
             total_rpms=$(find "$repo_path" -name "*.rpm" -type f 2>/dev/null | wc -l)
@@ -1785,7 +1817,9 @@ function cleanup_uninstalled_packages() {
                         log "D" "Checking: $rpm_metadata" 3
                         
                         # PERFORMANCE IMPROVEMENT: Use hash lookup instead of grep
-                        if ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
+                        if [[ -n "${protected_module_nevras["${pkg_name}-${epoch}:${version}-${release}.${arch}"]:-}" ]]; then
+                            log "D" "Protected module artifact, skipping removal: $rpm_metadata" 3
+                        elif ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
                             # Package not found in installed list - mark for removal
                             local rpm_full_path="${batch_nevra_to_path["$rpm_metadata"]:-}"
                             
@@ -1813,11 +1847,15 @@ function cleanup_uninstalled_packages() {
                             # Normalize epoch (replace (none) with 0)
                             rpm_metadata="${rpm_metadata//(none)/0}"
                             
+                            local package_name meta_epoch meta_version meta_release meta_arch
+                            IFS='|' read -r package_name meta_epoch meta_version meta_release meta_arch <<< "$rpm_metadata"
+                            if [[ -n "${protected_module_nevras["${package_name}-${meta_epoch}:${meta_version}-${meta_release}.${meta_arch}"]:-}" ]]; then
+                                log "D" "Protected module artifact, skipping removal: $rpm_metadata" 3
+                                continue
+                            fi
+                            
                             # Use hash lookup for performance
                             if ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
-                                local package_name
-                                package_name=$(echo "$rpm_metadata" | cut -d'|' -f1)
-                                
                                 if [[ $DRY_RUN -eq 1 ]]; then
                                     log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)" 3
                                     ((would_remove_count++))
@@ -2232,6 +2270,105 @@ function draw_table_row_flex() {
     printf "║\n"
 }
 
+# Visually separates the run's main pipeline stages (package sync, metadata
+# update, shared/remote sync) so each phase's feedback is clearly scoped
+# instead of blending into the previous phase's log output.
+function print_phase_banner() {
+    local phase_num="$1"
+    local phase_total="$2"
+    local title="$3"
+    local skip_reason="${4:-}"
+
+    echo
+    if [[ -n "$skip_reason" ]]; then
+        echo -e "\e[1;33m▶▶▶ PHASE ${phase_num}/${phase_total}: ${title} — SKIPPED (${skip_reason}) ◀◀◀\e[0m"
+    else
+        echo -e "\e[1;35m▶▶▶ PHASE ${phase_num}/${phase_total}: ${title} ◀◀◀\e[0m"
+    fi
+}
+
+# Border/header/row drawing for the metadata-update phase summary table.
+# Mirrors draw_table_border_flex/header/row but with columns relevant to
+# repodata regeneration instead of package NEW/UPDATE/EXISTS counts.
+function draw_metadata_table_border() {
+    local border_type="${1:-top}"  # top, middle, bottom
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_METADATA_WIDTH" "$TABLE_ARTIFACTS_WIDTH" "$TABLE_STATUS_WIDTH")
+
+    local left middle right horizontal
+    case "$border_type" in
+        "top")
+            left="╔" middle="╤" right="╗" horizontal="═"
+            ;;
+        "bottom")
+            left="╚" middle="╧" right="╝" horizontal="═"
+            ;;
+        *)
+            left="╟" middle="┼" right="╢" horizontal="─"
+            ;;
+    esac
+
+    printf "%s" "$left"
+    for i in "${!column_widths[@]}"; do
+        local total_width=$((column_widths[i] + 2))
+        local line=""
+        for ((j=0; j<total_width; j++)); do
+            line+="$horizontal"
+        done
+        printf "%s" "$line"
+        if [[ $i -lt $((${#column_widths[@]} - 1)) ]]; then
+            printf "%s" "$middle"
+        fi
+    done
+    printf "%s\n" "$right"
+}
+
+function draw_metadata_table_header() {
+    local headers=("Repository" "Metadata" "Artifacts" "Status")
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_METADATA_WIDTH" "$TABLE_ARTIFACTS_WIDTH" "$TABLE_STATUS_WIDTH")
+    local alignments=("left" "right" "right" "left")
+
+    printf "║"
+    for i in "${!headers[@]}"; do
+        if [[ "${alignments[i]}" == "right" ]]; then
+            printf " %*s " "${column_widths[i]}" "${headers[i]}"
+        else
+            printf " %-*s " "${column_widths[i]}" "${headers[i]}"
+        fi
+        if [[ $i -lt $((${#headers[@]} - 1)) ]]; then
+            printf "│"
+        fi
+    done
+    printf "║\n"
+}
+
+function draw_metadata_table_row() {
+    local repo="$1"
+    local metadata="$2"
+    local artifacts="$3"
+    local status="$4"
+
+    local values=("$repo" "$metadata" "$artifacts" "$status")
+    local column_widths=("$TABLE_REPO_WIDTH" "$TABLE_METADATA_WIDTH" "$TABLE_ARTIFACTS_WIDTH" "$TABLE_STATUS_WIDTH")
+    local alignments=("left" "right" "right" "left")
+
+    if [[ ${#repo} -gt $TABLE_REPO_WIDTH ]]; then
+        values[0]="${repo:0:$((TABLE_REPO_WIDTH-3))}..."
+    fi
+
+    printf "║"
+    for i in "${!values[@]}"; do
+        if [[ "${alignments[i]}" == "right" ]]; then
+            printf " %*s " "${column_widths[i]}" "${values[i]}"
+        else
+            printf " %-*s " "${column_widths[i]}" "${values[i]}"
+        fi
+        if [[ $i -lt $((${#values[@]} - 1)) ]]; then
+            printf "│"
+        fi
+    done
+    printf "║\n"
+}
+
 function filter_and_prepare_packages() {
     local input_packages="$1"  # multiline string
     if [[ -z "$input_packages" ]]; then
@@ -2445,8 +2582,31 @@ function gather_installed_packages() {
         [[ -n "$REPOS" ]] && log "I" "Filtering packages to repositories: $REPOS"
         [[ -n "$EXCLUDE_REPOS" ]] && log "I" "Excluding packages from repositories: $EXCLUDE_REPOS"
         local filtered_result=""
+        local filter_checked=0
+        local filter_start_ts filter_last_heartbeat
+        filter_start_ts=$(date +%s)
+        filter_last_heartbeat=$filter_start_ts
         while IFS='|' read -r name epoch version release arch repo; do
             [[ -z "$name" ]] && continue
+            ((filter_checked++))
+
+            # This loop resolves @System packages via determine_repo_source(), which
+            # can fall back to an individual `dnf list installed` per package on a
+            # cache miss. Without a heartbeat, a large installed-package set with many
+            # unresolved entries can go silent for minutes. There is no meaningful
+            # fixed total to show progress against here (the loop must walk every
+            # installed package regardless of how many end up matching --repos), so
+            # this reports a running count and throughput instead of a fraction.
+            local filter_now
+            filter_now=$(date +%s)
+            if (( filter_now - filter_last_heartbeat >= PROGRESS_UPDATE_INTERVAL )); then
+                local filter_elapsed=$((filter_now - filter_start_ts))
+                local filter_rate="N/A"
+                (( filter_elapsed > 0 )) && filter_rate="$(awk "BEGIN {printf \"%.1f\", $filter_checked / $filter_elapsed}") pkg/sec"
+                log "I" "🔄 Resolving package repository sources: $filter_checked checked so far (elapsed ${filter_elapsed}s, $filter_rate)" 1
+                filter_last_heartbeat=$filter_now
+            fi
+
             [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
 
             local effective_repo="$repo"
@@ -2460,6 +2620,10 @@ function gather_installed_packages() {
                 filtered_result+="${name}|${epoch}|${version}|${release}|${arch}|${effective_repo}"$'\n'
             fi
         done <<< "$repoquery_result"
+
+        if (( filter_checked > 0 )); then
+            log "I" "✅ Resolved repository sources for $filter_checked package(s) in $(( $(date +%s) - filter_start_ts ))s" 1
+        fi
         
         repoquery_result="$filtered_result"
         
@@ -3319,6 +3483,7 @@ function process_packages() {
     : "${new_packages[@]:-}" "${update_packages[@]:-}"
     # Removed unused not_found_packages (was never populated)
     
+    print_phase_banner 2 4 "Package Synchronization"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     echo -e "\e[32m🚀 MyRepo v$VERSION - Starting package processing...\e[0m"
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
@@ -3925,9 +4090,11 @@ function sync_to_remote_target() {
 function sync_to_shared_repos() {
     # Skip sync if --no-sync option is specified
     if [[ $NO_SYNC -eq 1 ]]; then
-        log "I" "⏭️  Synchronization to shared location skipped (--no-sync specified)"
+        print_phase_banner 4 4 "Shared/Remote Sync" "--no-sync specified"
         return 0
     fi
+
+    print_phase_banner 4 4 "Shared/Remote Sync"
 
     if [[ "$SYNC_MODE" == "remote" ]]; then
         sync_to_remote_target
@@ -4016,20 +4183,22 @@ function sync_to_shared_repos() {
 function update_all_repository_metadata() {
     # Global early-outs
     if [[ $SYNC_ONLY -eq 1 ]]; then
-        log "I" "Sync-only mode: skipping metadata updates" 1
+        print_phase_banner 3 4 "Repository Metadata Update" "sync-only mode"
         return 0
     fi
     if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
-        log "I" "Metadata updates disabled via NO_METADATA_UPDATE=1" 1
+        print_phase_banner 3 4 "Repository Metadata Update" "--no-metadata-update specified"
         return 0
     fi
 
     # Build target repo list
     local target_repos=()
     if [[ -n "$REPOS" ]]; then
-        # When --repos is specified, restrict updates strictly to those repos
+        # --repos scopes which repos are candidates; whether each one actually
+        # gets rebuilt still depends on CHANGED_REPOS (see per-repo gate below),
+        # unless --refresh-metadata forces it regardless of change status.
         IFS=',' read -ra target_repos <<< "$REPOS"
-        log "I" "🔄 Metadata update limited to --repos: $REPOS"
+        log "I" "🔄 Metadata update scoped to --repos: $REPOS (unchanged repos skipped unless --refresh-metadata is set)"
     elif [[ ${#CHANGED_REPOS[@]} -gt 0 ]]; then
         for repo in "${!CHANGED_REPOS[@]}"; do target_repos+=("$repo"); done
         log "I" "🔄 Updating repository metadata for ${#target_repos[@]} changed repositories only"
@@ -4038,7 +4207,8 @@ function update_all_repository_metadata() {
         for repo_dir in "$LOCAL_REPO_PATH"/*; do [[ -d "$repo_dir" ]] || continue; target_repos+=("$(basename "$repo_dir")"); done
     fi
 
-    local updated_repos=0 failed_repos=0 skipped_manual_fresh=0
+    local updated_repos=0 failed_repos=0 skipped_manual_fresh=0 skipped_no_change=0
+    print_phase_banner 3 4 "Repository Metadata Update"
 
     for repo_name in "${target_repos[@]}"; do
         if ! should_process_repo "$repo_name"; then continue; fi
@@ -4047,6 +4217,20 @@ function update_all_repository_metadata() {
         for manual_repo in "${MANUAL_REPOS[@]}"; do
             if [[ "$repo_name" == "$manual_repo" ]]; then is_manual_repo=true; break; fi
         done
+
+        # When --repos is used purely as a scope filter (not an explicit force via
+        # --refresh-metadata), skip repos that had no package changes this run.
+        # Without this, every --repos run unconditionally reran createrepo_c and
+        # reported "Updated" for repos where nothing actually changed. Manual
+        # repos are exempt: their RPMs can be replaced without a newer mtime, so
+        # they are always refreshed regardless of change tracking.
+        if [[ $is_manual_repo != true && -n "$REPOS" && -z "${CHANGED_REPOS[$repo_name]:-}" && $REFRESH_METADATA -ne 1 ]]; then
+            log "D" "$(align_repo_name "$repo_name"): No package changes detected, skipping metadata regen (use --refresh-metadata to force)" 1
+            METADATA_REPO_STATUS["$repo_name"]="Unchanged"
+            METADATA_REPO_ARTIFACTS["$repo_name"]=0
+            ((skipped_no_change++))
+            continue
+        fi
 
         if [[ $is_manual_repo == true ]]; then
             local repo_dir="$LOCAL_REPO_PATH/$repo_name"
@@ -4057,11 +4241,15 @@ function update_all_repository_metadata() {
             # Always refresh manual repo metadata to avoid stale repodata when RPMs are replaced without newer mtimes
             log "I" "🔄 $(align_repo_name "$repo_name"): Refreshing manual repository metadata"
             cleanup_old_repodata "$repo_name" "$repo_dir" ""
+            local artifacts_before=$MODULE_ARTIFACT_DOWNLOAD_TOTAL
             if update_repository_metadata "$repo_name" "$repo_dir"; then
                 ((updated_repos++))
+                METADATA_REPO_STATUS["$repo_name"]="Updated"
             else
                 ((failed_repos++))
+                METADATA_REPO_STATUS["$repo_name"]="Failed"
             fi
+            METADATA_REPO_ARTIFACTS["$repo_name"]=$((MODULE_ARTIFACT_DOWNLOAD_TOTAL - artifacts_before))
             continue
         fi
 
@@ -4072,18 +4260,39 @@ function update_all_repository_metadata() {
             local repo_base_path
             repo_base_path=$(get_repo_base_path "$repo_name")
             cleanup_old_repodata "$repo_name" "$repo_base_path" "$repo_path"
+            local artifacts_before=$MODULE_ARTIFACT_DOWNLOAD_TOTAL
             if update_repository_metadata "$repo_name" "$repo_path"; then
                 ((updated_repos++))
+                METADATA_REPO_STATUS["$repo_name"]="Updated"
             else
                 ((failed_repos++))
+                METADATA_REPO_STATUS["$repo_name"]="Failed"
             fi
+            METADATA_REPO_ARTIFACTS["$repo_name"]=$((MODULE_ARTIFACT_DOWNLOAD_TOTAL - artifacts_before))
         fi
     done
 
     if [[ $DRY_RUN -eq 1 ]]; then
         log "I" "🔍 DRY RUN: Would update metadata (regular + manual combined)" 1
     else
-        log "I" "✅ Metadata update: $updated_repos updated, $failed_repos failed, $skipped_manual_fresh manual fresh" 1
+        if [[ ${#METADATA_REPO_STATUS[@]} -gt 0 ]]; then
+            echo
+            log "I" "Repository Metadata Update Summary:"
+            echo
+            draw_metadata_table_border "top"
+            draw_metadata_table_header
+            draw_metadata_table_border "middle"
+            local repo
+            for repo in $(printf '%s\n' "${!METADATA_REPO_STATUS[@]}" | sort); do
+                local repo_status_display="Disabled"
+                is_repo_enabled "$repo" && repo_status_display="Active"
+                draw_metadata_table_row "$repo" "${METADATA_REPO_STATUS[$repo]}" "${METADATA_REPO_ARTIFACTS[$repo]:-0}" "$repo_status_display"
+            done
+            draw_metadata_table_border "middle"
+            draw_metadata_table_row "TOTAL" "$updated_repos updated" "$MODULE_ARTIFACT_DOWNLOAD_TOTAL" "Summary"
+            draw_metadata_table_border "bottom"
+        fi
+        log "I" "✅ Metadata update: $updated_repos updated, $failed_repos failed, $skipped_manual_fresh manual fresh, $skipped_no_change unchanged (skipped)" 1
         if [[ $failed_repos -gt 0 ]]; then
             log "W" "Some repositories failed metadata update" 1
         fi
@@ -4439,28 +4648,26 @@ function filter_module_metadata_for_streams() {
 # For each modulemd document, the artifacts.rpms list specifies exact NEVRAs.
 # If those RPMs are not present locally, we download them from the matching
 # upstream DNF repo (derived from the repo directory name).
-function download_module_artifact_rpms() {
-    local repo_name="$1"
-    local repo_base_path="$2"
-    local packages_path="$3"
 
-    [[ -d "$repo_base_path" ]] || return 0
-    [[ -d "$packages_path" ]] || return 0
-
-    # Find module metadata files
+# Extracts the set of NEVRAs (name-epoch:version-release.arch) referenced by
+# artifacts: sections across all current module metadata files for a repo.
+# Shared by download_module_artifact_rpms() (what to fetch) and
+# cleanup_uninstalled_packages() (what to protect from removal), so both
+# subsystems agree on which non-installed RPMs must stay on disk instead of
+# fighting each other (cleanup deleting what module-artifact download just
+# fetched, forcing it to be re-downloaded every run).
+function get_module_artifact_nevras() {
+    local repo_base_path="$1"
     local -a module_files=()
+    local module_file
+
     while IFS= read -r module_file; do
         [[ -n "$module_file" ]] || continue
         module_files+=("$module_file")
     done < <(find_repository_module_metadata_files "$repo_base_path")
 
-    if [[ ${#module_files[@]} -eq 0 ]]; then
-        return 0
-    fi
+    [[ ${#module_files[@]} -gt 0 ]] || return 0
 
-    # Extract all artifact NEVRAs from module metadata
-    local artifacts_file
-    artifacts_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-artifacts.XXXXXX")"
     for module_file in "${module_files[@]}"; do
         read_module_metadata_file "$module_file" 2>/dev/null \
             | awk '/^[[:space:]]*artifacts:/ { in_art=1; next }
@@ -4472,7 +4679,21 @@ function download_module_artifact_rpms() {
                          if (val != "") print val
                      }
                      in_art && /^[[:space:]]*[a-zA-Z]/ { in_art=0 }'
-    done | sort -u > "$artifacts_file"
+    done | sort -u
+}
+
+function download_module_artifact_rpms() {
+    local repo_name="$1"
+    local repo_base_path="$2"
+    local packages_path="$3"
+
+    [[ -d "$repo_base_path" ]] || return 0
+    [[ -d "$packages_path" ]] || return 0
+
+    # Extract all artifact NEVRAs from module metadata
+    local artifacts_file
+    artifacts_file="$(mktemp "${TMPDIR:-/tmp}/myrepo-module-artifacts.XXXXXX")"
+    get_module_artifact_nevras "$repo_base_path" > "$artifacts_file"
 
     if [[ ! -s "$artifacts_file" ]]; then
         rm -f "$artifacts_file"
@@ -4503,7 +4724,7 @@ function download_module_artifact_rpms() {
 
     local missing_count
     missing_count=$(wc -l < "$missing_file")
-    log "I" "$(align_repo_name "$repo_name"): Downloading $missing_count missing module artifact RPM(s) from upstream" 1
+    log "I" "$(align_repo_name "$repo_name"): Fetching $missing_count module artifact RPM(s) for module metadata consistency (separate from the package sync summary above)" 1
 
     # Determine the DNF repo to download from (same name as the repo directory)
     local dnf_repo="$repo_name"
@@ -4562,6 +4783,7 @@ function download_module_artifact_rpms() {
 
     rm -f "$missing_file"
 
+    MODULE_ARTIFACT_DOWNLOAD_TOTAL=$((MODULE_ARTIFACT_DOWNLOAD_TOTAL + downloaded))
     log "D" "$(align_repo_name "$repo_name"): Module artifact download complete: $downloaded downloaded, $failed failed" 2
     return 0
 }
@@ -4952,6 +5174,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     validate_repository_structure
     show_runtime_status
     validate_and_handle_modes
+    print_phase_banner 1 4 "Preparation"
     # Run cleanup before the disk-space gate so a low-space condition can be
     # self-healed by removing uninstalled/old packages instead of aborting outright.
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then

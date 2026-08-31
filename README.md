@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.24)
+# Repo Handler Script (v2.4.26)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -437,6 +437,15 @@ forcing slow individual `dnf` fallback queries per package. The cache-clear step
 being rebuilt, and repos outside that scope have their existing on-disk cache loaded into memory instead of being
 discarded, avoiding the fallback entirely.
 
+### Module Artifact Download Reporting (v2.4.25)
+
+The package-sync summary (`New`/`Update`/`Exists`) only ever counted installed-package reconciliation, not the
+module artifact RPMs `download_module_artifact_rpms()` fetches afterward to keep old modulemd artifact NEVRAs
+resolvable. A run could print "0 new" and then, moments later, "Downloading 70 missing module artifact RPM(s)",
+which reads as contradictory. The per-repo log line now states explicitly that this is a separate module
+consistency step, and the final `Metadata update: N updated, ...` line appends a total artifact-RPM count when
+any were fetched, so the two accounting paths are clearly distinguished instead of looking like one broken count.
+
 ## Limitations (Known, Accepted)
 
 - No signature verification of RPMs (assumes trusted environment).
@@ -467,6 +476,10 @@ Implemented improvements (chronological highlights):
 13. Content-based status detection for RPMs published under non-NEVRA filenames (v2.4.22).
 14. Module metadata files written to repodata now forced to `0644` to survive non-root remote sync (v2.4.23).
 15. Module metadata refreshed from DNF's own upstream cache instead of only ever preserving a stale copy; out-of-scope repo caches no longer wiped by `--repos` runs (v2.4.24).
+16. Module artifact download counts now reported separately from the package sync summary, instead of appearing to contradict a "0 new" result (v2.4.25).
+17. `cleanup_uninstalled_packages()` and `download_module_artifact_rpms()` now share the same module-artifact NEVRA set, so cleanup no longer deletes RPMs kept only for module metadata consistency (previously they were removed and re-downloaded every single run) (v2.4.26).
+18. `--repos`-scoped metadata updates are now gated on actual package changes (`CHANGED_REPOS`) or an explicit `--refresh-metadata`, instead of unconditionally rebuilding repodata for every named repo on every run (v2.4.26).
+19. The run is now split into 4 explicit, banner-announced phases (Preparation, Package Synchronization, Repository Metadata Update, Shared/Remote Sync), each with its own summary; skipped phases still announce themselves with the skip reason (v2.4.26).
 
 Final decisions:
 
