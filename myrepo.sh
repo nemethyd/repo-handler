@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.27"
+VERSION="2.4.28"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -230,6 +230,8 @@ DNF_CACHE_TIMEOUT=${DNF_CACHE_TIMEOUT:-120}   # Timeout for DNF cache building o
 DNF_DOWNLOAD_TIMEOUT=${DNF_DOWNLOAD_TIMEOUT:-1800}  # Timeout for DNF download operations (30 minutes)
 SUDO_TEST_TIMEOUT=${SUDO_TEST_TIMEOUT:-10}    # Timeout for sudo test commands
 DNF_CACHE_DIR=${DNF_CACHE_DIR:-/var/cache/dnf} # Where dnf keeps its own repo metadata cache (source of fresh module metadata)
+MODULE_ARTIFACT_NEGATIVE_CACHE_TTL=${MODULE_ARTIFACT_NEGATIVE_CACHE_TTL:-604800} # Seconds to skip known-unavailable module artifacts (default: 7 days)
+MODULE_ARTIFACT_NEGATIVE_CACHE_SUFFIX=${MODULE_ARTIFACT_NEGATIVE_CACHE_SUFFIX:-module-artifact-missing.cache}
 
 # Performance and monitoring configuration
 PROGRESS_REPORT_INTERVAL=${PROGRESS_REPORT_INTERVAL:-50}  # Report progress every N packages
@@ -4649,6 +4651,89 @@ function filter_module_metadata_for_streams() {
 # If those RPMs are not present locally, we download them from the matching
 # upstream DNF repo (derived from the repo directory name).
 
+function module_artifact_negative_cache_path() {
+    local repo_name="$1"
+    printf '%s/%s.%s\n' "$SHARED_CACHE_PATH" "$repo_name" "$MODULE_ARTIFACT_NEGATIVE_CACHE_SUFFIX"
+}
+
+function load_module_artifact_negative_cache() {
+    local repo_name="$1"
+    local cache_ref_name="$2"
+    local cache_file
+    cache_file=$(module_artifact_negative_cache_path "$repo_name")
+
+    [[ -f "$cache_file" ]] || return 0
+
+    local now nevra last_checked age
+    now=$(date +%s)
+    while IFS='|' read -r nevra last_checked; do
+        [[ -n "$nevra" && "$last_checked" =~ ^[0-9]+$ ]] || continue
+        age=$((now - last_checked))
+        if (( age < MODULE_ARTIFACT_NEGATIVE_CACHE_TTL )); then
+            printf -v "${cache_ref_name}[$nevra]" '%s' "$last_checked"
+        fi
+    done < "$cache_file"
+}
+
+function write_module_artifact_negative_cache() {
+    local repo_name="$1"
+    local -n cache_ref="$2"
+    local cache_file temp_file cache_dir
+    cache_file=$(module_artifact_negative_cache_path "$repo_name")
+    cache_dir=$(dirname "$cache_file")
+
+    mkdir -p "$cache_dir" 2>/dev/null || {
+        [[ $ELEVATE_COMMANDS -eq 1 ]] && sudo mkdir -p "$cache_dir" 2>/dev/null || return 0
+    }
+
+    temp_file=$(mktemp "${TMPDIR:-/tmp}/myrepo-module-negative.XXXXXX")
+    local nevra
+    for nevra in "${!cache_ref[@]}"; do
+        printf '%s|%s\n' "$nevra" "${cache_ref[$nevra]}"
+    done | sort > "$temp_file"
+
+    if mv "$temp_file" "$cache_file" 2>/dev/null; then
+        chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+    elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
+        sudo cp "$temp_file" "$cache_file" 2>/dev/null || true
+        sudo chmod "$CACHE_FILE_PERMISSIONS" "$cache_file" 2>/dev/null || true
+        rm -f "$temp_file"
+    else
+        rm -f "$temp_file"
+    fi
+}
+
+function module_artifact_download_is_permanently_missing() {
+    local dnf_output="$1"
+    [[ "$dnf_output" == *"No package "*" available"* ]]
+}
+
+function download_single_module_artifact() {
+    local repo_name="$1"
+    local dnf_repo="$2"
+    local packages_path="$3"
+    local nevra="$4"
+    local -n negative_cache_ref="$5"
+
+    local dnf_output
+    if dnf_output=$("${DNF_CMD[@]}" download --destdir "$packages_path" \
+        --disablerepo='*' --enablerepo="$dnf_repo" \
+        "$nevra" 2>&1); then
+        unset 'negative_cache_ref[$nevra]'
+        return 0
+    fi
+
+    if module_artifact_download_is_permanently_missing "$dnf_output"; then
+        # shellcheck disable=SC2034 # assignment mutates the caller's nameref array
+        negative_cache_ref["$nevra"]=$(date +%s)
+        log "W" "$(align_repo_name "$repo_name"): Module artifact unavailable upstream (cached for ${MODULE_ARTIFACT_NEGATIVE_CACHE_TTL}s): $nevra" 1
+    else
+        log "W" "$(align_repo_name "$repo_name"): Failed to download module artifact: $nevra" 1
+        log "D" "$(align_repo_name "$repo_name"): dnf output: $dnf_output" 2
+    fi
+    return 1
+}
+
 # Extracts the set of NEVRAs (name-epoch:version-release.arch) referenced by
 # artifacts: sections across all current module metadata files for a repo.
 # Shared by download_module_artifact_rpms() (what to fetch) and
@@ -4728,13 +4813,21 @@ function download_module_artifact_rpms() {
 
     # Determine the DNF repo to download from (same name as the repo directory)
     local dnf_repo="$repo_name"
+    declare -A module_artifact_negative_cache=()
+    load_module_artifact_negative_cache "$repo_name" module_artifact_negative_cache
 
     # Download in batches
     local -a batch=()
     local downloaded=0
     local failed=0
+    local skipped_negative=0
     while IFS= read -r nevra; do
         [[ -n "$nevra" ]] || continue
+        if [[ -n "${module_artifact_negative_cache[$nevra]:-}" ]]; then
+            ((skipped_negative++))
+            log "D" "$(align_repo_name "$repo_name"): Skipping known-unavailable module artifact: $nevra" 2
+            continue
+        fi
         batch+=("$nevra")
 
         if [[ ${#batch[@]} -ge $BATCH_SIZE ]]; then
@@ -4746,12 +4839,9 @@ function download_module_artifact_rpms() {
                 # Fall back to individual downloads for partial failures
                 local nevra_item
                 for nevra_item in "${batch[@]}"; do
-                    if "${DNF_CMD[@]}" download --destdir "$packages_path" \
-                        --disablerepo='*' --enablerepo="$dnf_repo" \
-                        "$nevra_item" >/dev/null 2>&1; then
+                    if download_single_module_artifact "$repo_name" "$dnf_repo" "$packages_path" "$nevra_item" module_artifact_negative_cache; then
                         ((downloaded++))
                     else
-                        log "W" "$(align_repo_name "$repo_name"): Failed to download module artifact: $nevra_item" 1
                         ((failed++))
                     fi
                 done
@@ -4769,12 +4859,9 @@ function download_module_artifact_rpms() {
         else
             local nevra_item
             for nevra_item in "${batch[@]}"; do
-                if "${DNF_CMD[@]}" download --destdir "$packages_path" \
-                    --disablerepo='*' --enablerepo="$dnf_repo" \
-                    "$nevra_item" >/dev/null 2>&1; then
+                if download_single_module_artifact "$repo_name" "$dnf_repo" "$packages_path" "$nevra_item" module_artifact_negative_cache; then
                     ((downloaded++))
                 else
-                    log "W" "$(align_repo_name "$repo_name"): Failed to download module artifact: $nevra_item" 1
                     ((failed++))
                 fi
             done
@@ -4782,9 +4869,13 @@ function download_module_artifact_rpms() {
     fi
 
     rm -f "$missing_file"
+    write_module_artifact_negative_cache "$repo_name" module_artifact_negative_cache
 
     MODULE_ARTIFACT_DOWNLOAD_TOTAL=$((MODULE_ARTIFACT_DOWNLOAD_TOTAL + downloaded))
-    log "D" "$(align_repo_name "$repo_name"): Module artifact download complete: $downloaded downloaded, $failed failed" 2
+    if [[ $skipped_negative -gt 0 ]]; then
+        log "I" "$(align_repo_name "$repo_name"): Skipped $skipped_negative known-unavailable module artifact RPM(s) from negative cache" 1
+    fi
+    log "D" "$(align_repo_name "$repo_name"): Module artifact download complete: $downloaded downloaded, $failed failed, $skipped_negative skipped" 2
     return 0
 }
 

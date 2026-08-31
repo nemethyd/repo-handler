@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.27)
+# Repo Handler Script (v2.4.28)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -167,6 +167,8 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | Timeouts | DNF_CACHE_TIMEOUT | seconds | 120 | cfg/env | Cache build repoquery timeout |
 | Timeouts | DNF_DOWNLOAD_TIMEOUT | seconds | 1800 | cfg/env | Download operation timeout |
 | Timeouts | SUDO_TEST_TIMEOUT | seconds | 5 | cfg/env | Non-blocking sudo probe |
+| Module metadata | MODULE_ARTIFACT_NEGATIVE_CACHE_TTL | seconds | 604800 | cfg/env | How long to skip confirmed-unavailable module artifact RPMs |
+| Module metadata | MODULE_ARTIFACT_NEGATIVE_CACHE_SUFFIX | string | module-artifact-missing.cache | cfg/env | Per-repo negative-cache filename suffix under SHARED_CACHE_PATH |
 | Test Hooks | MYREPO_TEST_BREAK_VERSION(_COUNT) | bool/int | 0 / 5 | env | Step debugger in version compare |
 | Test Hooks | MYREPO_TEST_BREAK_DETERMINE(_COUNT) | bool/int | 0 / 5 | env | Step debugger for source determination |
 | Test Hooks | MYREPO_TEST_ENABLE_SELECTIVE | bool | 0 | env | Force selective metadata path |
@@ -446,6 +448,22 @@ which reads as contradictory. The per-repo log line now states explicitly that t
 consistency step, and the final `Metadata update: N updated, ...` line appends a total artifact-RPM count when
 any were fetched, so the two accounting paths are clearly distinguished instead of looking like one broken count.
 
+### Module Artifact Negative Cache (v2.4.28)
+
+Oracle's unsupported repos can publish module metadata that still references old artifact NEVRAs after the matching
+RPM files have been pruned upstream. `myrepo.sh` still attempts to fetch every artifact listed in live modulemd,
+because available artifacts are required for internally consistent modular repos. When DNF confirms a missing artifact
+with `No package ... available`, the NEVRA is written to a per-repo negative cache under `SHARED_CACHE_PATH`:
+
+```text
+${SHARED_CACHE_PATH}/${repo_name}.${MODULE_ARTIFACT_NEGATIVE_CACHE_SUFFIX}
+```
+
+Each cache entry stores `NEVRA|last_checked_epoch`. Entries younger than `MODULE_ARTIFACT_NEGATIVE_CACHE_TTL`
+(default: `604800`, 7 days) are skipped on later runs, preventing repeated warning floods and wasted DNF calls.
+Expired entries are retried automatically, so an upstream re-publish or metadata correction self-heals. Transient
+download failures are not cached; only confirmed unavailable artifacts enter this cache.
+
 ## Limitations (Known, Accepted)
 
 - No signature verification of RPMs (assumes trusted environment).
@@ -482,6 +500,7 @@ Implemented improvements (chronological highlights):
 19. The run is now split into 4 explicit, banner-announced phases (Preparation, Package Synchronization, Repository Metadata Update, Shared/Remote Sync), each with its own summary; skipped phases still announce themselves with the skip reason (v2.4.26).
 20. Fixed a `createrepo_c --update` failure ("Cannot open file ...-modules.yaml.zst") that could mark an otherwise-healthy repo as `Failed`: createrepo_c reads the *previous* repomd.xml and auto-copies forward any custom metadata record (like `modules`), so pre-emptively deleting the live module file before running createrepo_c made that copy-forward fail. The file is no longer deleted beforehand; the correct filtered content is still unconditionally re-injected afterward (v2.4.27).
 21. `update_repository_metadata()` now captures and logs `createrepo_c`'s actual stderr on failure instead of discarding it, so future failures are diagnosable without re-running by hand (v2.4.27).
+22. Confirmed-unavailable module artifact RPMs now use a per-repo negative cache with configurable TTL, so retired upstream module artifacts are retried periodically but not warned/retried every run (v2.4.28).
 
 Final decisions:
 
