@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.22)
+# Repo Handler Script (v2.4.23)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -408,6 +408,14 @@ Two code paths now fall back to the RPM header instead of the filename:
 
 No configuration is required; detection is automatic.
 
+### Module Metadata Permissions (v2.4.23)
+
+Module metadata (`modules.yaml`) files are rewritten via temp files created with `mktemp`, which default to
+mode `600`. `filter_module_metadata_for_streams()`, `restore_preserved_module_metadata()`, and
+`inject_module_metadata_into_repodata()` now `chmod 0644` the resulting file in `repodata/` after every write,
+so it stays world-readable like the rest of the repodata (previously a `600` file could be silently skipped
+by non-root remote sync, leaving air-gapped mirrors without modular stream data for packages such as nginx).
+
 ## Limitations (Known, Accepted)
 
 - No signature verification of RPMs (assumes trusted environment).
@@ -436,6 +444,7 @@ Implemented improvements (chronological highlights):
 11. Plain / no-emoji mode.
 12. Tunables reference table & default config writer (`--write-default-config`).
 13. Content-based status detection for RPMs published under non-NEVRA filenames (v2.4.22).
+14. Module metadata files written to repodata now forced to `0644` to survive non-root remote sync (v2.4.23).
 
 Final decisions:
 

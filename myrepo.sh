@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.22"
+VERSION="2.4.23"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -4121,8 +4121,10 @@ function restore_preserved_module_metadata() {
 
         if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
             sudo cp -a "$source_file" "$target_path"
+            sudo chmod 0644 "$target_path"
         else
             cp -a "$source_file" "$target_path"
+            chmod 0644 "$target_path"
         fi
     done < <(find "$backup_dir" -type f \( -name "*modules.yaml" -o -name "*modules.yml" -o -name "*modules.yaml.gz" -o -name "*modules.yml.gz" -o -name "*modules.yaml.zst" -o -name "*modules.yml.zst" \) 2>/dev/null)
 
@@ -4323,6 +4325,7 @@ function filter_module_metadata_for_streams() {
                     fi
                     $compression_command "$tmp_file" > "$compressed_tmp"
                     sudo cp -a "$compressed_tmp" "$module_file"
+                    sudo chmod 0644 "$module_file"
                     rm -f "$compressed_tmp"
                 else
                     if [[ "$module_file" == *.zst ]]; then
@@ -4330,11 +4333,14 @@ function filter_module_metadata_for_streams() {
                     else
                         gzip -c "$tmp_file" > "$module_file"
                     fi
+                    chmod 0644 "$module_file"
                 fi
             elif [[ $ELEVATE_COMMANDS -eq 1 ]]; then
                 sudo cp -a "$tmp_file" "$module_file"
+                sudo chmod 0644 "$module_file"
             else
                 cp -a "$tmp_file" "$module_file"
+                chmod 0644 "$module_file"
             fi
         else
             rm -f "$tmp_file"
@@ -4523,12 +4529,14 @@ function inject_module_metadata_into_repodata() {
                 log "E" "Failed to inject module metadata from $module_file into $repodata_path"
                 return 1
             fi
+            sudo find "$repodata_path" -maxdepth 1 -name '*modules.yaml*' -exec chmod 0644 {} +
         else
             if ! modifyrepo_c --mdtype=modules --compress "$metadata_input" "$repodata_path" >/dev/null 2>&1; then
                 rm -f "$metadata_input"
                 log "E" "Failed to inject module metadata from $module_file into $repodata_path"
                 return 1
             fi
+            find "$repodata_path" -maxdepth 1 -name '*modules.yaml*' -exec chmod 0644 {} +
         fi
         rm -f "$metadata_input"
         injected=1
