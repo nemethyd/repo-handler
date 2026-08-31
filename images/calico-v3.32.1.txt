@@ -1,4 +1,0 @@
-# Calico v3.32.1 images for Kubernetes v1.36.4
-quay.io/calico/cni:v3.32.1
-quay.io/calico/kube-controllers:v3.32.1
-quay.io/calico/node:v3.32.1

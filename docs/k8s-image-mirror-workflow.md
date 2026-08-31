@@ -14,8 +14,12 @@ Use `--all-arches` only when you explicitly need multi-architecture manifests.
 
 - `image-repo.sh`: mirror + optional rsync sync
 - `image-repo.cfg`: defaults (paths, remote host, sync settings)
-- `images/kubernetes-v1.36.4.txt`: minimal kubeadm image set for v1.36.4
-- `images/calico-v3.32.1.txt`: pinned Calico v3.32.1 image set
+- `images/*.txt`: image lists, for example `images/kubernetes-v1.36.4.txt` (minimal kubeadm
+  set) or `images/calico-v3.32.1.txt` (pinned Calico set)
+
+Image lists are environment-specific and therefore excluded from version control; create the
+list your deployment needs and point `IMAGES_FILE` at it. Each line holds one fully qualified
+image reference.
 
 
 ## Step 1: Dry-run mirror plan

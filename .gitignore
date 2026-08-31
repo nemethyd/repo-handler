@@ -7,3 +7,5 @@ myrepo.log
 tests/test_force_redownload_state/
 browser/
 .clinerules
+# Image lists are environment-specific; only images/MyRepo.png is versioned
+images/*.txt
