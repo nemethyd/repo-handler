@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
-# Last Updated: 2026-08-31
+# Last Updated: 2026-10-24
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.28"
+VERSION="2.4.30"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -71,6 +71,7 @@ NO_METADATA_UPDATE=${NO_METADATA_UPDATE:-0}  # Skip repository metadata updates 
 PARALLEL=${PARALLEL:-6}
 EXCLUDE_REPOS=""
 REPOS=""
+REPO_OS_MAJOR=${REPO_OS_MAJOR:-}
 NAME_FILTER=""
 FULL_REBUILD=${FULL_REBUILD:-0}
 LOG_DIR=${LOG_DIR:-"/var/log/myrepo"}
@@ -90,7 +91,7 @@ JSON_SUMMARY=${JSON_SUMMARY:-0}
 ELEVATE_COMMANDS=${ELEVATE_COMMANDS:-1}  # 1=auto-detect (default), 0=never use sudo
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-14400}  # 4 hours cache validity (in seconds)
 MIN_FREE_SPACE_MB=${MIN_FREE_SPACE_MB:-2048}  # Minimum free space required under LOCAL_REPO_PATH (MB)
-CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Clean up uninstalled packages by default
+CLEANUP_UNINSTALLED=${CLEANUP_UNINSTALLED:-1}  # Remove uninstalled packages and verified superseded copies
 USE_PARALLEL_COMPRESSION=${USE_PARALLEL_COMPRESSION:-1}  # Enable parallel compression for createrepo
 SHARED_CACHE_PATH=${SHARED_CACHE_PATH:-"/var/cache/myrepo"}  # Shared cache directory for root/user access
 
@@ -1617,7 +1618,12 @@ function cleanup_old_repodata() {
 
 # Clean up uninstalled packages from local repositories (performance optimized)
 function cleanup_uninstalled_packages() {
-    log "I" "🧹 Checking for uninstalled packages to clean up..."
+    local cleanup_phase="${1:-uninstalled}"
+    if [[ "$cleanup_phase" != uninstalled && "$cleanup_phase" != obsolete ]]; then
+        log "E" "Invalid package cleanup phase: $cleanup_phase"
+        return 1
+    fi
+    log "I" "🧹 Checking packages to clean up ($cleanup_phase)..."
     
     # Early check: Skip cleanup if no repositories exist
     local repo_count=0
@@ -1642,9 +1648,10 @@ function cleanup_uninstalled_packages() {
     local dnf_start_time
     dnf_start_time=$(date +%s)
     
-    # Intentional word splitting for dnf command
-    if ! timeout "$DNF_CACHE_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null | \
-         sed 's/(none)/0/g' | sort -u > "$installed_packages_file"; then
+    if ! (set -o pipefail
+        timeout "$DNF_CACHE_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}" 2>/dev/null |
+            sed 's/(none)/0/g' | sort -u > "$installed_packages_file"
+    ); then
         log "W" "Could not get comprehensive installed package list for cleanup"
         rm -f "$installed_packages_file"
         return 1
@@ -1661,19 +1668,30 @@ function cleanup_uninstalled_packages() {
         return 1
     fi
     
-    # Create hash lookup for faster searches (major performance improvement)
-    local installed_packages_hash
-    installed_packages_hash=$(mktemp)
-    
-    # Convert to hash table format for O(1) lookups instead of O(n) grep searches
-    awk '{print $0 " 1"}' "$installed_packages_file" > "$installed_packages_hash"
+    local -A installed_nevras=() installed_name_arch=()
+    local pkg_name epoch version release arch
+    local invalid_installed_metadata=0
+    while IFS='|' read -r pkg_name epoch version release arch; do
+        if [[ -z "$pkg_name" || -z "$version" || -z "$release" || -z "$arch" ]]; then
+            invalid_installed_metadata=1
+            break
+        fi
+        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch=0
+        installed_nevras["${pkg_name}|${epoch}|${version}|${release}|${arch}"]=1
+        installed_name_arch["${pkg_name}|${arch}"]=1
+    done < "$installed_packages_file"
+    if [[ $invalid_installed_metadata -eq 1 ]]; then
+        log "E" "Invalid installed package metadata; skipping cleanup"
+        rm -f "$installed_packages_file"
+        return 1
+    fi
     
     local total_removed=0
     local total_would_remove=0
     local repos_cleaned=0
     local total_rpms_checked=0
     
-    log "I" "🔍 Scanning repositories for uninstalled packages..."
+    log "I" "🔍 Scanning repositories for $cleanup_phase packages..."
     local cleanup_start_time
     cleanup_start_time=$(date +%s)
     
@@ -1744,8 +1762,9 @@ function cleanup_uninstalled_packages() {
             
             # PERFORMANCE OPTIMIZATION: Batch process RPM metadata extraction
             local rpm_files_array=()
-            local rpm_metadata_file
-            rpm_metadata_file=$(mktemp)
+            local -A rpm_metadata_by_path=()
+            local -A verified_replacements=()
+            local -A replacement_candidates=()
             
             # Build array of RPM files
             while IFS= read -r rpm_file; do
@@ -1753,7 +1772,6 @@ function cleanup_uninstalled_packages() {
             done < <(find "$repo_path" -name "*.rpm" -type f 2>/dev/null)
             
             if [[ ${#rpm_files_array[@]} -eq 0 ]]; then
-                rm -f "$rpm_metadata_file"
                 continue
             fi
             
@@ -1781,7 +1799,6 @@ function cleanup_uninstalled_packages() {
 
                     # Map metadata back to file paths without relying on filenames, since
                     # third-party repos may ship upstream artifact names (gh_2.98.0_linux_amd64.rpm).
-                    local -A batch_nevra_to_path=()
                     local meta_name meta_epoch meta_version meta_release meta_arch
                     local meta_line_count
                     meta_line_count=$(grep -c . <<< "$batch_metadata")
@@ -1791,54 +1808,24 @@ function cleanup_uninstalled_packages() {
                         while IFS='|' read -r meta_name meta_epoch meta_version meta_release meta_arch; do
                             [[ -z "$meta_name" ]] && continue
                             [[ "$meta_epoch" == "(none)" || -z "$meta_epoch" ]] && meta_epoch="0"
-                            batch_nevra_to_path["${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"]="${batch_files[meta_index]}"
+                            rpm_metadata_by_path["${batch_files[meta_index]}"]="${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"
                             ((meta_index++))
                         done <<< "$batch_metadata"
                     else
                         # Partial query failure: resolve individually so paths stay accurate
                         local single_meta
                         for rpm_file in "${batch_files[@]}"; do
-                            single_meta=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null) || continue
+                            if ! single_meta=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
+                                log "W" "Could not read RPM metadata; retaining: $rpm_file"
+                                continue
+                            fi
                             IFS='|' read -r meta_name meta_epoch meta_version meta_release meta_arch <<< "$single_meta"
                             [[ -z "$meta_name" ]] && continue
                             [[ "$meta_epoch" == "(none)" || -z "$meta_epoch" ]] && meta_epoch="0"
-                            batch_nevra_to_path["${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"]="$rpm_file"
+                            rpm_metadata_by_path["$rpm_file"]="${meta_name}|${meta_epoch}|${meta_version}|${meta_release}|${meta_arch}"
                         done
                     fi
 
-                    # Process the batch results
-                    while IFS='|' read -r pkg_name epoch version release arch; do
-                        # Skip empty lines
-                        [[ -z "$pkg_name" ]] && continue
-                        
-                        # Normalize epoch (replace (none) with 0)
-                        [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch="0"
-                        
-                        local rpm_metadata="${pkg_name}|${epoch}|${version}|${release}|${arch}"
-                        
-                        log "D" "Checking: $rpm_metadata" 3
-                        
-                        # PERFORMANCE IMPROVEMENT: Use hash lookup instead of grep
-                        if [[ -n "${protected_module_nevras["${pkg_name}-${epoch}:${version}-${release}.${arch}"]:-}" ]]; then
-                            log "D" "Protected module artifact, skipping removal: $rpm_metadata" 3
-                        elif ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
-                            # Package not found in installed list - mark for removal
-                            local rpm_full_path="${batch_nevra_to_path["$rpm_metadata"]:-}"
-                            
-                            if [[ -n "$rpm_full_path" && -f "$rpm_full_path" ]]; then
-                                if [[ $DRY_RUN -eq 1 ]]; then
-                                    log "I" "🔍 Would remove uninstalled: $pkg_name (from $repo_name)" 2
-                                    log "D" "   Metadata: $rpm_metadata" 3
-                                    ((would_remove_count++))
-                                else
-                                    log "I" "🗑️  Removing uninstalled: $pkg_name (from $repo_name)" 2
-                                    log "D" "   Metadata: $rpm_metadata" 3
-                                    rpms_to_remove+=("$rpm_full_path")
-                                    ((removed_count++))
-                                fi
-                            fi
-                        fi
-                    done <<< "$batch_metadata"
                 else
                     # Fallback: Process individually if batch fails
                     log "W" "Batch RPM query failed for $repo_name, falling back to individual queries" 2
@@ -1846,29 +1833,14 @@ function cleanup_uninstalled_packages() {
                     for rpm_file in "${batch_files[@]}"; do
                         local rpm_metadata
                         if rpm_metadata=$(rpm -qp --nosignature --nodigest --queryformat "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}" "$rpm_file" 2>/dev/null); then
-                            # Normalize epoch (replace (none) with 0)
-                            rpm_metadata="${rpm_metadata//(none)/0}"
-                            
-                            local package_name meta_epoch meta_version meta_release meta_arch
-                            IFS='|' read -r package_name meta_epoch meta_version meta_release meta_arch <<< "$rpm_metadata"
-                            if [[ -n "${protected_module_nevras["${package_name}-${meta_epoch}:${meta_version}-${meta_release}.${meta_arch}"]:-}" ]]; then
-                                log "D" "Protected module artifact, skipping removal: $rpm_metadata" 3
-                                continue
-                            fi
-                            
-                            # Use hash lookup for performance
-                            if ! awk -v key="$rpm_metadata" '$1 == key {found=1; exit} END {exit !found}' "$installed_packages_hash"; then
-                                if [[ $DRY_RUN -eq 1 ]]; then
-                                    log "I" "🔍 Would remove uninstalled: $package_name (from $repo_name)" 3
-                                    ((would_remove_count++))
-                                else
-                                    log "I" "🗑️  Removing uninstalled: $package_name (from $repo_name)" 3
-                                    rpms_to_remove+=("$rpm_file")
-                                    ((removed_count++))
-                                fi
-                            fi
+                            IFS='|' read -r pkg_name epoch version release arch <<< "$rpm_metadata"
+                            [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch=0
+                            rpm_metadata_by_path["$rpm_file"]="${pkg_name}|${epoch}|${version}|${release}|${arch}"
+                        else
+                            log "W" "Could not read RPM metadata; retaining: $rpm_file"
                         fi
                     done
+
                 fi
                 
                 processed_rpms=$batch_end
@@ -1880,6 +1852,58 @@ function cleanup_uninstalled_packages() {
                 fi
             done
             
+            # Only a complete, exact installed RPM in this repository may replace
+            # older versions. Check after all batches, independent of file order.
+            if [[ "$cleanup_phase" == obsolete ]]; then
+                for rpm_file in "${rpm_files_array[@]}"; do
+                    local rpm_metadata="${rpm_metadata_by_path["$rpm_file"]:-}"
+                    [[ -n "$rpm_metadata" ]] || continue
+                    IFS='|' read -r pkg_name epoch version release arch <<< "$rpm_metadata"
+                    if [[ -z "${installed_nevras["$rpm_metadata"]:-}" &&
+                          -n "${installed_name_arch["${pkg_name}|${arch}"]:-}" &&
+                          -z "${protected_module_nevras["${pkg_name}-${epoch}:${version}-${release}.${arch}"]:-}" ]]; then
+                        replacement_candidates["${pkg_name}|${arch}"]=1
+                    fi
+                done
+                for rpm_file in "${rpm_files_array[@]}"; do
+                    local rpm_metadata="${rpm_metadata_by_path["$rpm_file"]:-}"
+                    [[ -n "$rpm_metadata" && -n "${installed_nevras["$rpm_metadata"]:-}" ]] || continue
+                    IFS='|' read -r pkg_name epoch version release arch <<< "$rpm_metadata"
+                    [[ -n "${replacement_candidates["${pkg_name}|${arch}"]:-}" ]] || continue
+                    if rpm -K --nosignature "$rpm_file" >/dev/null 2>&1; then
+                        verified_replacements["${pkg_name}|${arch}"]=1
+                    else
+                        log "W" "RPM integrity check failed; retaining previous versions of $pkg_name.$arch: $rpm_file"
+                    fi
+                done
+            fi
+
+            for rpm_file in "${rpm_files_array[@]}"; do
+                local rpm_metadata="${rpm_metadata_by_path["$rpm_file"]:-}"
+                [[ -n "$rpm_metadata" ]] || continue
+                IFS='|' read -r pkg_name epoch version release arch <<< "$rpm_metadata"
+                [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch=0
+                if [[ -n "${protected_module_nevras["${pkg_name}-${epoch}:${version}-${release}.${arch}"]:-}" ||
+                      -n "${installed_nevras["$rpm_metadata"]:-}" ]]; then
+                    continue
+                fi
+                local name_arch="${pkg_name}|${arch}"
+                if [[ "$cleanup_phase" == uninstalled ]]; then
+                    [[ -n "${installed_name_arch["$name_arch"]:-}" ]] && continue
+                else
+                    [[ -n "${installed_name_arch["$name_arch"]:-}" &&
+                       -n "${verified_replacements["$name_arch"]:-}" ]] || continue
+                fi
+                if [[ $DRY_RUN -eq 1 ]]; then
+                    log "I" "🔍 Would remove $cleanup_phase: $pkg_name (from $repo_name)" 2
+                    ((would_remove_count++))
+                else
+                    log "I" "🗑️  Removing $cleanup_phase: $pkg_name (from $repo_name)" 2
+                    rpms_to_remove+=("$rpm_file")
+                    ((removed_count++))
+                fi
+            done
+
             # PERFORMANCE OPTIMIZATION: Batch remove files in chunks to avoid command line limits
             if [[ ${#rpms_to_remove[@]} -gt 0 && $DRY_RUN -eq 0 ]]; then
                 local remove_batch_size=$BATCH_SIZE
@@ -1895,9 +1919,17 @@ function cleanup_uninstalled_packages() {
                     done
                     
                     if [[ $ELEVATE_COMMANDS -eq 1 ]]; then
-                        sudo rm -f "${remove_batch[@]}"
+                        if ! sudo rm -f "${remove_batch[@]}"; then
+                            log "E" "Failed to remove $cleanup_phase RPMs from $repo_name"
+                            rm -f "$installed_packages_file"
+                            return 1
+                        fi
                     else
-                        rm -f "${remove_batch[@]}"
+                        if ! rm -f "${remove_batch[@]}"; then
+                            log "E" "Failed to remove $cleanup_phase RPMs from $repo_name"
+                            rm -f "$installed_packages_file"
+                            return 1
+                        fi
                     fi
                     
                     remove_processed=$remove_end
@@ -1910,41 +1942,39 @@ function cleanup_uninstalled_packages() {
                 if [[ $would_remove_count -gt 0 ]]; then
                     ((repos_cleaned++))
                     total_would_remove=$((total_would_remove + would_remove_count))
-                    echo -e "\e[35m$(align_repo_name "$repo_name"): Would remove $would_remove_count uninstalled packages in ${repo_duration}s (dry-run)\e[0m"
+                    echo -e "\e[35m$(align_repo_name "$repo_name"): Would remove $would_remove_count $cleanup_phase packages in ${repo_duration}s (dry-run)\e[0m"
                 fi
             else
                 if [[ $removed_count -gt 0 ]]; then
                     ((repos_cleaned++))
                     total_removed=$((total_removed + removed_count))
-                    echo -e "\e[33m$(align_repo_name "$repo_name"): Removed $removed_count uninstalled packages in ${repo_duration}s\e[0m"
+                    echo -e "\e[33m$(align_repo_name "$repo_name"): Removed $removed_count $cleanup_phase packages in ${repo_duration}s\e[0m"
                     # Removal alters repository contents; mark repo changed for metadata update
                     CHANGED_REPOS["$repo_name"]=1
                 fi
             fi
             
-            # Clean up temporary files for this repository
-            rm -f "$rpm_metadata_file"
         fi
     done
     
     local cleanup_duration=$(($(date +%s) - cleanup_start_time))
     
     # Cleanup temporary files
-    rm -f "$installed_packages_file" "$installed_packages_hash"
+    rm -f "$installed_packages_file"
     
     if [[ $DRY_RUN -eq 1 ]]; then
         if [[ $total_would_remove -gt 0 ]]; then
-            log "I" "🔍 DRY RUN: Would remove $total_would_remove uninstalled packages from $repos_cleaned repositories"
+            log "I" "🔍 DRY RUN: Would remove $total_would_remove $cleanup_phase packages from $repos_cleaned repositories"
             log "I" "📊 Performance: Checked $total_rpms_checked RPM files in ${cleanup_duration}s"
         else
-            log "I" "🔍 DRY RUN: No uninstalled packages found to remove"
+            log "I" "🔍 DRY RUN: No $cleanup_phase packages found to remove"
         fi
     else
         if [[ $total_removed -gt 0 ]]; then
-            log "I" "✅ Cleanup completed: $total_removed uninstalled packages removed from $repos_cleaned repositories"
+            log "I" "✅ Cleanup completed: $total_removed $cleanup_phase packages removed from $repos_cleaned repositories"
             log "I" "📊 Performance: Processed $total_rpms_checked RPM files in ${cleanup_duration}s"
         else
-            log "I" "✅ No uninstalled packages found to remove"
+            log "I" "✅ No $cleanup_phase packages found to remove"
             log "I" "📊 Performance: Checked $total_rpms_checked RPM files in ${cleanup_duration}s"
         fi
     fi
@@ -2453,8 +2483,9 @@ function finalize_and_report() {
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     [[ $DRY_RUN -eq 1 ]] && echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
     generate_summary_table
-    # Cleanup of uninstalled packages now runs earlier (before check_disk_space) in main;
-    # not repeated here to avoid a second full repository scan in the same run.
+    if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
+        cleanup_uninstalled_packages obsolete || return 1
+    fi
     if [[ $NO_METADATA_UPDATE -eq 1 ]]; then
         log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
     else
@@ -3127,6 +3158,14 @@ function parse_args() {
                 REPOS="$2"
                 shift 2
                 ;;
+            --os-major)
+                if [[ $# -lt 2 || ! "$2" =~ ^(9|10)$ ]]; then
+                    log "E" "--os-major requires 9 or 10"
+                    return 1
+                fi
+                REPO_OS_MAJOR="$2"
+                shift 2
+                ;;
             --refresh-metadata)
                 REFRESH_METADATA=1
                 shift
@@ -3226,8 +3265,8 @@ function parse_args() {
                 echo "  --batch-size INT       Batch size for processing RPMs (default: $BATCH_SIZE)"
                 echo "  --cache-max-age SEC    Cache validity in seconds (default: $CACHE_MAX_AGE = 4h)"
                 echo "  --shared-cache-path PATH Shared cache directory path (default: $SHARED_CACHE_PATH)"
-                echo "  --cleanup-uninstalled  Enable cleanup of uninstalled packages (default: enabled)"
-                echo "  --no-cleanup-uninstalled Disable cleanup of uninstalled packages"
+                echo "  --cleanup-uninstalled  Remove uninstalled packages and verified superseded copies (default: enabled)"
+                echo "  --no-cleanup-uninstalled Disable both package cleanup stages"
                 echo "  --parallel-compression Enable parallel compression for createrepo (default: enabled)"
                 echo "  --no-parallel-compression Disable parallel compression"
                 echo "  --debug LEVEL          Debug level 1-3 (default: $DEBUG_LEVEL)"
@@ -3243,6 +3282,7 @@ function parse_args() {
                 echo "  --name-filter REGEX    Process only packages matching regex"
                 echo "  --parallel INT         Number of parallel operations (default: $PARALLEL)"
                 echo "  --repos LIST           Process only specified repositories"
+                echo "  --os-major 9|10        Protect OS-major boundaries; select only matching olN_* repositories"
                 echo "  --refresh-metadata     Force refresh of DNF metadata cache"
                 echo "  --set-permissions      Auto-fix file permissions"
                 echo "  --shared-repo-path PATH Shared repository path (default: $SHARED_REPO_PATH)"
@@ -3323,6 +3363,7 @@ function write_default_config_file() {
 # MANUAL_REPOS="ol9_edge"
     "ol9_oracle_instantclient"
 # EXCLUDE_REPOS=""
+# REPO_OS_MAJOR=9
 
 # LOCAL RPM SOURCES (comma-separated directories scanned before downloading)
 # LOCAL_RPM_SOURCES="$HOME/rpmbuild/RPMS,/var/cache/dnf"
@@ -3334,6 +3375,7 @@ function write_default_config_file() {
 
 # BEHAVIOR TOGGLES
 # DRY_RUN=0
+# Cleanup uninstalled packages before downloads; prune superseded copies after replacement verification
 # CLEANUP_UNINSTALLED=1
 # USE_PARALLEL_COMPRESSION=1
 # NO_SYNC=0
@@ -3675,8 +3717,91 @@ function should_process_package() {
 }
 
 # Check if repository should be processed based on filters
+function get_host_os_major() {
+    local ID="" VERSION_ID=""
+    source /etc/os-release
+    [[ "$ID" == ol && "$VERSION_ID" =~ ^(9|10)(\.|$) ]] || return 1
+    printf '%s\n' "${VERSION_ID%%.*}"
+}
+
+function validate_os_major_path() {
+    [[ -n "$REPO_OS_MAJOR" ]] || return 0
+    local path="${1//\\//}" require_major="${2:-0}"
+    local component found=0
+    local -a components=()
+    IFS='/' read -ra components <<< "${path,,}"
+    for component in "${components[@]}"; do
+        if [[ "$component" == .. ]]; then
+            log "E" "Parent traversal is not allowed with --os-major: $1"
+            return 1
+        fi
+        if [[ "$component" =~ ^ol([0-9]+)([_-].*)?$ ]]; then
+            if [[ "${BASH_REMATCH[1]}" != "$REPO_OS_MAJOR" ]]; then
+                log "E" "Path crosses the OL${REPO_OS_MAJOR} boundary: $1"
+                return 1
+            fi
+            found=1
+        fi
+    done
+    if [[ "$require_major" -eq 1 && "$found" -eq 0 ]]; then
+        log "E" "Publication path must identify OL${REPO_OS_MAJOR}: $1"
+        return 1
+    fi
+}
+
+function validate_os_major_sync_paths() {
+    [[ -n "$REPO_OS_MAJOR" && $NO_SYNC -ne 1 ]] || return 0
+    if [[ "$SYNC_MODE" == remote ]]; then
+        validate_os_major_path "$REMOTE_SYNC_SOURCE_BASE" || return 1
+        validate_os_major_path "$REMOTE_SYNC_TARGET_BASE" || return 1
+        if [[ -n "$REMOTE_SYNC_MAPPING_FILE" ]]; then
+            if [[ ! -f "$REMOTE_SYNC_MAPPING_FILE" ]]; then
+                log "E" "Remote sync mapping file not found: $REMOTE_SYNC_MAPPING_FILE"
+                return 1
+            fi
+            local source_fragment dest_fragment
+            while read -r source_fragment dest_fragment; do
+                [[ -n "$source_fragment" && -n "$dest_fragment" ]] || continue
+                should_process_repo "$source_fragment" || continue
+                validate_os_major_path "${REMOTE_SYNC_TARGET_BASE}/${dest_fragment}" 1 || return 1
+            done < <(grep -E '^\s*".+"\s*=\s*".+"' "$REMOTE_SYNC_MAPPING_FILE" | sed -E 's/^\s*"//; s/"\s*=\s*"/ /; s/"\s*$//')
+        else
+            validate_os_major_path "${REMOTE_SYNC_TARGET_BASE}/ol${REPO_OS_MAJOR}_boundary" 1 || return 1
+        fi
+    elif [[ "$SYNC_MODE" == local ]]; then
+        validate_os_major_path "${SHARED_REPO_PATH}/ol${REPO_OS_MAJOR}_boundary" 1 || return 1
+    fi
+    return 0
+}
+
+function configure_os_major_boundary() {
+    [[ -n "$REPO_OS_MAJOR" ]] || return 0
+    if [[ ! "$REPO_OS_MAJOR" =~ ^(9|10)$ ]]; then
+        log "E" "REPO_OS_MAJOR must be 9 or 10"
+        return 1
+    fi
+    if [[ $SYNC_ONLY -ne 1 ]]; then
+        local host_major
+        if ! host_major=$(get_host_os_major) || [[ "$host_major" != "$REPO_OS_MAJOR" ]]; then
+            log "E" "OS boundary must match the installed Oracle Linux major; --sync-only may publish preserved repositories"
+            return 1
+        fi
+    fi
+    validate_os_major_path "$LOCAL_REPO_PATH" || return 1
+    validate_os_major_path "$SHARED_CACHE_PATH" || return 1
+    validate_os_major_sync_paths || return 1
+    if [[ "${SHARED_CACHE_PATH%/}" != */"ol${REPO_OS_MAJOR}" ]]; then
+        SHARED_CACHE_PATH="${SHARED_CACHE_PATH%/}/ol${REPO_OS_MAJOR}"
+    fi
+    return 0
+}
+
 function should_process_repo() {
     local repo_name="$1"
+
+    if [[ -n "$REPO_OS_MAJOR" && ! "$repo_name" =~ ^ol${REPO_OS_MAJOR}_[[:alnum:]_.-]+$ ]]; then
+        return 1
+    fi
     
     # Check if repo is in exclude list
     if [[ -n "$EXCLUDE_REPOS" ]]; then
@@ -3732,6 +3857,7 @@ function show_runtime_status() {
             for r in "${_req[@]}"; do
                 # Skip excluded
                 if [[ -n ${excluded_set["$r"]+x} ]]; then continue; fi
+                should_process_repo "$r" || continue
                 refresh_list+=("$r")
             done
         else
@@ -3741,6 +3867,7 @@ function show_runtime_status() {
             while IFS= read -r r; do
                 [[ -z "$r" ]] && continue
                 if [[ -n ${excluded_set["$r"]+x} ]]; then continue; fi
+                should_process_repo "$r" || continue
                 refresh_list+=("$r")
             done <<< "$enabled"
         fi
@@ -3778,9 +3905,9 @@ function show_runtime_status() {
         log "I" "DNF serial mode enabled"
     fi
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
-        log "I" "Cleanup of uninstalled packages enabled"
+        log "I" "Two-stage package cleanup enabled (uninstalled + verified superseded versions)"
     else
-        log "I" "Cleanup of uninstalled packages disabled"
+        log "I" "Package cleanup disabled (both stages)"
     fi
     if [[ $USE_PARALLEL_COMPRESSION -eq 1 ]]; then
         log "I" "Parallel compression for metadata updates enabled"
@@ -3804,6 +3931,9 @@ function show_runtime_status() {
     fi
 
     # Show active filters if any
+    if [[ -n "$REPO_OS_MAJOR" ]]; then
+        log "I" "OS-major boundary: OL${REPO_OS_MAJOR}; only matching ol${REPO_OS_MAJOR}_* repositories are eligible"
+    fi
     if [[ -n "$REPOS" ]]; then
         log "I" "Processing specific repositories: $REPOS"
     fi
@@ -3893,6 +4023,8 @@ function sync_to_remote_target() {
     local synced_count=0
     local warned_count=0
 
+    validate_os_major_sync_paths || return 1
+
     if [[ -n "$REMOTE_SYNC_MAPPING_FILE" ]]; then
         if [[ ! -f "$REMOTE_SYNC_MAPPING_FILE" ]]; then
             log "E" "Remote sync mapping file not found: $REMOTE_SYNC_MAPPING_FILE"
@@ -3903,6 +4035,7 @@ function sync_to_remote_target() {
         local source_fragment="" dest_fragment=""
         while read -r source_fragment dest_fragment; do
             [[ -z "$source_fragment" || -z "$dest_fragment" ]] && continue
+            should_process_repo "$source_fragment" || continue
 
             if [[ ${#selected_repos[@]} -gt 0 ]]; then
                 local match=0 _r
@@ -3998,6 +4131,8 @@ function sync_to_remote_target() {
         for repo_dir in "$REMOTE_SYNC_SOURCE_BASE"/*; do
             [[ -d "$repo_dir" ]] || continue
             repo_name=$(basename "$repo_dir")
+
+            should_process_repo "$repo_name" || continue
 
             if [[ ${#selected_repos[@]} -gt 0 ]]; then
                 local match=0 _r
@@ -4098,6 +4233,8 @@ function sync_to_shared_repos() {
 
     print_phase_banner 4 4 "Shared/Remote Sync"
 
+    validate_os_major_sync_paths || return 1
+
     if [[ "$SYNC_MODE" == "remote" ]]; then
         sync_to_remote_target
         return $?
@@ -4145,6 +4282,8 @@ function sync_to_shared_repos() {
             log "W" "   Skipping sync for this invalid directory"
             continue
         fi
+
+        should_process_repo "$repo_name" || continue
 
         # If --repos was provided, skip repos not in the list
         if [[ ${#selected_repos[@]} -gt 0 ]]; then
@@ -5243,7 +5382,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     # Initialize DNF command array early
     get_dnf_cmd
     load_config
-    parse_args "$@" 
+    parse_args "$@" || exit 1
+    configure_os_major_boundary || exit 1
     if [[ ${WRITE_DEFAULT_CONFIG:-0} -eq 1 ]]; then
         write_default_config_file || true
         exit 0
@@ -5257,17 +5397,17 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" && "${MYREPO_SOURCE_ONLY:-0}" -ne 1 ]]; then
     validate_and_handle_modes
     print_phase_banner 1 4 "Preparation"
     # Run cleanup before the disk-space gate so a low-space condition can be
-    # self-healed by removing uninstalled/old packages instead of aborting outright.
+    # self-healed by removing uninstalled packages, retaining upgrade candidates.
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
-        cleanup_uninstalled_packages
+        cleanup_uninstalled_packages || exit 1
     else
-        log "I" "Cleanup of uninstalled packages disabled"
+        log "I" "Package cleanup disabled (both stages)"
     fi
     check_disk_space
     full_rebuild_repos
     cleanup_old_cache_directories
     build_repo_cache
-    process_packages
+    process_packages || exit 1
     sync_to_shared_repos
     report_failed_downloads
     report_unknown_packages

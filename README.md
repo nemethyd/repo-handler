@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.28)
+# Repo Handler Script (v2.4.30)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -51,7 +51,7 @@ Implemented convenience: `--write-default-config` writes a commented template `m
 1. Loads defaults and (if present) `myrepo.cfg` located beside the script.
 2. Auto‑detects privilege mode (root / sudo / user) and uses `dnf` directly or via `sudo`.
 3. Builds / reuses a shared metadata cache of repository package lists (only for installed packages) under `SHARED_CACHE_PATH`.
-4. Removes RPMs for packages no longer installed (`cleanup_uninstalled_packages`), running before the disk-space check so a low-space condition can self-heal instead of aborting the run.
+4. Removes RPMs whose name + architecture are no longer installed (`cleanup_uninstalled_packages`), before the disk-space check. Previous versions of installed packages and required module artifacts are retained.
 5. Checks available disk space under `LOCAL_REPO_PATH` (`MIN_FREE_SPACE_MB`) and aborts if still below the minimum after cleanup.
 6. Queries all installed packages with repository info using `dnf repoquery`.
 7. Filters, normalizes and deduplicates the package list (skips invalid repos, collapses duplicates, optional name regex filter).
@@ -59,7 +59,7 @@ Implemented convenience: `--write-default-config` writes a commented template `m
 9. Classifies each package as NEW / UPDATE / EXISTS per repository by comparing the presence and version of RPM files already stored locally.
 10. Copies RPMs from configured local source directories first (avoids redownloading already available artifacts).
 11. Batches remaining NEW and UPDATE downloads per repository using `dnf download`, with fallback to smaller batches and individual retries; tracks failed downloads.
-12. Generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
+12. Prunes superseded versions only when an exact installed NEVRA is present in the same repository and passes an RPM integrity check; failed or skipped replacements leave previous versions intact. Then generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
 13. (Optional) Syncs the local repository tree to a shared path, skipping disabled repos.
 14. Produces: colored per‑package log lines, a per‑repository summary table, failed download report, unknown package report.
 
@@ -85,7 +85,7 @@ Manual repositories are listed in `MANUAL_REPOS` and are NOT downloaded from DNF
 - Local RPM reuse: scans `LOCAL_RPM_SOURCES` before downloading.
 - Batch + fallback download strategy with progress output and centralized threshold-based logging (log LEVEL "message" [debug_threshold]).
 - Shared repository metadata cache with age invalidation (`CACHE_MAX_AGE`).
-- Cleanup of uninstalled packages (hash‑based fast lookup) excluding manual repos.
+- Two-stage cleanup with hash-based lookups: remove uninstalled names/architectures before downloads, then prune superseded versions after verifying replacements; excludes manual repos and protects module artifacts.
 - Metadata generation via `createrepo_c` with optional parallel workers.
 - Modular metadata handling: preserves `modules.yaml` / `modules.yml` before repodata refresh, restores them afterwards, and can filter the repo to a selected DNF module stream via `MODULE_STREAMS` or automatic stream inference from the contained RPM set. Preservation and removal use the configured elevation path, so root-owned module files do not cause silent metadata-update failures when the script runs as a normal user. `build_repo_cache()` also harvests the freshly-synced upstream `modules.yaml` from DNF's own repo cache while it queries each repo, so `update_repository_metadata()` can refresh modular repodata with the same upstream sync instead of only ever carrying forward a stale preserved copy (v2.4.24).
 - Auto privilege detection (`ELEVATE_COMMANDS`=auto) – uses sudo only when needed.
@@ -133,9 +133,10 @@ You may also supply `MANUAL_REPOS` as a comma list via CLI (`--manual-repos ol9_
 | Repos | EXCLUDE_REPOS --exclude-repos | list | (empty) | cfg/CLI | Skip listed repos |
 | Filters | NAME_FILTER --name-filter | regex | (none) | cfg/CLI | Limit packages by name |
 | Filters | REPOS --repos | list | (all enabled) | env/CLI | Only process listed repos |
+| Filters | REPO_OS_MAJOR --os-major | 9 or 10 | (unset) | cfg/env/CLI | Select only matching `olN_*` repositories, isolate caches and reject cross-major publication paths |
 | Limits | MAX_PACKAGES --max-packages | int | 0 | cfg/CLI | Cap total processed (0=∞) |
 | Limits | MAX_CHANGED_PACKAGES --max-changed-packages | int | -1 | cfg/CLI | Cap downloads (new+update) |
-| Behavior | CLEANUP_UNINSTALLED --cleanup-uninstalled | bool | 1 | cfg/CLI | Remove RPMs no longer installed |
+| Behavior | CLEANUP_UNINSTALLED --cleanup-uninstalled | bool | 1 | cfg/CLI | Remove uninstalled packages and safely prune superseded versions |
 | Behavior | SYNC_MODE --sync-mode | enum | local | cfg/CLI/env | Sync strategy: local copy or built-in remote rsync |
 | Behavior | REMOTE_SYNC_HOST --remote-sync-host | string | (empty) | cfg/CLI/env | Remote host in remote sync mode |
 | Behavior | REMOTE_SYNC_USER --remote-sync-user | string | (empty) | cfg/CLI/env | Remote SSH user in remote sync mode |
@@ -196,6 +197,7 @@ Test hooks are for development only—do not enable them in production automatio
 --name-filter REGEX              Process only matching package names
 --parallel INT                   Worker hint for compression / future parallelism
 --repos list                     Only these repositories
+--os-major 9|10                  Enforce Oracle Linux major-version boundaries
 --refresh-metadata               Force rebuild of cache timestamp + dnf metadata clean
 --set-permissions                (basic permission normalization)
 --shared-repo-path PATH          Target sync destination
@@ -464,9 +466,88 @@ Each cache entry stores `NEVRA|last_checked_epoch`. Entries younger than `MODULE
 Expired entries are retried automatically, so an upstream re-publish or metadata correction self-heals. Transient
 download failures are not cached; only confirmed unavailable artifacts enter this cache.
 
+### Upgrade-Safe Cleanup (v2.4.29)
+
+Cleanup previously matched the full installed NEVRA before package classification. Following a host
+upgrade, it deleted the older mirrored RPM first, making the replacement appear as `NEW` instead of
+`UPDATE` and leaving no previous copy if downloading failed.
+
+With `CLEANUP_UNINSTALLED=1` (the default), cleanup now runs in two stages:
+
+- **Before downloads:** remove RPMs only when their name + architecture are no longer installed.
+  Retain different versions and epochs of installed packages so classification can still report `UPDATE`.
+- **After downloads/local copies, before metadata generation:** prune non-installed versions only
+  when an exact installed NEVRA exists in the same repository and passes `rpm -K --nosignature`.
+  RPM header metadata, not filenames, identifies replacements, including noncanonical filenames.
+  Digest checks run only for installed RPMs with superseded copies that need pruning.
+
+Failed downloads, corrupt replacements, and missing replacements skipped by filters or package limits
+leave the previous RPMs intact. All exact installed versions (including install-only kernels) and
+module-artifact NEVRAs remain protected. Manual repositories and repository filters retain their existing
+cleanup exclusions. Dry runs do not remove anything or assume a planned download succeeded.
+`--no-cleanup-uninstalled` disables both stages. `--full-rebuild` remains an explicit destructive rebuild.
+Failed or malformed installed-package queries abort cleanup rather than risk deleting needed RPMs.
+
+This requires a second metadata scan of eligible repositories; only the post-download scan can safely
+decide which replacements are actually present. Removal marks the repository changed so metadata is
+regenerated before synchronization.
+
+Isolated regression coverage (mocked DNF/RPM, no network or real repository changes):
+
+```bash
+bash tests/test_upgrade_cleanup.sh
+```
+
+### OS-Major Boundary Protection (v2.4.30)
+
+Use `--os-major 9` or `--os-major 10` when OL9 and OL10 repositories coexist.
+The equivalent configuration/environment variable is `REPO_OS_MAJOR`. This is an
+opt-in safety boundary: omitting it preserves the legacy all-repository behavior.
+
+- Only exact `ol9_*` or `ol10_*` repository prefixes for the selected major are
+   eligible. Unversioned repositories such as `pgdg16`, `code` and Kubernetes
+   repositories are excluded; `--repos` cannot override this boundary.
+- The common filter applies to cleanup, package selection, metadata updates,
+   full rebuild and both local and remote synchronization. Both sync modes also
+   honor `--exclude-repos`, including remote mapping entries.
+- Normal processing requires the running Oracle Linux major to match the selected
+   major, since package selection and pruning use installed RPMs. `--sync-only`
+   may publish preserved repositories from another major; it does not maintain
+   their package selection or fetch future updates.
+- Shared caches are namespaced beneath `SHARED_CACHE_PATH/ol9` or `/ol10`.
+- Paths containing an explicit conflicting `OL9`/`OL10` component (also names
+   such as `ol9_repos`), or parent traversal, are rejected. Publication destinations
+   must identify the selected major. All selected remote mappings are checked
+   before the first transfer; mapping destinations may not cross the boundary.
+
+For example, the existing OL9 remote mapping/target can be used with `--os-major 9`.
+Before any OL10 publication, configure its own target root and mapping file; the
+existing `D:/repo/OracleLinux/OL9` target is deliberately rejected for OL10. A local
+OL10 preparation run can use `--no-sync` while publication is being configured.
+
+```bash
+./myrepo.sh --os-major 9 --no-sync
+./myrepo.sh --os-major 10 --no-sync
+./myrepo.sh --os-major 9 --sync-only
+```
+
+These are alternative workflows, not a sequence to run on one unchanged host.
+Third-party repositories need separate explicitly reviewed handling. The boundary
+does not certify package OS compatibility, inspect every RPM's release tag, resolve
+filesystem symlink aliases, or create an independent OL9 update source. Keep
+separate major-version publication mappings and do not point them at the same
+physical destination. No live configuration is automatically changed by this release.
+
+Isolated regression coverage (temporary repositories, mocked DNF/RPM/rsync):
+
+```bash
+bash tests/test_os_major_boundary.sh
+bash tests/test_upgrade_cleanup.sh
+```
+
 ## Limitations (Known, Accepted)
 
-- No signature verification of RPMs (assumes trusted environment).
+- No signature verification of RPMs (assumes trusted environment); replacement RPM digest integrity is checked before pruning superseded copies.
 - Metadata change detection for manual repos is timestamp-based (not content hashing).
 - Parallel DNF download concurrency limited by DNF itself; `--parallel` mainly influences metadata compression workers.
 - No built-in lock for multi-host concurrent writes to the same shared path.
@@ -501,6 +582,7 @@ Implemented improvements (chronological highlights):
 20. Fixed a `createrepo_c --update` failure ("Cannot open file ...-modules.yaml.zst") that could mark an otherwise-healthy repo as `Failed`: createrepo_c reads the *previous* repomd.xml and auto-copies forward any custom metadata record (like `modules`), so pre-emptively deleting the live module file before running createrepo_c made that copy-forward fail. The file is no longer deleted beforehand; the correct filtered content is still unconditionally re-injected afterward (v2.4.27).
 21. `update_repository_metadata()` now captures and logs `createrepo_c`'s actual stderr on failure instead of discarding it, so future failures are diagnosable without re-running by hand (v2.4.27).
 22. Confirmed-unavailable module artifact RPMs now use a per-repo negative cache with configurable TTL, so retired upstream module artifacts are retried periodically but not warned/retried every run (v2.4.28).
+23. Cleanup now retains upgrade candidates until a verified replacement is available, preserving UPDATE classification and previous RPMs after failed or skipped downloads; module artifacts remain protected (v2.4.29).
 
 Final decisions:
 
@@ -645,7 +727,7 @@ The `myrepo.cfg` file provides a convenient way to configure `myrepo.sh` without
 # Shared cache directory path (default: /var/cache/myrepo)
 # SHARED_CACHE_PATH="/var/cache/myrepo"
 
-# Enable cleanup of uninstalled packages (1 = enabled, 0 = disabled)
+# Enable uninstalled-package cleanup and verified superseded-version pruning (1 = enabled, 0 = disabled)
 # CLEANUP_UNINSTALLED=1
 
 # Enable parallel compression for createrepo (1 = enabled, 0 = disabled)
@@ -850,33 +932,33 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 ##  CLI Options
 
-| Option                      | Values   | Default                         | Description                                                         |
-| --------------------------- | -------- | ------------------------------- | ------------------------------------------------------------------- |
-| `--cache-max-age`           | *INT*    | `14400`                         | Cache validity in seconds (14400 = 4 hours).                        |
-| `--shared-cache-path`       | *PATH*   | `/var/cache/myrepo`             | Shared cache directory path.                                        |
-| `--cleanup-uninstalled`     | *(flag)* | *on*                            | Enable cleanup of uninstalled packages.                             |
-| `--no-cleanup-uninstalled`  | *(flag)* | *off*                           | Disable cleanup of uninstalled packages.                            |
-| `--parallel-compression`    | *(flag)* | *on*                            | Enable parallel compression for createrepo.                         |
-| `--no-parallel-compression` | *(flag)* | *off*                           | Disable parallel compression for createrepo.                        |
-| `--debug`                   | *0‒3*    | `1`                             | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose).     |
-| `--dry-run`                 | *(flag)* | *off*                           | Perform a dry run without making changes.                           |
-| `--exclude-repos`           | *CSV*    | *empty*                         | Comma-separated list of repos to exclude.                           |
-| `--full-rebuild`            | *(flag)* | *off*                           | Perform a full rebuild of the repository.                           |
-| `--local-repo-path`         | *PATH*   | `/repo`                         | Set local repository path.                                          |
-| `--manual-repos`            | *CSV*    | `ol9_edge`                      | Comma‑separated list of manual repositories.                        |
-| `--max-packages`            | *INT*    | `0`                             | Limit total number of packages processed (0 = no limit).            |
-| `--max-new-packages`        | *INT*    | `-1`                            | Limit number of new packages to download (-1 = no limit, 0 = none). |
-| `--name-filter`             | *REGEX*  | *empty*                         | Filter packages by name using regex pattern.                        |
-| `--parallel`                | *INT*    | `6`                             | Maximum concurrent download or processing jobs.                     |
-| `--repos`                   | *CSV*    | *all enabled*                   | Comma-separated list of repositories to process.                    |
-| `--shared-repo-path`        | *PATH*   | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                                         |
-| `--sync-only`               | *(flag)* | *off*                           | Skip download/cleanup; only run sync to shared repos.               |
-| `--no-sync`                 | *(flag)* | *off*                           | Skip synchronization to shared location entirely.                   |
-| `--no-metadata-update`      | *(flag)* | *off*                           | Skip repository metadata updates (createrepo_c).                    |
-| `--refresh-metadata`        | *(flag)* | *off*                           | Force refresh of DNF metadata cache and rebuild repo cache.         |
-| `--dnf-serial`              | *(flag)* | *off*                           | Use serial DNF mode to prevent database lock contention.            |
-| `-v, --verbose`             | *(flag)* | *off*                           | Set debug level to 2 (normal verbosity).                            |
-| `-h, --help`                | *(flag)* | *off*                           | Show help message and exit.                                         |
+| Option                      | Values   | Default                         | Description                                                                 |
+| --------------------------- | -------- | ------------------------------- | --------------------------------------------------------------------------- |
+| `--cache-max-age`            | *INT*    | `14400`                         | Cache validity in seconds (14400 = 4 hours).                                 |
+| `--shared-cache-path`        | *PATH*   | `/var/cache/myrepo`             | Shared cache directory path.                                                |
+| `--cleanup-uninstalled`      | *(flag)* | *on*                            | Enable uninstalled-package cleanup and verified superseded-version pruning. |
+| `--no-cleanup-uninstalled`   | *(flag)* | *off*                           | Disable both package cleanup stages.                                        |
+| `--parallel-compression`     | *(flag)* | *on*                            | Enable parallel compression for createrepo.                                  |
+| `--no-parallel-compression`  | *(flag)* | *off*                           | Disable parallel compression for createrepo.                                 |
+| `--debug`                   | *0‒3*    | `1`                             | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose).                |
+| `--dry-run`                 | *(flag)* | *off*                           | Perform a dry run without making changes.                                   |
+| `--exclude-repos`           | *CSV*    | *empty*                         | Comma-separated list of repos to exclude.                                   |
+| `--full-rebuild`           | *(flag)* | *off*                           | Perform a full rebuild of the repository.                                   |
+| `--local-repo-path`        | *PATH*   | `/repo`                         | Set local repository path.                                                  |
+| `--manual-repos`           | *CSV*    | `ol9_edge`                      | Comma‑separated list of manual repositories.                                 |
+| `--max-packages`           | *INT*    | `0`                             | Limit total number of packages processed (0 = no limit).                     |
+| `--max-new-packages`       | *INT*    | `-1`                            | Limit number of new packages to download (-1 = no limit, 0 = none).          |
+| `--name-filter`            | *REGEX*  | *empty*                         | Filter packages by name using regex pattern.                                |
+| `--parallel`               | *INT*    | `6`                             | Maximum concurrent download or processing jobs.                             |
+| `--repos`                  | *CSV*    | *all enabled*                   | Comma-separated list of repositories to process.                            |
+| `--shared-repo-path`       | *PATH*   | `/mnt/hgfs/ForVMware/ol9_repos`   | Set shared repository path.                                                 |
+| `--sync-only`              | *(flag)* | *off*                           | Skip download/cleanup; only run sync to shared repos.                        |
+| `--no-sync`                | *(flag)* | *off*                           | Skip synchronization to shared location entirely.                           |
+| `--no-metadata-update`     | *(flag)* | *off*                           | Skip repository metadata updates (createrepo_c).                             |
+| `--refresh-metadata`       | *(flag)* | *off*                           | Force refresh of DNF metadata cache and rebuild repo cache.                  |
+| `--dnf-serial`             | *(flag)* | *off*                           | Use serial DNF mode to prevent database lock contention.                     |
+| `-v, --verbose`            | *(flag)* | *off*                           | Set debug level to 2 (normal verbosity).                                     |
+| `-h, --help`               | *(flag)* | *off*                           | Show help message and exit.                                                 |
 
 ### CLI Usage Examples
 
@@ -949,7 +1031,7 @@ The script implements a sophisticated workflow that efficiently manages local pa
 
 3. **Processing Packages**: Processes packages in optimized batches using adaptive performance tuning. Local packages are handled differently from remote packages to account for manual deployment scenarios.
 
-4. **Cleaning Up**: Removes uninstalled packages and outdated versions from local repositories to maintain a clean, current state.
+4. **Cleaning Up**: Removes uninstalled names/architectures before downloads; prunes superseded versions only after an exact installed replacement passes integrity checks in the same repository. Required module artifacts remain protected.
 
 5. **Dual-Tier Metadata Updates**:
    - **Regular Repositories**: Updates metadata only when packages are processed during the current run
