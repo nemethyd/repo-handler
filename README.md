@@ -972,31 +972,31 @@ You can customize and run the `myrepo.sh` script to handle your local repository
 
 | Option                      | Values   | Default                         | Description                                                                 |
 | --------------------------- | -------- | ------------------------------- | --------------------------------------------------------------------------- |
-| `--cache-max-age`            | *INT*    | `14400`                         | Cache validity in seconds (14400 = 4 hours).                                 |
-| `--shared-cache-path`        | *PATH*   | `/var/cache/myrepo`             | Shared cache directory path.                                                |
-| `--cleanup-uninstalled`      | *(flag)* | *on*                            | Enable uninstalled-package cleanup and verified superseded-version pruning. |
-| `--no-cleanup-uninstalled`   | *(flag)* | *off*                           | Disable both package cleanup stages.                                        |
-| `--parallel-compression`     | *(flag)* | *on*                            | Enable parallel compression for createrepo.                                  |
-| `--no-parallel-compression`  | *(flag)* | *off*                           | Disable parallel compression for createrepo.                                 |
-| `--debug`                   | *0‒3*    | `1`                             | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose).                |
+| `--cache-max-age`           | *INT*    | `14400`                         | Cache validity in seconds (14400 = 4 hours).                                |
+| `--shared-cache-path`       | *PATH*   | `/var/cache/myrepo`             | Shared cache directory path.                                                |
+| `--cleanup-uninstalled`     | *(flag)* | *on*                            | Enable uninstalled-package cleanup and verified superseded-version pruning. |
+| `--no-cleanup-uninstalled`  | *(flag)* | *off*                           | Disable both package cleanup stages.                                        |
+| `--parallel-compression`    | *(flag)* | *on*                            | Enable parallel compression for createrepo.                                 |
+| `--no-parallel-compression` | *(flag)* | *off*                           | Disable parallel compression for createrepo.                                |
+| `--debug`                   | *0‒3*    | `1`                             | Verbosity level (0=critical, 1=important, 2=normal, 3=verbose).             |
 | `--dry-run`                 | *(flag)* | *off*                           | Perform a dry run without making changes.                                   |
 | `--exclude-repos`           | *CSV*    | *empty*                         | Comma-separated list of repos to exclude.                                   |
-| `--full-rebuild`           | *(flag)* | *off*                           | Perform a full rebuild of the repository.                                   |
-| `--local-repo-path`        | *PATH*   | `/repo`                         | Set local repository path.                                                  |
-| `--manual-repos`           | *CSV*    | `ol9_edge`                      | Comma‑separated list of manual repositories.                                 |
-| `--max-packages`           | *INT*    | `0`                             | Limit total number of packages processed (0 = no limit).                     |
-| `--max-new-packages`       | *INT*    | `-1`                            | Limit number of new packages to download (-1 = no limit, 0 = none).          |
-| `--name-filter`            | *REGEX*  | *empty*                         | Filter packages by name using regex pattern.                                |
-| `--parallel`               | *INT*    | `6`                             | Maximum concurrent download or processing jobs.                             |
-| `--repos`                  | *CSV*    | *all enabled*                   | Comma-separated list of repositories to process.                            |
-| `--shared-repo-path`       | *PATH*   | `/mnt/hgfs/ForVMware/ol9_repos`   | Set shared repository path.                                                 |
-| `--sync-only`              | *(flag)* | *off*                           | Skip download/cleanup; only run sync to shared repos.                        |
-| `--no-sync`                | *(flag)* | *off*                           | Skip synchronization to shared location entirely.                           |
-| `--no-metadata-update`     | *(flag)* | *off*                           | Skip repository metadata updates (createrepo_c).                             |
-| `--refresh-metadata`       | *(flag)* | *off*                           | Force refresh of DNF metadata cache and rebuild repo cache.                  |
-| `--dnf-serial`             | *(flag)* | *off*                           | Use serial DNF mode to prevent database lock contention.                     |
-| `-v, --verbose`            | *(flag)* | *off*                           | Set debug level to 2 (normal verbosity).                                     |
-| `-h, --help`               | *(flag)* | *off*                           | Show help message and exit.                                                 |
+| `--full-rebuild`            | *(flag)* | *off*                           | Perform a full rebuild of the repository.                                   |
+| `--local-repo-path`         | *PATH*   | `/repo`                         | Set local repository path.                                                  |
+| `--manual-repos`            | *CSV*    | `ol9_edge`                      | Comma‑separated list of manual repositories.                                |
+| `--max-packages`            | *INT*    | `0`                             | Limit total number of packages processed (0 = no limit).                    |
+| `--max-new-packages`        | *INT*    | `-1`                            | Limit number of new packages to download (-1 = no limit, 0 = none).         |
+| `--name-filter`             | *REGEX*  | *empty*                         | Filter packages by name using regex pattern.                                |
+| `--parallel`                | *INT*    | `6`                             | Maximum concurrent download or processing jobs.                             |
+| `--repos`                   | *CSV*    | *all enabled*                   | Comma-separated list of repositories to process.                            |
+| `--shared-repo-path`        | *PATH*   | `/mnt/hgfs/ForVMware/ol9_repos` | Set shared repository path.                                                 |
+| `--sync-only`               | *(flag)* | *off*                           | Skip download/cleanup; only run sync to shared repos.                       |
+| `--no-sync`                 | *(flag)* | *off*                           | Skip synchronization to shared location entirely.                           |
+| `--no-metadata-update`      | *(flag)* | *off*                           | Skip repository metadata updates (createrepo_c).                            |
+| `--refresh-metadata`        | *(flag)* | *off*                           | Force refresh of DNF metadata cache and rebuild repo cache.                 |
+| `--dnf-serial`              | *(flag)* | *off*                           | Use serial DNF mode to prevent database lock contention.                    |
+| `-v, --verbose`             | *(flag)* | *off*                           | Set debug level to 2 (normal verbosity).                                    |
+| `-h, --help`                | *(flag)* | *off*                           | Show help message and exit.                                                 |
 
 ### CLI Usage Examples
 

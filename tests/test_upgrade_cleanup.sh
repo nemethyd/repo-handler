@@ -121,7 +121,8 @@ test_upgrade() (
     download_packages
     assert_present "$OLD_RPM"
     assert_present "$NEW_RPM"
-    # shellcheck disable=SC2317
+    # Invoked indirectly by finalize_and_report() from the sourced script.
+    # shellcheck disable=SC2317,SC2329
     update_all_repository_metadata() {
         assert_absent "$OLD_RPM"
         assert_present "$NEW_RPM"
