@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.32)
+# Repo Handler Script (v2.4.33)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -578,6 +578,23 @@ Released 2026-11-01.
 - Regression coverage includes `commandline`, `@commandline`, `@@commandline`
    and `@System`. This does not change cache-expiration policy or certify a
    subsequent mirror build/publication.
+
+```bash
+bash tests/test_system_repo_filter.sh
+```
+
+### Manual Repository Package Origin (v2.4.33)
+
+Released 2026-11-01.
+
+- An exact `name-version-release.arch.rpm` file in a configured and selected
+   manual repository now determines the package origin before the vendor
+   heuristic. Manual repositories have no upstream, so their packages must never
+   be routed to a downloadable repository: libarrow-9.0.0-14.el9 exists only in
+   `ol9_edge` while upstream EPEL carries a different release, and the vendor
+   fallback alone misrouted it to `ol9_appstream`.
+- Non-sync regression tests set `NO_SYNC=1` so the OS-major boundary guard is
+   not tripped by the live configuration's remote sync target.
 
 ```bash
 bash tests/test_system_repo_filter.sh

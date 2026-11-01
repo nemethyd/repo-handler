@@ -35,7 +35,8 @@ command -v dnf >/dev/null || fail "dnf not found"
 [[ -x "$MYREPO_SH" ]] || fail "myrepo.sh not executable"
 
 info "Running myrepo.sh dry-run with NAME_FILTER=$NAME_FILTER to trigger selective metadata update"
-ENABLE_TEST_SELECTIVE=1 DEBUG_LEVEL=2 DRY_RUN=1 CLEANUP_UNINSTALLED=0 NO_METADATA_UPDATE=0 NAME_FILTER="$NAME_FILTER" "$MYREPO_SH" 2>"$LOG_FILE" >/dev/null || fail "myrepo.sh run failed"
+# NO_SYNC=1: skip sync-path boundary validation against the live cfg (not under test here)
+ENABLE_TEST_SELECTIVE=1 DEBUG_LEVEL=2 DRY_RUN=1 NO_SYNC=1 CLEANUP_UNINSTALLED=0 NO_METADATA_UPDATE=0 NAME_FILTER="$NAME_FILTER" "$MYREPO_SH" 2>"$LOG_FILE" >/dev/null || fail "myrepo.sh run failed"
 
 # Extract selective metadata header and validate
 HEADER_LINE=$(grep -E "Updating repository metadata for .*changed repositories only" "$LOG_FILE" | head -1 || true)

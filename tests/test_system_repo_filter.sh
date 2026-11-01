@@ -73,4 +73,23 @@ for TEST_INSTALLED_ORIGIN in commandline @commandline @@commandline @System; do
     fi
 done
 
+# Regression: an exact NEVRA file in a selected manual repository must win over
+# the Oracle-vendor fallback (libarrow-9.0.0-14.el9 exists only in ol9_edge;
+# upstream EPEL carries a different release, so appstream attribution fails).
+mkdir -p "$LOCAL_REPO_PATH/ol9_edge/getPackage"
+: >"$LOCAL_REPO_PATH/ol9_edge/getPackage/libarrow-9.0.0-14.el9.x86_64.rpm"
+MANUAL_REPOS=("ol9_edge")
+REPOSITORIES=("ol9_appstream" "ol9_edge")
+result="$(determine_repo_source libarrow 0 9.0.0 14.el9 x86_64)"
+if [[ "$result" != ol9_edge ]]; then
+    printf 'FAIL: manual-repo file must win over vendor fallback; expected ol9_edge, got %s\n' "$result" >&2
+    exit 1
+fi
+# Packages without a manual-repo file still resolve via the vendor fallback
+result="$(determine_repo_source leapp 0 0.20.0 1.0.2.el9 noarch)"
+if [[ "$result" != ol9_appstream ]]; then
+    printf 'FAIL: leapp without manual file must keep vendor fallback; expected ol9_appstream, got %s\n' "$result" >&2
+    exit 1
+fi
+
 printf 'PASS: @System package retained through selected repository filter\n'

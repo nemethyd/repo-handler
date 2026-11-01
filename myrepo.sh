@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.32"
+VERSION="2.4.33"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -2039,6 +2039,23 @@ function determine_repo_from_installed() {
         echo "$clean_repo"
         return 0
     fi
+    
+    # Method 1.5: an exact package file in a configured manual repository is
+    # stronger evidence than the vendor heuristic below (manual repos have no
+    # upstream, so their packages must never be routed to a downloadable repo)
+    local manual_repo manual_repo_path manual_file
+    for manual_repo in "${MANUAL_REPOS[@]}"; do
+        [[ -z "$manual_repo" ]] && continue
+        [[ " ${REPOSITORIES[*]} " == *" $manual_repo "* ]] || continue
+        manual_repo_path=$(get_repo_path "$manual_repo") || continue
+        [[ -d "$manual_repo_path" ]] || continue
+        manual_file=$(find "$manual_repo_path" -maxdepth 1 -name "${package_name}-${package_version}-${package_release}.${package_arch}.rpm" -type f 2>/dev/null | head -1)
+        if [[ -n "$manual_file" ]]; then
+            log "D" "Found exact package file in manual repository: $manual_repo" 2
+            echo "$manual_repo"
+            return 0
+        fi
+    done
     
     # Method 2: Try rpm query for vendor/packager info
     local rpm_info

@@ -44,7 +44,7 @@ diff_state(){
 scenario_baseline(){
   info "Baseline collection"
   sudo dnf -y install "$PKG_NAME" >/dev/null 2>&1 || true
-  FORCE_REDOWNLOAD=0 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "baseline run failed"
+  FORCE_REDOWNLOAD=0 NO_SYNC=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "baseline run failed"
   snapshot_state baseline
 }
 
@@ -72,7 +72,7 @@ scenario_safe_update(){
   else
     info "No existing RPM found to delete for NEW simulation"
   fi
-  FORCE_REDOWNLOAD=0 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "safe update run failed"
+  FORCE_REDOWNLOAD=0 NO_SYNC=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "safe update run failed"
   snapshot_state safe
 }
 
@@ -91,7 +91,7 @@ scenario_forced_update(){
   else
     info "No existing RPM found to delete before forced run"
   fi
-  FORCE_REDOWNLOAD=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "forced update run failed"
+  FORCE_REDOWNLOAD=1 NO_SYNC=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 || fail "forced update run failed"
   snapshot_state forced
 }
 
@@ -106,13 +106,13 @@ scenario_failed_download(){
   fi
   # Run with safe mode first
   set +e
-  FORCE_REDOWNLOAD=0 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 >/dev/null 2>"$TEMP_STATE/failed_safe.err"
+  FORCE_REDOWNLOAD=0 NO_SYNC=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 >/dev/null 2>"$TEMP_STATE/failed_safe.err"
   local rc_safe=$?
   set -e
   snapshot_state failed_safe
   # Run with forced mode
   set +e
-  FORCE_REDOWNLOAD=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 >/dev/null 2>"$TEMP_STATE/failed_forced.err"
+  FORCE_REDOWNLOAD=1 NO_SYNC=1 "$MYREPO_SH" --name-filter "$NAME_FILTER" --debug 1 >/dev/null 2>"$TEMP_STATE/failed_forced.err"
   local rc_forced=$?
   set -e
   snapshot_state failed_forced
