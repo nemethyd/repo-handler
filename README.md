@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.30)
+# Repo Handler Script (v2.4.32)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -543,6 +543,44 @@ Isolated regression coverage (temporary repositories, mocked DNF/RPM/rsync):
 ```bash
 bash tests/test_os_major_boundary.sh
 bash tests/test_upgrade_cleanup.sh
+```
+
+### Portable Source Queries and Fail-Fast Publication (v2.4.31)
+
+Released 2026-10-31.
+
+- Installed-package queries now use the supported `repoid` field on both OL9
+   and OL10. Installed `@System` markers enter the existing source resolver,
+   avoiding literal unsupported `ui_from_repo` values or empty `from_repo` history.
+- Recorded package-download failures and repository metadata-update failures
+   return nonzero, preventing synchronization after an unsuccessful real build.
+- Remote dry runs no longer create destination directories. Destination-creation
+   failures and unsuccessful rsync transfers, including statuses 23 and 24, return
+   nonzero after any configured retries so ordered command chains stop on failure.
+
+Focused regression checks use isolated fixtures and mocked external commands:
+
+```bash
+bash tests/test_system_repo_filter.sh
+bash tests/test_build_failure_status.sh
+bash tests/test_os_major_boundary.sh
+```
+
+### Locally Installed Package Origins (v2.4.32)
+
+Released 2026-11-01.
+
+- Normalize leading `@` markers in installed-package origin values before
+   repository selection. DNF can report locally installed RPMs as `@@commandline`.
+- Treat `System`, `commandline` and `Invalid` as origin markers, not real
+   repositories, so cache misses continue through the existing source fallback
+   instead of silently excluding packages from a repository allowlist.
+- Regression coverage includes `commandline`, `@commandline`, `@@commandline`
+   and `@System`. This does not change cache-expiration policy or certify a
+   subsequent mirror build/publication.
+
+```bash
+bash tests/test_system_repo_filter.sh
 ```
 
 ## Limitations (Known, Accepted)

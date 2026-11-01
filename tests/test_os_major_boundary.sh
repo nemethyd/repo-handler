@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
+# Test globals are consumed by functions sourced from myrepo.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,12 +9,13 @@ TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 export MYREPO_SOURCE_ONLY=1 ELEVATE_COMMANDS=0 DEBUG_LEVEL=0 REPO_OS_MAJOR=''
+# shellcheck source=/dev/null
 source "$REPO_ROOT/myrepo.sh"
 
 log() { printf '%s\n' "$*"; }
 get_host_os_major() { printf '%s\n' "$MOCK_HOST_MAJOR"; }
-remote_sync_ensure_remote_dir() { printf '%s\n' "$1" >> "$TEMP_DIR/remote-dirs"; }
-rsync() { printf '%s\n' "$*" >> "$TEMP_DIR/transfers"; }
+remote_sync_ensure_remote_dir() { printf '%s\n' "$1" >> "$TEMP_DIR/remote-dirs"; return "${MOCK_REMOTE_STATUS:-0}"; }
+rsync() { printf '%s\n' "$*" >> "$TEMP_DIR/transfers"; return "${MOCK_RSYNC_STATUS:-0}"; }
 is_repo_enabled() { return 0; }
 print_phase_banner() { :; }
 
@@ -86,6 +89,27 @@ if ! sync_to_remote_target; then exit 1; fi
 [[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 2 ]]
 if grep -Eq 'ol9_|addons|pgdg16' "$TEMP_DIR/transfers"; then exit 1; fi
 printf 'PASS: unmapped remote sync honors major boundary and exclusions\n'
+
+REMOTE_SYNC_MAX_RETRIES=0
+for REMOTE_SYNC_MAPPING_FILE in "$TEMP_DIR/mapping.ps1" ''; do
+    rm -f "$TEMP_DIR/transfers" "$TEMP_DIR/remote-dirs"
+    DRY_RUN=1
+    if ! sync_to_remote_target; then exit 1; fi
+    [[ ! -e "$TEMP_DIR/remote-dirs" ]]
+    grep -q -- '--dry-run' "$TEMP_DIR/transfers"
+    DRY_RUN=0
+    for MOCK_RSYNC_STATUS in 23 24; do
+        if sync_to_remote_target; then exit 1; fi
+    done
+    MOCK_RSYNC_STATUS=0
+    MOCK_REMOTE_STATUS=1
+    rm -f "$TEMP_DIR/transfers" "$TEMP_DIR/remote-dirs"
+    if sync_to_remote_target; then exit 1; fi
+    [[ ! -e "$TEMP_DIR/transfers" ]]
+    MOCK_REMOTE_STATUS=0
+done
+if ! sync_to_remote_target; then exit 1; fi
+printf 'PASS: mapped and unmapped previews create no directories; destination and partial-transfer failures stop publication\n'
 
 SYNC_MODE=local
 rm "$TEMP_DIR/transfers"

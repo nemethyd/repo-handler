@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
-# Last Updated: 2026-10-24
+# Last Updated: 2026-11-01
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.30"
+VERSION="2.4.32"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -900,7 +900,7 @@ function build_repo_cache() {
     log "D" "Using DNF command: ${DNF_CMD[*]}" $DEBUG_LVL_DETAIL
     
     # DNF repoquery (word splitting intentional)
-    if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>&1); then
+    if ! installed_packages=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}" 2>&1); then
         log "E" "Failed to get installed packages list"
     log "E" "DNF error: $installed_packages" 1
         log "E" "Failed to build repository metadata cache"
@@ -2029,9 +2029,12 @@ function determine_repo_from_installed() {
     get_dnf_cmd
     repo_info=$("${DNF_CMD[@]}" list installed "$package_name" 2>/dev/null | grep -E "^${package_name}" | awk '{print $3}' | head -1)
     
-    if [[ -n "$repo_info" && "$repo_info" != "@System" ]]; then
-        # Clean up repo name (remove @ prefix)
-        local clean_repo="${repo_info#@}"
+    local clean_repo="$repo_info"
+    while [[ "$clean_repo" == @* ]]; do
+        clean_repo="${clean_repo#@}"
+    done
+    if [[ -n "$clean_repo" && "$clean_repo" != "System" &&
+          "$clean_repo" != "commandline" && "$clean_repo" != "Invalid" ]]; then
     log "D" "Found installed repo via DNF: $clean_repo" 2
         echo "$clean_repo"
         return 0
@@ -2483,6 +2486,12 @@ function finalize_and_report() {
     echo -e "\e[36m═══════════════════════════════════════════════════════════════\e[0m"
     [[ $DRY_RUN -eq 1 ]] && echo -e "\e[35m🔍 DRY RUN mode - no actual downloads performed\e[0m"
     generate_summary_table
+    local failed_download_keys="${!failed_downloads[*]}"
+    if [[ $DRY_RUN -ne 1 && -n "$failed_download_keys" ]]; then
+        report_failed_downloads
+        log "E" "Repository build has failed downloads; synchronization must not proceed"
+        return 1
+    fi
     if [[ $CLEANUP_UNINSTALLED -eq 1 ]]; then
         cleanup_uninstalled_packages obsolete || return 1
     fi
@@ -2490,7 +2499,7 @@ function finalize_and_report() {
         log "I" "⏭️  Repository metadata updates skipped (--no-metadata-update specified)"
     else
         # Single consolidated metadata update handles both regular and manual repositories
-        update_all_repository_metadata
+        update_all_repository_metadata || return 1
     fi
     if [[ ${BENCHMARK_LOOKUP:-0} -eq 1 ]]; then
         benchmark_repo_lookup 3000
@@ -2578,7 +2587,7 @@ function gather_installed_packages() {
     log "D" "Running DNF query with name filter..." 3
     # Intentional word splitting for dnf command
     get_dnf_cmd
-    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null | while IFS='|' read -r name rest; do
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}" 2>/dev/null | while IFS='|' read -r name rest; do
             if [[ "$name" =~ $NAME_FILTER ]]; then
                 echo "$name|$rest"
             fi
@@ -2589,7 +2598,7 @@ function gather_installed_packages() {
     log "D" "Running DNF query without name filter..." 3
     # intentional word splitting
     get_dnf_cmd
-    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{ui_from_repo}" 2>/dev/null)
+    repoquery_result=$(timeout "$DNF_QUERY_TIMEOUT" "${DNF_CMD[@]}" repoquery --installed --qf "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}" 2>/dev/null)
         dnf_exit_code=$?
     log "D" "DNF query without filter completed with exit code: $dnf_exit_code" 3
     fi
@@ -3719,6 +3728,7 @@ function should_process_package() {
 # Check if repository should be processed based on filters
 function get_host_os_major() {
     local ID="" VERSION_ID=""
+    # shellcheck source=/dev/null
     source /etc/os-release
     [[ "$ID" == ol && "$VERSION_ID" =~ ^(9|10)(\.|$) ]] || return 1
     printf '%s\n' "${VERSION_ID%%.*}"
@@ -4053,10 +4063,9 @@ function sync_to_remote_target() {
             local dest_rsync_path
             dest_rsync_path=$(remote_sync_convert_path "$dest_win_path" "$REMOTE_SYNC_TARGET_STYLE")
 
-            if ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
-                log "W" "Could not ensure remote destination exists: $dest_win_path"
-                ((warned_count++))
-                continue
+            if [[ $DRY_RUN -ne 1 ]] && ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
+                log "E" "Could not ensure remote destination exists: $dest_win_path"
+                return 1
             fi
 
             # Give feedback before the (potentially long) transfer starts; otherwise low debug
@@ -4100,13 +4109,7 @@ function sync_to_remote_target() {
                 fi
                 break
             done
-            if [[ $rsync_exit -eq 24 ]]; then
-                log "W" "Remote sync warning for $source_fragment: source files changed during transfer (exit 24)"
-                ((warned_count++))
-            elif [[ $rsync_exit -eq 23 ]]; then
-                log "W" "Remote sync warning for $source_fragment: partial transfer (exit 23)"
-                ((warned_count++))
-            elif [[ $rsync_exit -ne 0 ]]; then
+            if [[ $rsync_exit -ne 0 ]]; then
                 [[ -n "$rsync_output" ]] && printf '%s\n' "$rsync_output" >&2
                 log "E" "Remote sync failed for $source_fragment (exit $rsync_exit)"
                 return "$rsync_exit"
@@ -4145,10 +4148,9 @@ function sync_to_remote_target() {
             local dest_rsync_path
             dest_rsync_path=$(remote_sync_convert_path "$dest_win_path" "$REMOTE_SYNC_TARGET_STYLE")
 
-            if ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
-                log "W" "Could not ensure remote destination exists: $dest_win_path"
-                ((warned_count++))
-                continue
+            if [[ $DRY_RUN -ne 1 ]] && ! remote_sync_ensure_remote_dir "$dest_win_path" "$dest_rsync_path"; then
+                log "E" "Could not ensure remote destination exists: $dest_win_path"
+                return 1
             fi
 
             # Give feedback before the (potentially long) transfer starts; otherwise low debug
@@ -4192,13 +4194,7 @@ function sync_to_remote_target() {
                 fi
                 break
             done
-            if [[ $rsync_exit -eq 24 ]]; then
-                log "W" "Remote sync warning for $repo_name: source files changed during transfer (exit 24)"
-                ((warned_count++))
-            elif [[ $rsync_exit -eq 23 ]]; then
-                log "W" "Remote sync warning for $repo_name: partial transfer (exit 23)"
-                ((warned_count++))
-            elif [[ $rsync_exit -ne 0 ]]; then
+            if [[ $rsync_exit -ne 0 ]]; then
                 [[ -n "$rsync_output" ]] && printf '%s\n' "$rsync_output" >&2
                 log "E" "Remote sync failed for $repo_name (exit $rsync_exit)"
                 return "$rsync_exit"
@@ -4436,8 +4432,10 @@ function update_all_repository_metadata() {
         log "I" "✅ Metadata update: $updated_repos updated, $failed_repos failed, $skipped_manual_fresh manual fresh, $skipped_no_change unchanged (skipped)" 1
         if [[ $failed_repos -gt 0 ]]; then
             log "W" "Some repositories failed metadata update" 1
+            return 1
         fi
     fi
+    return 0
 }
 
 # Preserve any existing modular metadata files while repodata is regenerated.
