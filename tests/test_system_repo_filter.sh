@@ -56,6 +56,29 @@ for NAME_FILTER in '' '^system-pkg$'; do
     fi
 done
 
+repo_package_lookup=()
+available_repo_packages=()
+available_repo_packages["code"]="system-pkg|0|1.2|3.el9|x86_64"
+set +e
+build_repo_lookup_index
+set -e
+REPOS=code
+NAME_FILTER=''
+for REPO_OS_MAJOR in 9 10; do
+    set +e
+    result="$(gather_installed_packages)"
+    status=$?
+    set -e
+    [[ $status -eq 0 && "$result" == 'system-pkg|0|1.2|3.el9|x86_64|code' ]]
+    EXCLUDE_REPOS=code
+    set +e
+    result="$(gather_installed_packages)"
+    status=$?
+    set -e
+    [[ $status -eq 0 && -z "$result" ]]
+    EXCLUDE_REPOS=''
+done
+REPO_OS_MAJOR=''
 REPOS=''
 NAME_FILTER=''
 result="$(gather_installed_packages)"

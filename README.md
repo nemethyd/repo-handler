@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.33)
+# Repo Handler Script (v2.4.34)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -504,9 +504,13 @@ Use `--os-major 9` or `--os-major 10` when OL9 and OL10 repositories coexist.
 The equivalent configuration/environment variable is `REPO_OS_MAJOR`. This is an
 opt-in safety boundary: omitting it preserves the legacy all-repository behavior.
 
-- Only exact `ol9_*` or `ol10_*` repository prefixes for the selected major are
-   eligible. Unversioned repositories such as `pgdg16`, `code` and Kubernetes
-   repositories are excluded; `--repos` cannot override this boundary.
+- Versioned Oracle repositories must use the exact `ol9_*` or `ol10_*` prefix
+   for the selected major; `--repos` cannot admit another Oracle major.
+   Unversioned third-party repository IDs such as `code`, `gh-cli`, WezTerm COPR,
+   `pgdg16` and Kubernetes remain eligible on both OL9 and OL10. Automatic
+   package selection still mirrors only installed packages, not the whole repo.
+   Eligibility is based on the repository ID, not `noarch` or an RPM release tag;
+   it does not certify that a third-party package supports the selected OS.
 - The common filter applies to cleanup, package selection, metadata updates,
    full rebuild and both local and remote synchronization. Both sync modes also
    honor `--exclude-repos`, including remote mapping entries.
@@ -532,10 +536,14 @@ OL10 preparation run can use `--no-sync` while publication is being configured.
 ```
 
 These are alternative workflows, not a sequence to run on one unchanged host.
-Third-party repositories need separate explicitly reviewed handling. The boundary
-does not certify package OS compatibility, inspect every RPM's release tag, resolve
-filesystem symlink aliases, or create an independent OL9 update source. Keep
-separate major-version publication mappings and do not point them at the same
+Third-party repositories retain the existing installed-package workflow on each
+major; review their upstream OS compatibility separately. Allowing a repository
+for local maintenance does not add it to the remote sync mapping: with a mapping
+file configured, only its active entries are published. Repositories intended only
+for the golden-copy host can stay unmapped and remain outside the closed system.
+The boundary does not certify package OS compatibility, inspect every RPM's release
+tag, resolve filesystem symlink aliases, or create an independent OL9 update source.
+Keep separate major-version publication mappings and do not point them at the same
 physical destination. No live configuration is automatically changed by this release.
 
 Isolated regression coverage (temporary repositories, mocked DNF/RPM/rsync):
@@ -599,6 +607,20 @@ Released 2026-11-01.
 ```bash
 bash tests/test_system_repo_filter.sh
 ```
+
+### Third-Party Repositories Across OS Majors (v2.4.34)
+
+Released 2026-11-05.
+
+- Restore unversioned third-party repository eligibility on both OL9 and OL10
+   while retaining installed-package selection, explicit include/exclude filters,
+   and the boundary between versioned Oracle repositories.
+- Keep remote publication mapping-driven: locally maintained third-party repos
+   are not automatically added to the closed-system sync configuration.
+- Regression coverage verifies both majors, resolved `@System` package selection,
+   rebuild behavior, path guards and mapped/unmapped synchronization.
+- Validated with a successful native `mr10` build (`--os-major 10 --no-sync`):
+   Code, WezTerm and GitHub CLI were active, with no download or metadata failures.
 
 ## Limitations (Known, Accepted)
 

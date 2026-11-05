@@ -40,7 +40,24 @@ configure_os_major_boundary
 configure_os_major_boundary
 [[ "$SHARED_CACHE_PATH" == "$TEMP_DIR/cache/ol10" ]]
 should_process_repo ol10_baseos_latest
-for repo in ol9_baseos_latest ol9_UEKR8 ol100_appstream pgdg16 ol10_../ol9_appstream; do
+for REPO_OS_MAJOR in 9 10; do
+    should_process_repo "ol${REPO_OS_MAJOR}_appstream"
+    for repo in code gh-cli pgdg16 packages-microsoft-com-prod kubernetes-v1.36 'copr:copr.fedorainfracloud.org:wezfurlong:wezterm-nightly'; do
+        should_process_repo "$repo"
+    done
+    for repo in ol100_appstream OL8_appstream ol8-addons ol10_../ol9_appstream '../code' '/code' ''; do
+        if should_process_repo "$repo"; then exit 1; fi
+    done
+    REPOS=code
+    should_process_repo code
+    if should_process_repo gh-cli; then exit 1; fi
+    EXCLUDE_REPOS=code
+    if should_process_repo code; then exit 1; fi
+    REPOS=''
+    EXCLUDE_REPOS=''
+done
+REPO_OS_MAJOR=10
+for repo in ol9_baseos_latest ol9_UEKR8; do
     if should_process_repo "$repo"; then exit 1; fi
 done
 REPOS=ol9_baseos_latest
@@ -75,20 +92,21 @@ if sync_to_remote_target; then exit 1; fi
 printf 'PASS: conflicting mapping aborts before any remote writes\n'
 
 printf '%s\n' '"ol9_appstream" = "appstream/x86_64"' '"ol10_appstream" = "appstream/x86_64"' '"ol10_addons" = "addons/x86_64"' > "$REMOTE_SYNC_MAPPING_FILE"
-mkdir -p "$LOCAL_REPO_PATH/ol9_appstream" "$LOCAL_REPO_PATH/ol10_addons" "$LOCAL_REPO_PATH/pgdg16"
+mkdir -p "$LOCAL_REPO_PATH/ol9_appstream" "$LOCAL_REPO_PATH/ol10_addons" "$LOCAL_REPO_PATH/code"
 EXCLUDE_REPOS=ol10_addons
 if ! sync_to_remote_target; then exit 1; fi
 [[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 1 ]]
 grep -q 'OL10/appstream' "$TEMP_DIR/remote-dirs"
-if grep -Eq 'ol9_|addons|pgdg16' "$TEMP_DIR/transfers"; then exit 1; fi
-printf 'PASS: mapped remote sync honors major boundary and exclusions\n'
+if grep -Eq 'ol9_|addons|code' "$TEMP_DIR/transfers"; then exit 1; fi
+printf 'PASS: mapped remote sync honors boundary and exclusions; unmapped third-party repos stay local\n'
 
 rm "$TEMP_DIR/transfers" "$TEMP_DIR/remote-dirs"
 REMOTE_SYNC_MAPPING_FILE=''
 if ! sync_to_remote_target; then exit 1; fi
-[[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 2 ]]
-if grep -Eq 'ol9_|addons|pgdg16' "$TEMP_DIR/transfers"; then exit 1; fi
-printf 'PASS: unmapped remote sync honors major boundary and exclusions\n'
+[[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 3 ]]
+grep -q '/code/' "$TEMP_DIR/transfers"
+if grep -Eq 'ol9_|addons' "$TEMP_DIR/transfers"; then exit 1; fi
+printf 'PASS: unmapped remote sync includes third-party repos while honoring boundary and exclusions\n'
 
 REMOTE_SYNC_MAX_RETRIES=0
 for REMOTE_SYNC_MAPPING_FILE in "$TEMP_DIR/mapping.ps1" ''; do
@@ -114,20 +132,22 @@ printf 'PASS: mapped and unmapped previews create no directories; destination an
 SYNC_MODE=local
 rm "$TEMP_DIR/transfers"
 if ! sync_to_shared_repos; then exit 1; fi
-[[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 2 ]]
-if grep -Eq 'ol9_|addons|pgdg16' "$TEMP_DIR/transfers"; then exit 1; fi
+[[ "$(wc -l < "$TEMP_DIR/transfers")" -eq 3 ]]
+grep -q '/code/' "$TEMP_DIR/transfers"
+if grep -Eq 'ol9_|addons' "$TEMP_DIR/transfers"; then exit 1; fi
 SHARED_REPO_PATH="$TEMP_DIR/OL9"
 if validate_os_major_sync_paths; then exit 1; fi
 printf 'PASS: local sync honors boundary, exclusions and destination checks\n'
 
 FULL_REBUILD=1
-for repo in ol9_appstream ol10_appstream ol10_addons pgdg16; do
+for repo in ol9_appstream ol10_appstream ol10_addons code; do
     mkdir -p "$LOCAL_REPO_PATH/$repo/getPackage"
     touch "$LOCAL_REPO_PATH/$repo/getPackage/test.rpm"
 done
 if ! full_rebuild_repos; then exit 1; fi
 [[ ! -f "$LOCAL_REPO_PATH/ol10_appstream/getPackage/test.rpm" ]]
-for repo in ol9_appstream ol10_addons pgdg16; do
+[[ ! -f "$LOCAL_REPO_PATH/code/getPackage/test.rpm" ]]
+for repo in ol9_appstream ol10_addons; do
     [[ -f "$LOCAL_REPO_PATH/$repo/getPackage/test.rpm" ]]
 done
 REPO_OS_MAJOR=''

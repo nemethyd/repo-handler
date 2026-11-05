@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.33"
+VERSION="2.4.34"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -3826,8 +3826,12 @@ function configure_os_major_boundary() {
 function should_process_repo() {
     local repo_name="$1"
 
-    if [[ -n "$REPO_OS_MAJOR" && ! "$repo_name" =~ ^ol${REPO_OS_MAJOR}_[[:alnum:]_.-]+$ ]]; then
-        return 1
+    if [[ -n "$REPO_OS_MAJOR" ]]; then
+        [[ "$repo_name" =~ ^[[:alnum:]_][[:alnum:]_.:-]*$ ]] || return 1
+        # Unversioned third-party IDs keep the installed-package workflow.
+        if [[ "${repo_name,,}" =~ ^ol[0-9]+([_-]|$) && ! "$repo_name" =~ ^ol${REPO_OS_MAJOR}_[[:alnum:]_.-]+$ ]]; then
+            return 1
+        fi
     fi
     
     # Check if repo is in exclude list
@@ -3959,7 +3963,7 @@ function show_runtime_status() {
 
     # Show active filters if any
     if [[ -n "$REPO_OS_MAJOR" ]]; then
-        log "I" "OS-major boundary: OL${REPO_OS_MAJOR}; only matching ol${REPO_OS_MAJOR}_* repositories are eligible"
+        log "I" "OS-major boundary: OL${REPO_OS_MAJOR}; matching ol${REPO_OS_MAJOR}_* and unversioned third-party repositories are eligible"
     fi
     if [[ -n "$REPOS" ]]; then
         log "I" "Processing specific repositories: $REPOS"
