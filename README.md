@@ -1,4 +1,4 @@
-# Repo Handler Script (v2.4.34)
+# Repo Handler Script (v2.4.35)
 
 Author: Dániel Némethy (<nemethy@moderato.hu>)
 
@@ -62,6 +62,18 @@ Implemented convenience: `--write-default-config` writes a commented template `m
 12. Prunes superseded versions only when an exact installed NEVRA is present in the same repository and passes an RPM integrity check; failed or skipped replacements leave previous versions intact. Then generates repository metadata (`createrepo_c --update`) at the repository base directory (not inside `getPackage`), including manual repositories when changed.
 13. (Optional) Syncs the local repository tree to a shared path, skipping disabled repos.
 14. Produces: colored per‑package log lines, a per‑repository summary table, failed download report, unknown package report.
+
+With `--os-major`, foreign-major Oracle packages left installed after an OS
+upgrade are mirrored using the highest same-name, same-architecture candidate
+in the selected major's eligible Oracle metadata, even if its version is lower
+than the installed foreign-major version. Epoch, version and release determine
+candidate order. Missing or equally ranked cross-repository candidates stop
+package processing with an error; repository filters and manual repositories
+remain authoritative. Native packages, exact eligible metadata matches,
+third-party packages and runs without `--os-major` retain installed-NEVRA
+selection. Explicit-major source lookup does not guess OL9 repositories from
+vendor/name heuristics. This only selects mirror payload: it does not replace
+installed packages or authorize a build, publication or target installation.
 
 ## Repository Layout
 

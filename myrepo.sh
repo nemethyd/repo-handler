@@ -4,7 +4,7 @@
 
 # Developed by: Dániel Némethy (nemethy@moderato.hu)
 # Assisted iteratively by AI automation (Cline with Qwen 3.7-max; GitHub Copilot with Claude Sonnet) per documented prompts.
-# Last Updated: 2026-11-01
+# Last Updated: 2026-11-16
 
 # MIT licensing
 # Purpose:
@@ -16,7 +16,7 @@
 
 # Script version
 
-VERSION="2.4.34"
+VERSION="2.4.35"
 # Bash version guard (requires >= 4 for associative arrays used extensively)
 if [[ -z "${MYREPO_BASH_VERSION_CHECKED:-}" ]]; then
     MYREPO_BASH_VERSION_CHECKED=1
@@ -2057,6 +2057,9 @@ function determine_repo_from_installed() {
         fi
     done
     
+    # With an explicit major, only metadata/manual files establish a source.
+    [[ -z "$REPO_OS_MAJOR" ]] || return 1
+
     # Method 2: Try rpm query for vendor/packager info
     local rpm_info
     rpm_info=$(rpm -qi "$package_name" 2>/dev/null | grep -E "^(Vendor|Packager|URL)" | head -1)
@@ -2569,6 +2572,73 @@ function full_rebuild_repos() {
     log "I" "Full rebuild preparation completed"
 }
 
+function select_target_major_package() {
+    local name="$1" epoch="$2" version="$3" release="$4" arch="$5" origin="$6"
+    local original="${name}|${epoch}|${version}|${release}|${arch}|${origin}"
+    if [[ -z "$REPO_OS_MAJOR" || ! "$release" =~ \.el([0-9]+)([_.+]|$) ||
+          "${BASH_REMATCH[1]}" == "$REPO_OS_MAJOR" ]]; then
+        printf '%s\n' "$original"
+        return 0
+    fi
+
+    local exact_repo="${repo_package_lookup["${name}|${epoch}|${version}|${release}|${arch}"]:-}"
+    if [[ -n "$exact_repo" &&
+          ( ! "$exact_repo" =~ ^ol[0-9]+_ || "$exact_repo" == ol"${REPO_OS_MAJOR}"_* ) ]]; then
+        printf '%s\n' "$original"
+        return 0
+    fi
+    local vendor
+    if ! vendor=$(rpm -q --qf '%{VENDOR}' "${name}.${arch}"); then
+        log "E" "Could not identify vendor for foreign-major package: ${name}.${arch}"
+        return 1
+    fi
+    if [[ "$vendor" != *Oracle* ]]; then
+        printf '%s\n' "$original"
+        return 0
+    fi
+
+    local repo candidate_name candidate_epoch candidate_version candidate_release candidate_arch
+    local best="" best_repo="" best_epoch="" best_version="" best_release="" comparison ambiguous=0
+    for repo in "${!available_repo_packages[@]}"; do
+        [[ "$repo" == ol"${REPO_OS_MAJOR}"_* ]] || continue
+        should_process_repo "$repo" || continue
+        [[ " ${MANUAL_REPOS[*]} " != *" $repo "* ]] || continue
+        while IFS='|' read -r candidate_name candidate_epoch candidate_version candidate_release candidate_arch; do
+            [[ "$candidate_name" == "$name" && "$candidate_arch" == "$arch" &&
+               "$candidate_release" =~ \.el${REPO_OS_MAJOR}([_.+]|$) ]] || continue
+            [[ "$candidate_epoch" == "(none)" || -z "$candidate_epoch" ]] && candidate_epoch=0
+            if [[ ! "$candidate_epoch" =~ ^[0-9]+$ ||
+                  ! "$candidate_version" =~ ^[[:alnum:]._+~^]+$ ||
+                  ! "$candidate_release" =~ ^[[:alnum:]._+~^]+$ ]]; then
+                log "E" "Invalid target package metadata for $name in $repo"
+                return 1
+            fi
+            comparison=1
+            if [[ -n "$best" ]]; then
+                if ! comparison=$(rpm --eval "%{lua: local a=tonumber('$candidate_epoch'); local b=tonumber('$best_epoch'); local c=0; if a~=b then if a>b then c=1 else c=-1 end else c=rpm.vercmp('$candidate_version','$best_version'); if c==0 then c=rpm.vercmp('$candidate_release','$best_release') end end; print(c)}") ||
+                   [[ ! "$comparison" =~ ^(-1|0|1)$ ]]; then
+                    log "E" "Could not compare target package versions for $name"
+                    return 1
+                fi
+            fi
+            if [[ "$comparison" == 1 ]]; then
+                best="${name}|${candidate_epoch}|${candidate_version}|${candidate_release}|${arch}|${repo}"
+                best_repo="$repo" best_epoch="$candidate_epoch"
+                best_version="$candidate_version" best_release="$candidate_release"
+                ambiguous=0
+            elif [[ "$comparison" == 0 && "$repo" != "$best_repo" ]]; then
+                ambiguous=1
+            fi
+        done <<< "${available_repo_packages[$repo]}"
+    done
+    if [[ -z "$best" || "$ambiguous" == 1 ]]; then
+        log "E" "No unambiguous OL${REPO_OS_MAJOR} candidate for ${name}-${version}-${release}.${arch}; check repository selection and metadata"
+        return 1
+    fi
+    log "I" "Selecting OL${REPO_OS_MAJOR} mirror candidate: ${name}-${version}-${release}.${arch} -> ${best_version}-${best_release} ($best_repo); installed package unchanged"
+    printf '%s\n' "$best"
+}
+
 function gather_installed_packages() {
     # Populate GLOBAL_ENABLED_REPOS_CACHE (if not already)
     if [[ $GLOBAL_ENABLED_REPOS_CACHE_POPULATED -eq 0 ]]; then
@@ -2633,6 +2703,20 @@ function gather_installed_packages() {
         log "W" "No installed packages list produced (exit code: ${dnf_exit_code:-unknown}); continuing with empty set"
         printf ''
         return 0
+    fi
+
+    if [[ -n "$REPO_OS_MAJOR" ]]; then
+        local selected_packages="" selected_package
+        local name epoch version release arch repo
+        while IFS='|' read -r name epoch version release arch repo; do
+            [[ -n "$name" ]] || continue
+            [[ "$epoch" == "(none)" || -z "$epoch" ]] && epoch=0
+            if ! selected_package=$(select_target_major_package "$name" "$epoch" "$version" "$release" "$arch" "$repo"); then
+                return 1
+            fi
+            selected_packages+="${selected_package}"$'\n'
+        done <<< "$repoquery_result"
+        repoquery_result="${selected_packages%$'\n'}"
     fi
 
     # Filter packages by repository restrictions. Resolve @System first because
